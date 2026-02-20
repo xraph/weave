@@ -1,0 +1,97 @@
+---
+title: Document Ingestion
+description: How Weave ingests documents — the full load → chunk → embed → store pipeline.
+---
+
+`engine.Ingest` is the primary entry point for adding content to Weave. It runs the full ingestion pipeline synchronously and returns once the document is indexed.
+
+## Basic ingestion
+
+```go
+import (
+    "github.com/xraph/weave"
+    "github.com/xraph/weave/engine"
+)
+
+ctx = weave.WithTenant(ctx, "tenant-1")
+
+result, err := eng.Ingest(ctx, &engine.IngestInput{
+    CollectionID: colID,
+    Title:        "Product FAQ",
+    Content:      "Our return policy allows...",
+    Source:       "faq.md",
+    SourceType:   "text/markdown",
+})
+// result.DocumentID — TypeID of the created document
+// result.ChunkCount — number of chunks produced
+// result.State      — document.StateReady on success
+```
+
+## IngestInput fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `CollectionID` | `id.CollectionID` | Target collection (required) |
+| `Title` | `string` | Human-readable document title |
+| `Source` | `string` | Filename, URL, or identifier |
+| `SourceType` | `string` | MIME type hint — triggers the Loader if configured |
+| `Content` | `string` | Raw document content (required) |
+| `Metadata` | `map[string]string` | Custom key-value pairs stored on the document |
+
+## Ingestion pipeline
+
+When `Ingest` is called, the engine executes these steps in order:
+
+1. **Validate** — checks store, embedder, vector store, chunker, and non-empty content
+2. **Verify collection** — fetches the collection to read its chunking and embedding config
+3. **Hash content** — computes SHA-256 of the raw content for deduplication detection
+4. **Create document** — persists a document record with `State=pending`
+5. **Emit `OnIngestStarted`** — notifies extensions
+6. **Load** — if a Loader is configured and `SourceType` matches, extracts text from the reader
+7. **Chunk** — splits content using the collection's chunk strategy, size, and overlap
+8. **Emit `OnIngestChunked`** — notifies extensions with the produced chunks
+9. **Embed** — generates vectors for all chunk texts in a single batch call
+10. **Emit `OnIngestEmbedded`** — notifies extensions
+11. **Persist chunks** — stores chunk metadata in the MetadataStore
+12. **Upsert vectors** — stores embeddings and metadata in the VectorStore
+13. **Mark ready** — updates document to `State=ready` with `ChunkCount`
+14. **Emit `OnIngestCompleted`** — notifies extensions with elapsed time
+
+If any step fails, the document is set to `State=failed` with the error message, and `OnIngestFailed` is emitted.
+
+## Batch ingestion
+
+`IngestBatch` ingests multiple documents sequentially:
+
+```go
+results, err := eng.IngestBatch(ctx, []*engine.IngestInput{
+    {CollectionID: colID, Title: "Doc A", Content: "..."},
+    {CollectionID: colID, Title: "Doc B", Content: "..."},
+    {CollectionID: colID, Title: "Doc C", Content: "..."},
+})
+```
+
+Returns a partial results slice on error — results already ingested before the failure are included.
+
+## Content hash and deduplication
+
+Weave computes a SHA-256 hash of `Content` and stores it in `Document.ContentHash`. Weave does **not** automatically deduplicate — if you ingest the same content twice, two documents are created. Use the hash for your own deduplication logic:
+
+```go
+docs, _ := eng.ListDocuments(ctx, &document.ListFilter{CollectionID: colID})
+for _, doc := range docs {
+    if doc.ContentHash == myHash {
+        // already ingested
+    }
+}
+```
+
+## Reindexing
+
+When the collection's embedding model changes, re-embed all existing chunks:
+
+```go
+err := eng.ReindexCollection(ctx, colID)
+```
+
+Reindex deletes all existing vector entries for the collection, then re-embeds each document's chunks and re-upserts them. The `OnReindexStarted` and `OnReindexCompleted` hooks fire around the operation.

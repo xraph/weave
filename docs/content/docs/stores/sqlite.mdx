@@ -1,0 +1,84 @@
+---
+title: SQLite Store
+description: Lightweight SQLite MetadataStore for single-node deployments and development.
+---
+
+The `store/sqlite` package provides a SQLite-backed MetadataStore. It uses the same `bun` ORM as the PostgreSQL store and is suitable for embedded applications, CLI tools, and single-node services that don't require a separate database server.
+
+## Installation
+
+```bash
+go get github.com/xraph/weave/store/sqlite
+```
+
+Requires a CGO-enabled SQLite driver. Add the blank import for your driver of choice:
+
+```go
+import _ "github.com/mattn/go-sqlite3"    // CGO
+// or
+import _ "modernc.org/sqlite"              // pure Go
+```
+
+## Setup
+
+```go
+import (
+    "database/sql"
+    "github.com/uptrace/bun"
+    "github.com/uptrace/bun/dialect/sqlitedialect"
+    sqlitestore "github.com/xraph/weave/store/sqlite"
+)
+
+sqldb, err := sql.Open("sqlite3", "weave.db?_journal=WAL&_timeout=5000")
+if err != nil {
+    log.Fatal(err)
+}
+db := bun.NewDB(sqldb, sqlitedialect.New())
+
+store := sqlitestore.New(db)
+```
+
+Use WAL journal mode for better concurrent read performance.
+
+## Migrations
+
+```go
+if err := store.Migrate(ctx); err != nil {
+    log.Fatal("migrate:", err)
+}
+```
+
+Creates the same three tables as the PostgreSQL store (`weave_collections`, `weave_documents`, `weave_chunks`) using SQLite-compatible column types.
+
+## Pairing with a vector store
+
+SQLite does not support pgvector. Pair it with the in-memory vector store for single-node use:
+
+```go
+import (
+    sqlitestore "github.com/xraph/weave/store/sqlite"
+    memvec "github.com/xraph/weave/vectorstore/memory"
+)
+
+eng, err := engine.New(
+    engine.WithStore(sqlitestore.New(db)),
+    engine.WithVectorStore(memvec.New()),
+    engine.WithEmbedder(emb),
+)
+```
+
+For persistent vector storage with SQLite, implement a custom `VectorStore` backed by sqlite-vec or a file-based format.
+
+## Lifecycle
+
+| Method | Behaviour |
+|--------|-----------|
+| `Migrate(ctx)` | Creates tables if they don't exist |
+| `Ping(ctx)` | Runs `SELECT 1` |
+| `Close()` | Closes the underlying `*sql.DB` |
+
+## Limitations
+
+- **Single-writer** — SQLite uses database-level write locks. High write concurrency will serialize on a single connection. Use WAL mode to allow concurrent readers.
+- **No pgvector** — vector similarity search requires a separate vector store (in-memory for development, a dedicated service for production)
+- **Not horizontally scalable** — SQLite is suited for single-process or embedded use

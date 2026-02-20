@@ -1,0 +1,173 @@
+---
+title: Extension System
+description: Weave lifecycle hooks — reacting to ingestion, retrieval, collection, and reindex events.
+---
+
+Weave's extension system lets you attach callbacks to every significant engine event. Extensions are used for metrics, tracing, audit trails, alerting, and custom side-effects — without modifying the core pipeline.
+
+## Extension interface
+
+Every extension must implement the base `Extension` interface:
+
+```go
+// Package ext
+type Extension interface {
+    Name() string // unique human-readable name
+}
+```
+
+Beyond `Name()`, extensions implement only the hook interfaces they care about. All hook interfaces are optional.
+
+## Registering extensions
+
+```go
+engine, err := engine.New(
+    engine.WithStore(store),
+    engine.WithVectorStore(vecStore),
+    engine.WithEmbedder(emb),
+    engine.WithExtension(metricsExt),
+    engine.WithExtension(auditExt),
+    // repeatable — register as many as needed
+)
+```
+
+## All hook interfaces
+
+### Collection hooks
+
+```go
+// Called after a collection is created.
+type CollectionCreated interface {
+    OnCollectionCreated(ctx context.Context, col *collection.Collection) error
+}
+
+// Called after a collection is deleted.
+type CollectionDeleted interface {
+    OnCollectionDeleted(ctx context.Context, colID id.CollectionID) error
+}
+```
+
+### Ingestion hooks
+
+```go
+// Called when ingestion starts — before chunking.
+type IngestStarted interface {
+    OnIngestStarted(ctx context.Context, colID id.CollectionID, docs []*document.Document) error
+}
+
+// Called after documents are chunked.
+type IngestChunked interface {
+    OnIngestChunked(ctx context.Context, chunks []*chunk.Chunk) error
+}
+
+// Called after chunks are embedded.
+type IngestEmbedded interface {
+    OnIngestEmbedded(ctx context.Context, chunks []*chunk.Chunk) error
+}
+
+// Called when ingestion completes successfully.
+type IngestCompleted interface {
+    OnIngestCompleted(ctx context.Context, colID id.CollectionID, docCount, chunkCount int, elapsed time.Duration) error
+}
+
+// Called when ingestion fails.
+type IngestFailed interface {
+    OnIngestFailed(ctx context.Context, colID id.CollectionID, err error) error
+}
+```
+
+### Retrieval hooks
+
+```go
+// Called when a retrieval query starts.
+type RetrievalStarted interface {
+    OnRetrievalStarted(ctx context.Context, colID id.CollectionID, query string) error
+}
+
+// Called when retrieval completes successfully.
+type RetrievalCompleted interface {
+    OnRetrievalCompleted(ctx context.Context, colID id.CollectionID, resultCount int, elapsed time.Duration) error
+}
+
+// Called when retrieval fails.
+type RetrievalFailed interface {
+    OnRetrievalFailed(ctx context.Context, colID id.CollectionID, err error) error
+}
+```
+
+### Document hooks
+
+```go
+// Called after a document is deleted.
+type DocumentDeleted interface {
+    OnDocumentDeleted(ctx context.Context, docID id.DocumentID) error
+}
+```
+
+### Reindex hooks
+
+```go
+// Called when a collection reindex starts.
+type ReindexStarted interface {
+    OnReindexStarted(ctx context.Context, colID id.CollectionID) error
+}
+
+// Called when a collection reindex completes.
+type ReindexCompleted interface {
+    OnReindexCompleted(ctx context.Context, colID id.CollectionID, elapsed time.Duration) error
+}
+```
+
+### Shutdown hook
+
+```go
+// Called during graceful engine shutdown.
+type Shutdown interface {
+    OnShutdown(ctx context.Context) error
+}
+```
+
+## Implementing an extension
+
+Implement only the interfaces for the events you need:
+
+```go
+type AuditExtension struct {
+    logger *slog.Logger
+}
+
+func (e *AuditExtension) Name() string { return "audit" }
+
+func (e *AuditExtension) OnIngestCompleted(
+    ctx context.Context,
+    colID id.CollectionID,
+    docCount, chunkCount int,
+    elapsed time.Duration,
+) error {
+    e.logger.Info("ingest completed",
+        slog.String("collection_id", colID.String()),
+        slog.Int("docs", docCount),
+        slog.Int("chunks", chunkCount),
+        slog.Duration("elapsed", elapsed),
+    )
+    return nil
+}
+
+func (e *AuditExtension) OnIngestFailed(
+    ctx context.Context,
+    colID id.CollectionID,
+    err error,
+) error {
+    e.logger.Error("ingest failed",
+        slog.String("collection_id", colID.String()),
+        slog.String("error", err.Error()),
+    )
+    return nil
+}
+```
+
+## Error handling
+
+Hook errors do **not** abort the ingestion or retrieval pipeline. If `OnIngestCompleted` returns an error, it is logged at WARN level and the original operation result is returned unchanged. This ensures extensions are non-critical side-effects.
+
+The one exception is `OnIngestFailed` — it receives the ingestion error for observability but cannot prevent it from being returned to the caller.

@@ -1,0 +1,92 @@
+---
+title: Configuration
+description: Options and defaults for weave.NewEngine and the Forge extension.
+---
+
+## `weave.NewEngine` options
+
+`weave.NewEngine` accepts a variadic list of option functions:
+
+```go
+engine, err := weave.NewEngine(
+    weave.WithStore(pgStore),            // required
+    weave.WithVectorStore(pgVec),        // required
+    weave.WithEmbedder(myEmbedder),      // required
+    weave.WithChunker(myChunker),        // optional
+    weave.WithLoader(myLoader),          // optional
+    weave.WithRetriever(myRetriever),    // optional
+    weave.WithExtension(metricsExt),     // optional, repeatable
+    weave.WithLogger(slog.Default()),    // optional
+)
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `WithStore(s)` | `store.Store` | — | **Required.** Metadata store for collections, documents, chunks. |
+| `WithVectorStore(v)` | `vectorstore.VectorStore` | — | **Required.** Vector store for embeddings. |
+| `WithEmbedder(e)` | `embedder.Embedder` | — | **Required.** Embedding model implementation. |
+| `WithChunker(c)` | `chunker.Chunker` | recursive chunker | Text chunking implementation. |
+| `WithLoader(l)` | `loader.Loader` | `nil` | Document loader for binary formats. |
+| `WithRetriever(r)` | `retriever.Retriever` | built-in | Custom retrieval strategy. |
+| `WithExtension(e)` | `ext.Extension` | `nil` | Lifecycle hook extension (repeatable). |
+| `WithLogger(l)` | `*slog.Logger` | `slog.Default()` | Structured logger for internal events. |
+
+## Default Config
+
+```go
+weave.Config{
+    DefaultChunkSize:      512,                      // tokens
+    DefaultChunkOverlap:   50,                       // tokens
+    DefaultEmbeddingModel: "text-embedding-3-small",
+    DefaultChunkStrategy:  "recursive",
+    DefaultTopK:           10,
+    ShutdownTimeout:       30 * time.Second,
+    IngestConcurrency:     4,
+}
+```
+
+These defaults apply when a `CreateCollectionInput` omits the corresponding field. Per-collection configuration overrides the engine defaults.
+
+## Per-collection overrides
+
+Each collection stores its own chunking and embedding configuration:
+
+```go
+col, _ := engine.CreateCollection(ctx, weave.CreateCollectionInput{
+    Name:           "legal-docs",
+    EmbeddingModel: "text-embedding-3-large",  // override default model
+    EmbeddingDims:  3072,                      // must match model output
+    ChunkStrategy:  "fixed",                   // override default strategy
+    ChunkSize:      1024,                      // override default size
+    ChunkOverlap:   100,                       // override default overlap
+    Metadata:       map[string]string{
+        "domain": "legal",
+    },
+})
+```
+
+When ingesting documents into this collection, Weave uses the collection's configuration rather than the engine defaults.
+
+## Forge extension options
+
+The `extension.New` function accepts its own set of options:
+
+```go
+ext := extension.New(
+    extension.WithStore(pgStore),
+    extension.WithVectorStore(pgVec),
+    extension.WithEmbedder(myEmbedder),
+    extension.WithLogger(logger),
+    extension.WithDisableRoutes(false),
+    extension.WithDisableMigrate(false),
+)
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `WithStore(s)` | `store.Store` | — | **Required.** Metadata store. |
+| `WithVectorStore(v)` | `vectorstore.VectorStore` | — | **Required.** Vector store. |
+| `WithEmbedder(e)` | `embedder.Embedder` | — | **Required.** Embedder implementation. |
+| `WithLogger(l)` | `*slog.Logger` | `slog.Default()` | Logger for all Weave components. |
+| `WithDisableRoutes(b)` | `bool` | `false` | Skip HTTP route registration in the Forge router. |
+| `WithDisableMigrate(b)` | `bool` | `false` | Skip `store.Migrate` and `vectorstore.Migrate` on `Start`. |

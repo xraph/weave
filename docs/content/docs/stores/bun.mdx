@@ -1,0 +1,115 @@
+---
+title: pgvector Store
+description: Production VectorStore backed by PostgreSQL + pgvector for similarity search.
+---
+
+The `vectorstore/pgvector` package provides a production-ready VectorStore backed by PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector) extension. It stores embeddings as `vector` columns and uses IVFFlat or HNSW indexes for fast approximate nearest-neighbor search.
+
+## Prerequisites
+
+Install the pgvector extension in your PostgreSQL database:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+## Installation
+
+```bash
+go get github.com/xraph/weave/vectorstore/pgvector
+```
+
+## Setup
+
+```go
+import (
+    "github.com/jackc/pgx/v5/pgxpool"
+    pgvec "github.com/xraph/weave/vectorstore/pgvector"
+)
+
+pool, err := pgxpool.New(ctx, "postgres://user:pass@localhost:5432/mydb")
+if err != nil {
+    log.Fatal(err)
+}
+
+vecStore := pgvec.New(pool)
+```
+
+## Migrations
+
+```go
+if err := vecStore.Migrate(ctx); err != nil {
+    log.Fatal("migrate vector store:", err)
+}
+```
+
+Creates the `weave_vectors` table with a `vector` column and builds an IVFFlat index on it.
+
+## Schema
+
+```sql
+CREATE TABLE weave_vectors (
+    id          TEXT PRIMARY KEY,
+    vector      vector(1536),        -- dimensionality set at migration time
+    content     TEXT,
+    metadata    JSONB,
+    tenant_id   TEXT,
+    collection_id TEXT
+);
+
+CREATE INDEX ON weave_vectors USING ivfflat (vector vector_cosine_ops)
+    WITH (lists = 100);
+```
+
+Metadata filter (`tenant_id`, `collection_id`) is applied as a `WHERE` clause before the vector search, ensuring tenant isolation at the database level.
+
+## Using pgvector with the engine
+
+```go
+import (
+    pgstore "github.com/xraph/weave/store/postgres"
+    pgvec "github.com/xraph/weave/vectorstore/pgvector"
+)
+
+eng, err := engine.New(
+    engine.WithStore(pgstore.New(bunDB)),
+    engine.WithVectorStore(pgvec.New(pool)),
+    engine.WithEmbedder(openaiEmb),
+)
+```
+
+## VectorStore interface
+
+The pgvector store implements `vectorstore.VectorStore`:
+
+```go
+type VectorStore interface {
+    Upsert(ctx context.Context, entries []Entry) error
+    Search(ctx context.Context, vector []float32, opts *SearchOptions) ([]SearchResult, error)
+    Delete(ctx context.Context, ids []string) error
+    DeleteByMetadata(ctx context.Context, filter map[string]string) error
+}
+```
+
+`DeleteByMetadata` is used internally by `engine.DeleteDocument` and `engine.DeleteCollection` to remove all vectors associated with a document or collection.
+
+## Dimensionality
+
+The `vector` column dimension is fixed when `Migrate` creates the table. It defaults to the engine's `DefaultEmbeddingDims` (1536 for `text-embedding-3-small`). If you use a different model, set `EmbeddingDims` on the collection and ensure the vector store is initialized with the same value:
+
+```go
+vecStore := pgvec.New(pool, pgvec.WithDimensions(3072))
+```
+
+## Index types
+
+| Index | Description | When to use |
+|-------|-------------|-------------|
+| IVFFlat | Inverted file — fast build, good recall | Default; good for most workloads |
+| HNSW | Hierarchical Navigable Small World — slower build, higher recall | High-accuracy retrieval at large scale |
+
+Switch index type via:
+
+```go
+vecStore := pgvec.New(pool, pgvec.WithIndexType("hnsw"))
+```

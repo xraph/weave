@@ -1,0 +1,82 @@
+---
+title: Multi-Tenancy
+description: How Weave scopes collections, documents, and chunks to app and tenant contexts.
+---
+
+Weave is tenant-scoped by design. Every entity — collection, document, chunk — carries a `TenantID` and `AppID`. These are automatically stamped from the context at every operation, and all store queries enforce them.
+
+## Setting the scope
+
+Use the `weave.WithTenant` and `weave.WithApp` helpers to inject scope into a context:
+
+```go
+import "github.com/xraph/weave"
+
+ctx = weave.WithTenant(ctx, "tenant-1")
+ctx = weave.WithApp(ctx, "myapp")
+```
+
+Both values are propagated automatically — you do not need to pass them to individual `engine.*` calls. Every ingestion, retrieval, collection create, and delete operation reads the tenant and app from the context.
+
+## Scope enforcement
+
+The engine calls `weave.TenantFromContext(ctx)` and `weave.AppFromContext(ctx)` before every store operation and injects the values as WHERE clause filters:
+
+```sql
+-- MetadataStore query (internal)
+SELECT * FROM weave_collections
+WHERE tenant_id = $1 AND app_id = $2 AND id = $3
+```
+
+If `TenantID` is empty, the engine returns `ErrInvalidInput` — operations without a tenant scope are rejected.
+
+If a caller passes a collection ID that belongs to a different tenant, the store returns no rows, and the engine surfaces `ErrCollectionNotFound`. **No cross-tenant data is accessible**, even if the caller knows an ID from another tenant.
+
+## AppID and TenantID
+
+| Field | Purpose |
+|-------|---------|
+| `TenantID` | Isolates data between tenants in a multi-tenant SaaS |
+| `AppID` | Further namespace within a tenant (e.g. multiple apps per account) |
+
+Both are strings — use whatever format suits your application (UUID, slug, etc.). A typical setup:
+
+```go
+// SaaS: per-customer isolation
+ctx = weave.WithTenant(ctx, customer.ID)
+ctx = weave.WithApp(ctx, "weave-service")
+
+// Mono-tenant: use a constant tenant
+ctx = weave.WithTenant(ctx, "default")
+ctx = weave.WithApp(ctx, "myapp")
+```
+
+## Vector store isolation
+
+The vector store layer also enforces tenant isolation. When upserting vectors, Weave stores `tenant_id` and `collection_id` as metadata on each vector entry. The `VectorStore.Search` call filters by both fields:
+
+```go
+// Internal — callers never call this directly
+vectorStore.Search(ctx, queryVector, &vectorstore.SearchOptions{
+    Filter: map[string]string{
+        "tenant_id":     tenantID,
+        "collection_id": collectionID,
+    },
+    TopK: topK,
+})
+```
+
+This ensures that even if two tenants have documents with identical content, their vector searches do not cross-contaminate.
+
+## Background jobs
+
+For background jobs (reindexing, cleanup), inject the tenant scope explicitly from a stored tenant ID rather than relying on an HTTP request context:
+
+```go
+func reindexTenant(engine *weave.Engine, tenantID, colID string) error {
+    ctx := context.Background()
+    ctx = weave.WithTenant(ctx, tenantID)
+    ctx = weave.WithApp(ctx, "myapp")
+    return engine.Reindex(ctx, colID)
+}
+```

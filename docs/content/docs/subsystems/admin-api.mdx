@@ -1,0 +1,253 @@
+---
+title: HTTP API
+description: The Weave REST API — 12 endpoints for collections, documents, retrieval, and search.
+---
+
+Weave exposes a Forge-native HTTP API under `/v1`. All endpoints expect and return JSON. Tenant isolation is enforced through middleware — the tenant and app are read from request headers or JWT claims depending on your Forge configuration.
+
+## Registering routes
+
+```go
+import "github.com/xraph/weave/api"
+
+weaveAPI := api.New(eng, router)
+weaveAPI.RegisterRoutes(router)
+```
+
+Or use the Forge extension, which registers routes automatically:
+
+```go
+ext := extension.New(
+    extension.WithStore(pgStore),
+    extension.WithVectorStore(pgVec),
+    extension.WithEmbedder(emb),
+)
+forge.RegisterExtension(ext)
+```
+
+## Collection endpoints
+
+### `POST /v1/collections`
+
+Create a new collection.
+
+**Request body:**
+
+```json
+{
+  "name": "product-docs",
+  "description": "Product documentation",
+  "embedding_model": "text-embedding-3-small",
+  "embedding_dims": 1536,
+  "chunk_strategy": "recursive",
+  "chunk_size": 512,
+  "chunk_overlap": 50,
+  "metadata": { "domain": "support" }
+}
+```
+
+**Response:** `201 Created` — `collection.Collection`
+
+---
+
+### `GET /v1/collections`
+
+List collections for the current tenant.
+
+**Query params:** `limit`, `offset`
+
+**Response:** `200 OK` — `[]*collection.Collection`
+
+---
+
+### `GET /v1/collections/:collectionId`
+
+Get a collection by ID.
+
+**Response:** `200 OK` — `collection.Collection`
+
+---
+
+### `DELETE /v1/collections/:collectionId`
+
+Delete a collection and all its documents and chunks. Vectors are also removed from the vector store.
+
+**Response:** `204 No Content`
+
+---
+
+### `GET /v1/collections/:collectionId/stats`
+
+Get aggregate statistics for a collection.
+
+**Response:** `200 OK`
+
+```json
+{
+  "collection_id": "col_01h455vb...",
+  "collection_name": "product-docs",
+  "document_count": 42,
+  "chunk_count": 1204,
+  "embedding_model": "text-embedding-3-small",
+  "chunk_strategy": "recursive"
+}
+```
+
+---
+
+### `POST /v1/collections/:collectionId/reindex`
+
+Re-embed and re-store all chunks in the collection. Use after changing the embedding model.
+
+**Response:** `204 No Content`
+
+---
+
+## Document endpoints
+
+### `POST /v1/collections/:collectionId/documents`
+
+Ingest a single document — runs the full load → chunk → embed → store pipeline.
+
+**Request body:**
+
+```json
+{
+  "title": "Return Policy",
+  "content": "Our return policy allows...",
+  "source": "policy.md",
+  "source_type": "text/markdown",
+  "metadata": { "category": "support" }
+}
+```
+
+**Response:** `201 Created`
+
+```json
+{
+  "document_id": "doc_01h455vb...",
+  "chunk_count": 12,
+  "state": "ready"
+}
+```
+
+---
+
+### `POST /v1/collections/:collectionId/documents/batch`
+
+Ingest multiple documents in a single request.
+
+**Request body:**
+
+```json
+{
+  "documents": [
+    { "title": "Doc A", "content": "..." },
+    { "title": "Doc B", "content": "..." }
+  ]
+}
+```
+
+**Response:** `201 Created` — `[]*engine.IngestResult`
+
+---
+
+### `GET /v1/collections/:collectionId/documents`
+
+List documents in a collection.
+
+**Query params:** `state` (`pending` | `processing` | `ready` | `failed`), `limit`, `offset`
+
+**Response:** `200 OK` — `[]*document.Document`
+
+---
+
+### `GET /v1/documents/:documentId`
+
+Get a document by ID.
+
+**Response:** `200 OK` — `document.Document`
+
+---
+
+### `DELETE /v1/documents/:documentId`
+
+Delete a document and all its chunks from both metadata and vector stores.
+
+**Response:** `204 No Content`
+
+---
+
+## Retrieval endpoints
+
+### `POST /v1/collections/:collectionId/retrieve`
+
+Perform semantic retrieval within a collection.
+
+**Request body:**
+
+```json
+{
+  "query": "What is the return policy?",
+  "top_k": 5,
+  "min_score": 0.75,
+  "strategy": "similarity"
+}
+```
+
+**Response:** `200 OK`
+
+```json
+[
+  {
+    "chunk": {
+      "id": "chunk_01h455vb...",
+      "content": "Our return policy allows...",
+      "document_id": "doc_01h455vb...",
+      "collection_id": "col_01h455vb...",
+      "index": 0,
+      "token_count": 48
+    },
+    "score": 0.94
+  }
+]
+```
+
+---
+
+### `POST /v1/search`
+
+Hybrid search across one or more collections.
+
+**Request body:**
+
+```json
+{
+  "query": "refund timeline",
+  "collections": ["col_01h455vb...", "col_02x..."],
+  "top_k": 10,
+  "min_score": 0.7,
+  "strategy": "mmr"
+}
+```
+
+**Response:** `200 OK` — `[]engine.ScoredChunk` (same schema as retrieve, merged and re-ranked)
+
+---
+
+## Error responses
+
+All endpoints return standard error JSON on failure:
+
+```json
+{
+  "error": "collection not found",
+  "code": "NOT_FOUND"
+}
+```
+
+| HTTP status | Condition |
+|-------------|-----------|
+| `400` | Invalid input, missing required field |
+| `404` | Collection or document not found for this tenant |
+| `500` | Internal error (store, embedder, vector store) |

@@ -1,0 +1,102 @@
+---
+title: Embedder
+description: The Embedder interface and built-in implementations for generating vector embeddings.
+---
+
+The embedder converts text into numerical vectors. Weave calls it in two places: during ingestion (to embed chunks) and during retrieval (to embed the query).
+
+## Embedder interface
+
+```go
+// Package embedder
+type Embedder interface {
+    // Embed generates embeddings for a batch of texts.
+    Embed(ctx context.Context, texts []string) ([]EmbedResult, error)
+
+    // Dimensions returns the vector dimensionality.
+    Dimensions() int
+}
+
+type EmbedResult struct {
+    Vector     []float32 `json:"vector"`
+    TokenCount int       `json:"token_count"`
+}
+```
+
+Register with `engine.WithEmbedder(myEmbedder)`. An embedder is required — the engine returns `ErrNoEmbedder` if none is configured.
+
+## Built-in implementations
+
+### OpenAI
+
+```go
+import "github.com/xraph/weave/embedder"
+
+emb := embedder.NewOpenAI(
+    embedder.WithOpenAIKey(os.Getenv("OPENAI_API_KEY")),
+    embedder.WithOpenAIModel("text-embedding-3-small"), // default
+)
+// emb.Dimensions() == 1536
+```
+
+Common models:
+
+| Model | Dimensions | Use case |
+|-------|-----------|----------|
+| `text-embedding-3-small` | 1536 | Default — fast, cost-efficient |
+| `text-embedding-3-large` | 3072 | Higher accuracy for complex retrieval |
+| `text-embedding-ada-002` | 1536 | Legacy, prefer `3-small` |
+
+### Local / custom
+
+```go
+emb := embedder.NewLocal(myModel)
+```
+
+`NewLocal` wraps any model that exposes an `Infer(texts []string) ([][]float32, error)` method.
+
+## Matching embedder to collection
+
+The collection's `EmbeddingModel` and `EmbeddingDims` fields are stored as metadata. They are **not** used to select or configure the embedder automatically — you must ensure the engine's embedder matches the model name and dimensions stored in the collection.
+
+When you change models, run `engine.ReindexCollection(ctx, colID)` to re-embed all chunks with the new model.
+
+## Batch embedding
+
+`Embed` always receives a slice of texts. The embedder should process them in a single API call or batch request:
+
+```go
+// During ingestion — all chunk texts in one call
+embedResults, err := embedder.Embed(ctx, []string{
+    "Our return policy allows...",
+    "Items must be returned within 30 days...",
+    // ...one entry per chunk
+})
+```
+
+`embedResults[i].Vector` corresponds to `texts[i]`. The engine pairs vectors with chunks by index.
+
+## Custom embedder
+
+Implement `embedder.Embedder` to use any model:
+
+```go
+type MyEmbedder struct {
+    client *myMLClient
+    dims   int
+}
+
+func (e *MyEmbedder) Embed(ctx context.Context, texts []string) ([]embedder.EmbedResult, error) {
+    vecs, err := e.client.Embed(ctx, texts)
+    if err != nil {
+        return nil, err
+    }
+    results := make([]embedder.EmbedResult, len(vecs))
+    for i, v := range vecs {
+        results[i] = embedder.EmbedResult{Vector: v}
+    }
+    return results, nil
+}
+
+func (e *MyEmbedder) Dimensions() int { return e.dims }
+```

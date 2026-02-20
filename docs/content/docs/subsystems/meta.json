@@ -1,0 +1,14 @@
+{
+  "title": "Components",
+  "pages": [
+    "recording",
+    "verification",
+    "erasure",
+    "compliance",
+    "sinks",
+    "retention",
+    "plugins",
+    "observability",
+    "admin-api"
+  ]
+}

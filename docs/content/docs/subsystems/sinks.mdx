@@ -1,0 +1,101 @@
+---
+title: Document Loader
+description: The Loader interface and built-in format handlers for extracting text from documents.
+---
+
+The Loader is an optional component that extracts text from binary or structured document formats before chunking. When no Loader is configured, Weave treats `IngestInput.Content` as plain text directly.
+
+## When the Loader is used
+
+The engine calls the Loader when **both** conditions are true:
+
+1. A Loader is registered (`engine.WithLoader(myLoader)`)
+2. `IngestInput.SourceType` is a MIME type the Loader `Supports`
+
+```go
+result, err := eng.Ingest(ctx, &engine.IngestInput{
+    CollectionID: colID,
+    Content:      rawMarkdownBytes,   // raw bytes as a string
+    SourceType:   "text/markdown",    // triggers the Markdown loader
+})
+```
+
+If `SourceType` is empty or the Loader returns `Supports(mimeType) == false`, the content is used as-is.
+
+## Loader interface
+
+```go
+// Package loader
+type Loader interface {
+    // Load extracts text from the reader.
+    Load(ctx context.Context, reader io.Reader) (*LoadResult, error)
+
+    // Supports returns true if this loader handles the given MIME type.
+    Supports(mimeType string) bool
+}
+
+type LoadResult struct {
+    Content  string            // extracted plain text
+    Metadata map[string]string // format-specific metadata (title, author, page count, etc.)
+    MimeType string            // detected MIME type
+}
+```
+
+## Built-in loaders
+
+| Loader | Package | MIME types handled |
+|--------|---------|-------------------|
+| Plain text | `loader/text` | `text/plain` |
+| Markdown | `loader/markdown` | `text/markdown`, `text/x-markdown` |
+| HTML | `loader/html` | `text/html` |
+| CSV | `loader/csv` | `text/csv`, `application/csv` |
+| JSON | `loader/json` | `application/json` |
+| URL | `loader/url` | Fetches and extracts from a URL |
+| Directory | `loader/directory` | Recursively loads files from a directory path |
+
+## Custom loader
+
+Implement `loader.Loader` to support additional formats:
+
+```go
+type PDFLoader struct{}
+
+func (l *PDFLoader) Supports(mime string) bool {
+    return mime == "application/pdf"
+}
+
+func (l *PDFLoader) Load(ctx context.Context, r io.Reader) (*loader.LoadResult, error) {
+    data, err := io.ReadAll(r)
+    if err != nil {
+        return nil, err
+    }
+    text, meta, err := extractPDF(data)
+    if err != nil {
+        return nil, err
+    }
+    return &loader.LoadResult{
+        Content:  text,
+        MimeType: "application/pdf",
+        Metadata: meta,
+    }, nil
+}
+```
+
+Register it: `engine.WithLoader(&PDFLoader{})`.
+
+## Loader metadata
+
+`LoadResult.Metadata` is merged into the document's metadata after loading. Use it to surface format-specific information (page count, document title, author) alongside your chunk content for filtering or display.
+
+## Loading without the engine
+
+You can also call loaders directly, outside of an ingestion flow:
+
+```go
+import "github.com/xraph/weave/loader"
+
+mdLoader := loader.NewMarkdown()
+result, err := mdLoader.Load(ctx, strings.NewReader(markdownText))
+// result.Content — stripped plain text
+// result.Metadata — frontmatter key-value pairs
+```

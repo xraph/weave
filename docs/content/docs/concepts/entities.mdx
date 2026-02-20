@@ -1,0 +1,112 @@
+---
+title: Entities
+description: The core data types in Weave — Collection, Document, and Chunk.
+---
+
+Weave operates on three primary entities. All entities embed a `BaseEntity` with `CreatedAt` and `UpdatedAt` timestamps.
+
+## Collection
+
+A collection is a named container for documents with shared embedding and chunking configuration.
+
+```go
+type Collection struct {
+    ID             string            // TypeID prefix: col_
+    TenantID       string
+    AppID          string
+    Name           string
+    Description    string
+    EmbeddingModel string            // e.g. "text-embedding-3-small"
+    EmbeddingDims  int               // e.g. 1536
+    ChunkStrategy  string            // "recursive" or "fixed"
+    ChunkSize      int               // tokens
+    ChunkOverlap   int               // tokens
+    Metadata       map[string]string // custom key-value pairs
+    DocumentCount  int               // denormalized counter
+    ChunkCount     int               // denormalized counter
+    CreatedAt      time.Time
+    UpdatedAt      time.Time
+}
+```
+
+Collections are scoped to a tenant — a collection ID from one tenant cannot be accessed by another tenant even if the caller knows the ID.
+
+## Document
+
+A document represents a piece of content ingested into a collection. It tracks the ingestion lifecycle through a state machine.
+
+```go
+type Document struct {
+    ID            string            // TypeID prefix: doc_
+    CollectionID  string
+    TenantID      string
+    AppID         string
+    Title         string
+    Source        string            // filename, URL, or identifier
+    SourceType    string            // MIME type hint
+    ContentHash   string            // SHA-256 of raw content
+    ContentLength int64             // bytes
+    ChunkCount    int               // number of chunks created
+    State         string            // pending | processing | ready | failed
+    Error         string            // set on State=failed
+    Metadata      map[string]string
+    CreatedAt     time.Time
+    UpdatedAt     time.Time
+}
+```
+
+### Document states
+
+| State | Description |
+|-------|-------------|
+| `pending` | Document created, awaiting processing |
+| `processing` | Currently being chunked and embedded |
+| `ready` | Fully processed and searchable |
+| `failed` | Ingestion failed; `Error` field contains reason |
+
+Documents transition `pending → processing → ready` on success, or `pending → processing → failed` on error. The `ContentHash` (SHA-256 of the raw content) enables deduplication detection — Weave does not automatically deduplicate, but you can check hashes.
+
+## Chunk
+
+A chunk is a text fragment created from a document during ingestion. Chunks are the unit of vector storage and semantic retrieval.
+
+```go
+type Chunk struct {
+    ID           string            // TypeID prefix: chunk_
+    DocumentID   string
+    CollectionID string
+    TenantID     string
+    AppID        string
+    Content      string            // the chunk text
+    Index        int               // position within the document
+    StartOffset  int               // byte offset in original content
+    EndOffset    int               // byte offset in original content
+    TokenCount   int               // number of tokens in chunk
+    ParentID     string            // parent chunk ID (hierarchical chunking)
+    Metadata     map[string]string
+    CreatedAt    time.Time
+}
+```
+
+Chunks are immutable after creation. To update a document's chunks, delete the document and re-ingest. To change the embedding model, use `engine.Reindex(ctx, collectionID)`.
+
+## ScoredChunk
+
+`engine.Retrieve` returns `[]weave.ScoredChunk`, which wraps a `Chunk` with a relevance score:
+
+```go
+type ScoredChunk struct {
+    Chunk
+    Score float32 // cosine similarity score, range 0–1
+}
+```
+
+Results are sorted by `Score` descending. Use `RetrieveInput.MinScore` to filter out low-confidence results:
+
+```go
+results, _ := engine.Retrieve(ctx, col.ID, &weave.RetrieveInput{
+    Query:    "refund timeline",
+    TopK:     10,
+    MinScore: 0.75, // only return chunks with score >= 0.75
+})
+```

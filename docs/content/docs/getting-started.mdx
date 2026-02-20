@@ -1,0 +1,168 @@
+---
+title: Getting Started
+description: Install Weave and ingest your first document in under five minutes.
+---
+
+## Prerequisites
+
+- Go 1.24 or later
+- A Go module (`go mod init`)
+
+## Install
+
+```bash
+go get github.com/xraph/weave
+```
+
+## Step 1: Create the engine
+
+Every Weave instance requires a metadata store, a vector store, and an embedder. For development, use the built-in in-memory implementations:
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    "github.com/xraph/weave"
+    memstore "github.com/xraph/weave/store/memory"
+    memvec "github.com/xraph/weave/vectorstore/memory"
+)
+
+func main() {
+    ctx := context.Background()
+
+    engine, err := weave.NewEngine(
+        weave.WithStore(memstore.New()),
+        weave.WithVectorStore(memvec.New()),
+        weave.WithEmbedder(myEmbedder), // implement weave.Embedder
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    _ = engine
+}
+```
+
+## Step 2: Set up a scoped context
+
+Weave extracts the tenant ID and app ID from the context and stamps them onto every collection, document, and chunk:
+
+```go
+ctx = weave.WithTenant(ctx, "tenant-1")
+ctx = weave.WithApp(ctx, "myapp")
+```
+
+`WithTenant` is required for multi-tenant isolation. All ingestion and retrieval operations are automatically scoped — cross-tenant access is structurally impossible.
+
+## Step 3: Create a collection
+
+A collection holds documents with shared chunking and embedding configuration:
+
+```go
+col, err := engine.CreateCollection(ctx, weave.CreateCollectionInput{
+    Name:          "product-docs",
+    EmbeddingModel: "text-embedding-3-small",
+    ChunkStrategy: "recursive",
+    ChunkSize:     512,
+    ChunkOverlap:  50,
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println("created collection:", col.ID)
+```
+
+## Step 4: Ingest a document
+
+```go
+doc, err := engine.Ingest(ctx, col.ID, weave.IngestInput{
+    Title:   "Return Policy",
+    Content: "Our return policy allows returns within 30 days of purchase...",
+    Source:  "faq.md",
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("state=%s chunks=%d\n", doc.State, doc.ChunkCount)
+// state=ready chunks=4
+```
+
+Ingest runs the full pipeline: chunk the content, generate embeddings, persist metadata, and upsert vectors. When it returns, `doc.State` is `"ready"`.
+
+## Step 5: Retrieve relevant chunks
+
+```go
+import "github.com/xraph/weave"
+
+results, err := engine.Retrieve(ctx, col.ID, &weave.RetrieveInput{
+    Query:    "How long can I return items?",
+    TopK:     3,
+    MinScore: 0.7,
+})
+if err != nil {
+    log.Fatal(err)
+}
+for _, r := range results {
+    fmt.Printf("[%.2f] %s\n", r.Score, r.Content[:80])
+}
+```
+
+Results are `[]weave.ScoredChunk` sorted by relevance score descending. Available fields:
+
+| Field | Description |
+|-------|-------------|
+| `r.Score` | Relevance score (0–1) |
+| `r.Content` | Chunk text content |
+| `r.DocumentID` | Source document TypeID |
+| `r.Metadata` | Custom metadata map |
+| `r.Index` | Chunk position in document |
+
+## Step 6: Batch ingest (optional)
+
+```go
+docs, err := engine.IngestBatch(ctx, col.ID, []weave.IngestInput{
+    {Title: "FAQ", Content: "..."},
+    {Title: "Terms", Content: "..."},
+    {Title: "Privacy", Content: "..."},
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("ingested %d documents\n", len(docs))
+```
+
+Batch ingestion processes documents concurrently up to `IngestConcurrency` (default: 4).
+
+## Step 7: Switch to PostgreSQL for production
+
+```go
+import (
+    "github.com/xraph/weave/store/postgres"
+    "github.com/xraph/weave/vectorstore/pgvector"
+)
+
+pgStore := postgres.New(pool)
+if err := pgStore.Migrate(ctx); err != nil {
+    log.Fatal(err)
+}
+
+pgVec := pgvector.New(pool)
+if err := pgVec.Migrate(ctx); err != nil {
+    log.Fatal(err)
+}
+
+engine, err := weave.NewEngine(
+    weave.WithStore(pgStore),
+    weave.WithVectorStore(pgVec),
+    weave.WithEmbedder(myEmbedder),
+)
+```
+
+## Next steps
+
+- [Architecture](/docs/architecture) — Understand how the packages fit together
+- [Document Ingestion](/docs/subsystems/recording) — Full ingestion API reference
+- [Semantic Retrieval](/docs/subsystems/verification) — Retrieval strategies and options
+- [Stores](/docs/stores/postgres) — Connect to PostgreSQL for production

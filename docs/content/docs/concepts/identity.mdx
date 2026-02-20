@@ -1,0 +1,61 @@
+---
+title: Identity (TypeID)
+description: How Weave uses type-safe, prefix-qualified identifiers for every entity.
+---
+
+Weave uses [TypeID](https://github.com/jetify-com/typeid) for all entity identifiers. TypeIDs are type-prefixed, K-sortable, UUIDv7-based identifiers.
+
+## What TypeID looks like
+
+```
+col_01h455vbjdx6ycf56rnatbxqkh
+doc_01h455vbjdx6ycf56rnatbxqki
+chunk_01h455vbjdx6ycf56rnatbxqkj
+```
+
+The prefix encodes the entity type. The suffix is a base32-encoded UUIDv7, which is K-sortable (lexicographically ordered by creation time) and globally unique.
+
+## Entity prefixes
+
+| Entity | Prefix | Example |
+|--------|--------|---------|
+| Collection | `col_` | `col_01h455vbjdx6ycf56rnatbxqkh` |
+| Document | `doc_` | `doc_01h455vbjdx6ycf56rnatbxqki` |
+| Chunk | `chunk_` | `chunk_01h455vbjdx6ycf56rnatbxqkj` |
+
+## Type safety
+
+The `id` package provides typed ID functions. Passing a `doc_` ID where a `col_` ID is expected is a compile-time error:
+
+```go
+import "github.com/xraph/weave/id"
+
+colID := id.NewCollection()  // returns id.CollectionID
+docID := id.NewDocument()    // returns id.DocumentID
+
+// This is a compile error — type mismatch
+engine.GetDocument(ctx, colID) // colID is not id.DocumentID
+```
+
+## Parsing and validating IDs
+
+```go
+import "github.com/xraph/weave/id"
+
+// Parse an ID from a string (e.g. from HTTP request)
+colID, err := id.ParseCollection("col_01h455vbjdx6ycf56rnatbxqkh")
+if err != nil {
+    // not a valid collection ID
+}
+
+// Convert to string for storage or response
+fmt.Println(colID.String())
+```
+
+## K-sortability
+
+Because TypeIDs embed UUIDv7, they are K-sortable: IDs created later sort after IDs created earlier. This means:
+- Database indexes on ID columns are naturally insertion-ordered.
+- You can range scan by ID to page through results in creation order without a separate `created_at` index.
+
+Weave's store implementations rely on this property for efficient pagination.

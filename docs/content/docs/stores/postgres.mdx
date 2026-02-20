@@ -1,0 +1,94 @@
+---
+title: PostgreSQL Store
+description: Production MetadataStore backed by PostgreSQL using bun ORM.
+---
+
+The `store/postgres` package provides a production-ready MetadataStore for collections, documents, and chunks using PostgreSQL and the `bun` ORM.
+
+## Installation
+
+```bash
+go get github.com/xraph/weave/store/postgres
+```
+
+## Setup
+
+```go
+import (
+    "database/sql"
+    "github.com/uptrace/bun"
+    "github.com/uptrace/bun/dialect/pgdialect"
+    "github.com/uptrace/bun/driver/pgdriver"
+    pgstore "github.com/xraph/weave/store/postgres"
+)
+
+sqldb := sql.OpenDB(pgdriver.NewConnector(
+    pgdriver.WithDSN("postgres://user:pass@localhost:5432/mydb?sslmode=disable"),
+))
+db := bun.NewDB(sqldb, pgdialect.New())
+
+store := pgstore.New(db)
+```
+
+Pass the store to the engine:
+
+```go
+eng, err := engine.New(
+    engine.WithStore(store),
+    engine.WithVectorStore(pgvec.New(pool)), // see pgvector doc
+    engine.WithEmbedder(emb),
+)
+```
+
+## Migrations
+
+Call `store.Migrate(ctx)` before starting the engine to create the required tables:
+
+```go
+if err := store.Migrate(ctx); err != nil {
+    log.Fatal("migrate:", err)
+}
+```
+
+This is idempotent — running it on an already-migrated database is safe.
+
+## Schema
+
+The PostgreSQL store creates three tables:
+
+| Table | Description |
+|-------|-------------|
+| `weave_collections` | Collection metadata — name, model, chunk config, counters |
+| `weave_documents` | Document records — state, hashes, source info |
+| `weave_chunks` | Chunk text and byte offsets |
+
+All tables include `tenant_id` and `app_id` columns, and every query adds `WHERE tenant_id = $n AND app_id = $m` filters automatically.
+
+## Connection pool configuration
+
+The PostgreSQL store accepts any `*bun.DB`. Configure the underlying `sql.DB` pool to match your workload:
+
+```go
+sqldb.SetMaxOpenConns(25)
+sqldb.SetMaxIdleConns(5)
+sqldb.SetConnMaxLifetime(5 * time.Minute)
+```
+
+## Lifecycle
+
+| Method | Behaviour |
+|--------|-----------|
+| `Migrate(ctx)` | Creates tables and indexes if they don't exist |
+| `Ping(ctx)` | Runs `SELECT 1` to check connectivity |
+| `Close()` | Closes the underlying `*sql.DB` |
+
+## Forge extension
+
+When using Weave as a Forge extension, migrations run automatically at startup unless disabled:
+
+```go
+ext := extension.New(
+    extension.WithStore(store),
+    extension.WithDisableMigrate(false), // default — runs Migrate on Start
+)
+```

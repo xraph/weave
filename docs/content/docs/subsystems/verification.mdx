@@ -1,0 +1,111 @@
+---
+title: Semantic Retrieval
+description: How Weave retrieves relevant chunks — similarity, MMR, hybrid, and cross-collection search.
+---
+
+`engine.Retrieve` is the primary retrieval interface. It embeds the query, searches the vector store, and returns scored chunks ranked by relevance.
+
+## Basic retrieval
+
+```go
+import (
+    "github.com/xraph/weave"
+    "github.com/xraph/weave/engine"
+)
+
+ctx = weave.WithTenant(ctx, "tenant-1")
+
+results, err := eng.Retrieve(ctx, "What is the return policy?",
+    engine.WithCollection(colID),
+    engine.WithTopK(5),
+    engine.WithMinScore(0.75),
+)
+
+for _, r := range results {
+    fmt.Printf("[%.2f] %s\n", r.Score, r.Chunk.Content[:80])
+}
+```
+
+## Retrieve options
+
+| Option | Description |
+|--------|-------------|
+| `engine.WithCollection(colID)` | Restrict results to a specific collection |
+| `engine.WithTopK(k)` | Maximum number of results (default: `Config.DefaultTopK`) |
+| `engine.WithMinScore(score)` | Drop results with score below threshold |
+| `engine.WithStrategy(name)` | Override the retrieval strategy: `"similarity"`, `"mmr"`, `"hybrid"` |
+| `engine.WithTenantID(id)` | Explicit tenant — defaults to context value |
+
+## ScoredChunk
+
+`Retrieve` returns `[]engine.ScoredChunk`:
+
+```go
+type ScoredChunk struct {
+    Chunk *chunk.Chunk `json:"chunk"`
+    Score float64      `json:"score"`
+}
+```
+
+Results are sorted by `Score` descending. `Score` is cosine similarity in the range `[0, 1]`. Use `WithMinScore` to filter out low-confidence results.
+
+## Retrieval pipeline
+
+When `Retrieve` is called:
+
+1. Emit `OnRetrievalStarted`
+2. If a custom `Retriever` is configured, delegate to it entirely
+3. Otherwise, embed the query with the engine's embedder
+4. Search the vector store with `filter["collection_id"]` and `filter["tenant_id"]`
+5. Map search results to `[]ScoredChunk`
+6. Emit `OnRetrievalCompleted` with result count and elapsed time
+
+If the search fails, `OnRetrievalFailed` is emitted before the error is returned.
+
+## Retrieval strategies
+
+Plug in a custom `retriever.Retriever` via `engine.WithRetriever(r)` to use different strategies:
+
+| Strategy | Package | Description |
+|----------|---------|-------------|
+| `similarity` | `retriever/similarity` | Default cosine similarity search |
+| `mmr` | `retriever/mmr` | Maximal Marginal Relevance — diversity-optimized results |
+| `hybrid` | `retriever/hybrid` | Combines dense vector search with keyword matching |
+| `reranker` | `retriever/reranker` | Two-stage: retrieve many, re-rank with a cross-encoder |
+
+## Cross-collection search
+
+`HybridSearch` retrieves across one or more collections and merges results:
+
+```go
+results, err := eng.HybridSearch(ctx, "return policy",
+    &engine.HybridSearchParams{
+        Collections: []id.CollectionID{col1, col2},
+        TopK:        10,
+        MinScore:    0.7,
+    },
+)
+```
+
+When `Collections` is non-empty, Weave retrieves from each collection independently, merges the results, re-sorts by score, and trims to `TopK`. When empty, it searches across all collections visible to the current tenant.
+
+## Retriever interface
+
+Implement `retriever.Retriever` to plug in a completely custom retrieval strategy:
+
+```go
+type Retriever interface {
+    Retrieve(ctx context.Context, query string, opts *Options) ([]Result, error)
+}
+
+// Options provides all context the retriever needs:
+type Options struct {
+    CollectionID string
+    TenantKey    string
+    TopK         int
+    MinScore     float64
+    Filter       map[string]string
+}
+```
+
+Register with `engine.WithRetriever(myRetriever)`.

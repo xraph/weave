@@ -1,0 +1,52 @@
+---
+title: Error Handling
+description: Sentinel errors returned by Weave operations.
+---
+
+## Sentinel errors
+
+Weave defines sentinel errors in the root package. Use `errors.Is` to check for them:
+
+```go
+import (
+    "errors"
+    "github.com/xraph/weave"
+)
+
+doc, err := engine.Ingest(ctx, col.ID, input)
+if errors.Is(err, weave.ErrCollectionNotFound) {
+    // collection does not exist for this tenant
+}
+```
+
+| Error | Description |
+|-------|-------------|
+| `weave.ErrCollectionNotFound` | No collection with the given ID exists for the current tenant |
+| `weave.ErrDocumentNotFound` | No document with the given ID exists |
+| `weave.ErrChunkNotFound` | No chunk with the given ID exists |
+| `weave.ErrEmptyContent` | Ingest was called with empty content |
+| `weave.ErrInvalidInput` | Required field is missing or malformed |
+| `weave.ErrEmbedderRequired` | No embedder was configured on the engine |
+| `weave.ErrStoreRequired` | No metadata store was configured on the engine |
+| `weave.ErrVectorStoreRequired` | No vector store was configured on the engine |
+
+## Document state errors
+
+When `doc.State == "failed"`, the ingestion error is persisted in `doc.Error`:
+
+```go
+doc, _ := engine.GetDocument(ctx, docID)
+if doc.State == "failed" {
+    fmt.Println("ingestion failed:", doc.Error)
+}
+```
+
+This allows you to inspect failure reasons without polling or relying on in-process error propagation, which is useful when ingestion runs asynchronously.
+
+## Store errors
+
+Metadata and vector store implementations may return their own errors (e.g. database connection errors). These are propagated directly from `engine.Ingest` or `engine.Retrieve` without wrapping, so you can inspect them with the driver-specific error types if needed.
+
+## Extension hook errors
+
+Extension hooks that return errors do not abort the ingestion pipeline — errors from `OnIngestCompleted` and similar hooks are logged but not surfaced to the caller. The `OnIngestFailed` hook receives ingestion errors for observability.

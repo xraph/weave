@@ -1,0 +1,152 @@
+---
+title: Architecture
+description: How Weave's packages fit together.
+---
+
+Weave is organized as a set of focused Go packages. The `engine` package is the central coordinator. All other packages define interfaces, entities, and subsystem logic that compose around it.
+
+## Package diagram
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                       weave.Engine                              │
+│  CreateCollection / ListCollections / DeleteCollection / Stats  │
+│  Ingest / IngestBatch / DeleteDocument / Reindex               │
+│  Retrieve / HybridSearch                                        │
+├────────────────────────────────────────────────────────────────┤
+│                     Ingestion pipeline                          │
+│  1. Apply tenant scope (TenantID, AppID from ctx)              │
+│  2. Create document record (State=processing)                   │
+│  3. Loader.Load (optional — extract text from binary formats)  │
+│  4. Chunker.Chunk (recursive or fixed-size)                    │
+│  5. Embedder.Embed (batch embedding generation)                 │
+│  6. MetadataStore.StoreChunks                                   │
+│  7. VectorStore.Upsert                                          │
+│  8. Mark document State=ready, emit extension events           │
+├──────────────────────────┬─────────────────────────────────────┤
+│  ext.Registry             │  pipeline.Pipeline                  │
+│  OnIngestStarted          │  (ordered step execution with       │
+│  OnIngestCompleted        │   middleware: caching, tracing,     │
+│  OnRetrievalStarted       │   tenant isolation)                  │
+│  OnRetrievalCompleted     │                                     │
+│  (14 total hooks)         │                                     │
+├──────────────────────────┴─────────────────────────────────────┤
+│                       store.Store                               │
+│  (composite: collection.Store + document.Store + chunk.Store   │
+│   + Migrate/Ping/Close)                                         │
+├─────────────┬────────────┬──────────────────────────────────────┤
+│ store/memory │ store/postgres │ store/sqlite                    │
+├─────────────┴────────────┴──────────────────────────────────────┤
+│                    vectorstore.VectorStore                       │
+│  (Upsert / Search / Delete / DeleteByMetadata)                  │
+├─────────────┬────────────────────────────────────────────────────┤
+│ vectorstore/ │ vectorstore/pgvector                              │
+│ memory       │                                                   │
+└─────────────┴────────────────────────────────────────────────────┘
+```
+
+## Engine construction
+
+`weave.NewEngine` accepts option functions:
+
+```go
+engine, err := weave.NewEngine(
+    weave.WithStore(pgStore),           // required: MetadataStore
+    weave.WithVectorStore(pgVec),       // required: VectorStore
+    weave.WithEmbedder(myEmbedder),     // required: Embedder
+    weave.WithChunker(myChunker),       // optional: defaults to recursive chunker
+    weave.WithLoader(myLoader),         // optional: for binary format extraction
+    weave.WithRetriever(myRetriever),   // optional: custom retrieval logic
+    weave.WithExtension(metricsExt),    // optional: lifecycle hooks
+    weave.WithLogger(slog.Default()),   // optional: structured logger
+)
+```
+
+All components are interfaces — swap any with your own implementation.
+
+## Ingestion pipeline
+
+When `engine.Ingest` is called, these steps execute in order:
+
+1. **Apply scope** — `weave.TenantFromContext` and `weave.AppFromContext` stamp TenantID and AppID onto all created entities.
+2. **Create document** — document record is persisted with `State=processing`.
+3. **Load** (optional) — if a `Loader` is configured and the source MIME type is supported, the loader extracts text from binary formats (PDF, DOCX, etc.).
+4. **Chunk** — `Chunker.Chunk` splits the text into `[]ChunkResult`. Default: recursive strategy, 512-token chunks, 50-token overlap.
+5. **Embed** — `Embedder.Embed` generates vectors for all chunk texts in a single batch call.
+6. **Persist chunks** — chunk metadata is stored via `store.Store`.
+7. **Upsert vectors** — embeddings are upserted into `VectorStore` with metadata filters for tenant isolation.
+8. **Finalize** — document `State` is set to `ready`, `ChunkCount` is updated, and extension hooks fire.
+
+## Retrieval pipeline
+
+`engine.Retrieve` executes:
+
+1. **Apply scope** — forces TenantID constraint on all vector queries.
+2. **Embed query** — the query string is embedded using the same embedder.
+3. **Vector search** — `VectorStore.Search` returns the top-K nearest vectors filtered by collection and tenant.
+4. **Fetch chunk metadata** — chunk content and metadata are loaded from the metadata store.
+5. **Score and sort** — results are returned as `[]ScoredChunk` sorted by relevance descending.
+6. **Extension hooks** — `OnRetrievalCompleted` fires with result count and elapsed time.
+
+## Tenant isolation
+
+`weave.WithTenant(ctx, id)` and `weave.WithApp(ctx, id)` inject identifiers into the context. These are extracted at every layer:
+
+- **MetadataStore** — all queries include `WHERE tenant_id = ?` filters
+- **VectorStore** — metadata filters enforce tenant isolation on every vector search
+- **Engine** — scope is applied before any store or vector operation
+
+Cross-tenant access is structurally impossible: even if a caller passes a collection ID from another tenant, the store layer returns `ErrNotFound`.
+
+## Extension system
+
+Extensions implement the `ext.Extension` interface and register lifecycle hooks:
+
+```go
+type Extension interface {
+    OnCollectionCreated(ctx context.Context, col *collection.Collection)
+    OnCollectionDeleted(ctx context.Context, colID string)
+    OnIngestStarted(ctx context.Context, colID string, docs []IngestInput)
+    OnIngestChunked(ctx context.Context, chunks []chunk.Chunk)
+    OnIngestEmbedded(ctx context.Context, chunks []chunk.Chunk)
+    OnIngestCompleted(ctx context.Context, colID string, docCount, chunkCount int, elapsed time.Duration)
+    OnIngestFailed(ctx context.Context, colID string, err error)
+    OnDocumentDeleted(ctx context.Context, docID string)
+    OnRetrievalStarted(ctx context.Context, colID string, query string)
+    OnRetrievalCompleted(ctx context.Context, colID string, resultCount int, elapsed time.Duration)
+    OnRetrievalFailed(ctx context.Context, colID string, err error)
+    OnReindexStarted(ctx context.Context, colID string)
+    OnReindexCompleted(ctx context.Context, colID string, elapsed time.Duration)
+}
+```
+
+The built-in `observability.Extension` implements metrics tracking for all events using the `weave.*` metric namespace.
+
+## Package index
+
+| Package | Import path | Purpose |
+|---------|-------------|---------|
+| `engine` | `.../engine` | Core coordinator — all Engine methods |
+| `api` | `.../api` | Forge-native HTTP handlers (12 routes) |
+| `pipeline` | `.../pipeline` | Ordered step execution with middleware |
+| `chunker` | `.../chunker` | Chunker interface and recursive/fixed implementations |
+| `embedder` | `.../embedder` | Embedder interface — implement for any embedding model |
+| `retriever` | `.../retriever` | Retriever interface — custom retrieval strategies |
+| `loader` | `.../loader` | Loader interface — extract text from binary formats |
+| `assembler` | `.../assembler` | Context assembly with token budgeting and citations |
+| `vectorstore` | `.../vectorstore` | VectorStore interface (Upsert, Search, Delete) |
+| `vectorstore/memory` | `.../vectorstore/memory` | In-memory vector store (testing) |
+| `vectorstore/pgvector` | `.../vectorstore/pgvector` | PostgreSQL pgvector backend |
+| `store` | `.../store` | Composite MetadataStore interface |
+| `store/memory` | `.../store/memory` | In-memory metadata store (testing) |
+| `store/postgres` | `.../store/postgres` | PostgreSQL metadata backend (bun ORM) |
+| `store/sqlite` | `.../store/sqlite` | SQLite metadata backend |
+| `ext` | `.../ext` | Extension registry and lifecycle hooks |
+| `extension` | `.../extension` | Forge framework extension adapter |
+| `middleware` | `.../middleware` | Pipeline middleware (caching, tracing, tenant isolation) |
+| `observability` | `.../observability` | Built-in metrics and tracing extension |
+| `collection` | `.../collection` | Collection entity and store interface |
+| `document` | `.../document` | Document entity and store interface |
+| `chunk` | `.../chunk` | Chunk entity and store interface |
+| `scope` | `.../scope` | Context-based tenant isolation helpers |
+| `id` | `.../id` | TypeID-based entity identifiers |

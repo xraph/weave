@@ -1,0 +1,95 @@
+---
+title: Text Chunker
+description: The Chunker interface and built-in strategies for splitting documents into embeddable chunks.
+---
+
+The chunker splits raw document text into smaller `ChunkResult` objects before embedding. Weave ships with five built-in strategies and a pluggable interface.
+
+## Chunker interface
+
+```go
+// Package chunker
+type Chunker interface {
+    Chunk(ctx context.Context, text string, opts *Options) ([]ChunkResult, error)
+}
+
+type Options struct {
+    ChunkSize    int    // target chunk size in tokens
+    ChunkOverlap int    // overlapping tokens between adjacent chunks
+    Strategy     string // "recursive" | "fixed" | "sliding" | "semantic" | "code"
+}
+```
+
+Register a custom chunker with `engine.WithChunker(myChunker)`. If none is provided, Weave uses the recursive chunker by default.
+
+## ChunkResult
+
+```go
+type ChunkResult struct {
+    Content     string            // text content of the chunk
+    Index       int               // zero-based position in the document
+    StartOffset int               // byte offset of chunk start in original text
+    EndOffset   int               // byte offset of chunk end in original text
+    TokenCount  int               // estimated number of tokens
+    Metadata    map[string]string // chunker-specific metadata
+}
+```
+
+## Built-in strategies
+
+| Strategy | Package | Description |
+|----------|---------|-------------|
+| `recursive` | `chunker/recursive` | Default. Splits on paragraph, sentence, then word boundaries to stay within `ChunkSize` |
+| `fixed` | `chunker/fixed` | Splits at exact token boundaries with `ChunkOverlap` tokens of context overlap |
+| `sliding` | `chunker/sliding` | Sliding window over the text — every chunk advances by `ChunkSize - ChunkOverlap` tokens |
+| `semantic` | `chunker/semantic` | Groups sentences by semantic similarity — chunks are topic-coherent |
+| `code` | `chunker/code` | Splits on function / class / block boundaries — preserves code structure |
+
+## Per-collection configuration
+
+Chunk settings are stored on the collection and applied automatically during ingestion:
+
+```go
+col := &collection.Collection{
+    ChunkStrategy: "fixed",
+    ChunkSize:     1024, // tokens
+    ChunkOverlap:  100,  // tokens
+}
+```
+
+The engine's `DefaultChunkSize` (512) and `DefaultChunkOverlap` (50) apply when fields are zero.
+
+## Custom chunker
+
+Implement `chunker.Chunker` to split text with your own logic:
+
+```go
+type MyChunker struct{}
+
+func (c *MyChunker) Chunk(_ context.Context, text string, opts *chunker.Options) ([]chunker.ChunkResult, error) {
+    // split text into sentences or paragraphs
+    var results []chunker.ChunkResult
+    for i, sentence := range splitSentences(text) {
+        results = append(results, chunker.ChunkResult{
+            Content:    sentence,
+            Index:      i,
+            TokenCount: estimateTokens(sentence),
+        })
+    }
+    return results, nil
+}
+```
+
+Register it: `engine.WithChunker(&MyChunker{})`.
+
+## Token counting
+
+Weave's built-in chunkers estimate token counts using a simple word-based heuristic (≈ 1 token per 4 characters). For precise token counts, implement `assembler.TokenCounter`:
+
+```go
+type TokenCounter interface {
+    Count(text string) int
+}
+```
+
+Pass it to the assembler via `assembler.WithTokenCounter(myCounter)` for accurate token budgeting during context assembly.

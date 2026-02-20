@@ -1,0 +1,118 @@
+---
+title: Observability
+description: Built-in metrics extension and tracing support for Weave lifecycle events.
+---
+
+Weave ships a `MetricsExtension` in the `observability` package that automatically records counters for every engine lifecycle event.
+
+## Metrics extension
+
+```go
+import "github.com/xraph/weave/observability"
+
+metricsExt := observability.NewMetricsExtension()
+
+engine, err := engine.New(
+    engine.WithStore(store),
+    engine.WithVectorStore(vecStore),
+    engine.WithEmbedder(emb),
+    engine.WithExtension(metricsExt),
+)
+```
+
+Once registered, `metricsExt` increments the appropriate counter for every lifecycle event — no further configuration needed.
+
+## Metric names
+
+All metrics are prefixed with `weave.`:
+
+| Metric | Type | Event |
+|--------|------|-------|
+| `weave.collection.created` | counter | `OnCollectionCreated` |
+| `weave.collection.deleted` | counter | `OnCollectionDeleted` |
+| `weave.ingest.started` | counter | `OnIngestStarted` |
+| `weave.ingest.completed` | counter | `OnIngestCompleted` |
+| `weave.ingest.failed` | counter | `OnIngestFailed` |
+| `weave.documents.ingested` | counter (add) | Documents ingested per `OnIngestCompleted` |
+| `weave.chunks.created` | counter (add) | Chunks created per `OnIngestCompleted` |
+| `weave.retrieval.started` | counter | `OnRetrievalStarted` |
+| `weave.retrieval.completed` | counter | `OnRetrievalCompleted` |
+| `weave.retrieval.failed` | counter | `OnRetrievalFailed` |
+| `weave.document.deleted` | counter | `OnDocumentDeleted` |
+| `weave.reindex.started` | counter | `OnReindexStarted` |
+| `weave.reindex.completed` | counter | `OnReindexCompleted` |
+
+## Using a custom metrics factory
+
+In a Forge application, pass the app's metrics factory to share the same metric registry:
+
+```go
+import (
+    "github.com/xraph/weave/observability"
+    gu "github.com/xraph/go-utils/metrics"
+)
+
+// With a Forge app's MetricFactory:
+metricsExt := observability.NewMetricsExtensionWithFactory(fapp.Metrics())
+
+// With a standalone collector (useful for testing):
+metricsExt := observability.NewMetricsExtensionWithFactory(
+    gu.NewMetricsCollector("my-service"),
+)
+```
+
+## Accessing metrics directly
+
+`MetricsExtension` exposes each counter as a public field:
+
+```go
+metricsExt := observability.NewMetricsExtension()
+
+// Register with engine...
+
+// Read counter values (implementation-defined, e.g. Prometheus):
+fmt.Println("ingests completed:", metricsExt.IngestCompleted.Value())
+fmt.Println("chunks created:", metricsExt.ChunksCreated.Value())
+```
+
+## Tracing
+
+For distributed tracing, implement `ext.IngestStarted` and `ext.RetrievalStarted` with your tracer:
+
+```go
+type TracingExtension struct {
+    tracer trace.Tracer
+}
+
+func (t *TracingExtension) Name() string { return "tracing" }
+
+func (t *TracingExtension) OnIngestStarted(ctx context.Context, colID id.CollectionID, _ []*document.Document) error {
+    _, span := t.tracer.Start(ctx, "weave.ingest",
+        trace.WithAttributes(attribute.String("collection_id", colID.String())),
+    )
+    span.End()
+    return nil
+}
+```
+
+Register it alongside the metrics extension: `engine.WithExtension(&TracingExtension{tracer: tracer})`.
+
+## Logging
+
+Weave uses `log/slog` internally. Pass a custom logger at engine construction:
+
+```go
+logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+    Level: slog.LevelDebug,
+}))
+
+engine, err := engine.New(
+    // ...
+    engine.WithLogger(logger),
+)
+```
+
+The engine logs:
+- Chunk and embed step durations (DEBUG)
+- Failed vector deletions during collection/document delete (WARN)
+- Extension hook errors (WARN)

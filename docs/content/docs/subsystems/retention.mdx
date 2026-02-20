@@ -1,0 +1,120 @@
+---
+title: Context Assembler
+description: Building LLM-ready context strings from retrieved chunks with token budgeting and citations.
+---
+
+After retrieval, the Context Assembler formats chunks into a context string suitable for an LLM prompt. It enforces a token budget, tracks which chunks were included as citations, and supports custom templates.
+
+## Basic usage
+
+```go
+import (
+    "github.com/xraph/weave/assembler"
+    "github.com/xraph/weave/retriever"
+)
+
+a := assembler.New(
+    assembler.WithMaxTokens(3000),
+)
+
+// results is []retriever.Result from engine.Retrieve
+result, err := a.Assemble(ctx, results)
+
+fmt.Println(result.Context)       // formatted context string
+fmt.Println(result.TotalTokens)   // tokens consumed
+fmt.Println(result.TruncatedCount) // chunks dropped due to budget
+```
+
+## AssembleResult
+
+```go
+type AssembleResult struct {
+    Context        string     // assembled context string for the LLM
+    Citations      []Citation // which chunks were included
+    TotalTokens    int        // estimated total tokens consumed
+    TruncatedCount int        // chunks dropped due to token budget
+}
+```
+
+## Assembler options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `WithMaxTokens(n)` | 4096 | Token budget — chunks are dropped once this limit is reached |
+| `WithTemplate(t)` | Default template | Custom `*Template` for formatting chunks |
+| `WithTokenCounter(tc)` | `SimpleTokenCounter` | Custom token counting implementation |
+
+## Token budget
+
+The assembler iterates chunks in score order (highest first, as returned by `Retrieve`). For each chunk it estimates the token count. If the chunk fits within the remaining budget, it is included; otherwise it is skipped and counted in `TruncatedCount`.
+
+```go
+a := assembler.New(assembler.WithMaxTokens(2000))
+
+result, _ := a.Assemble(ctx, results)
+if result.TruncatedCount > 0 {
+    fmt.Printf("%d chunks dropped due to token budget\n", result.TruncatedCount)
+}
+```
+
+## Citations
+
+Each included chunk becomes a `Citation`:
+
+```go
+type Citation struct {
+    ChunkIndex int               // position in the original results slice
+    Content    string            // chunk text
+    Score      float64           // relevance score
+    Metadata   map[string]string // chunk metadata (source, document_id, etc.)
+}
+```
+
+Use citations to render source attributions alongside the LLM response.
+
+## Custom templates
+
+Control how chunks are formatted in the context string:
+
+```go
+tmpl := assembler.NewTemplate("--- Source {{.Index}} ---\n{{.Content}}\n")
+a := assembler.New(assembler.WithTemplate(tmpl))
+```
+
+The default template joins chunks with `\n\n---\n\n` separators.
+
+## Simple assembly
+
+For quick use without token budgeting, use the package-level helper:
+
+```go
+context := assembler.AssembleSimple(results)
+// returns chunks joined with "\n\n---\n\n"
+```
+
+## Full RAG pattern
+
+```go
+ctx = weave.WithTenant(ctx, tenantID)
+
+// 1. Retrieve relevant chunks
+results, _ := eng.Retrieve(ctx, userQuery,
+    engine.WithCollection(colID),
+    engine.WithTopK(10),
+    engine.WithMinScore(0.7),
+)
+
+// 2. Convert to retriever.Result for the assembler
+retResults := make([]retriever.Result, len(results))
+for i, r := range results {
+    retResults[i] = retriever.Result{Chunk: r.Chunk, Score: r.Score}
+}
+
+// 3. Assemble context with 3000-token budget
+a := assembler.New(assembler.WithMaxTokens(3000))
+assembled, _ := a.Assemble(ctx, retResults)
+
+// 4. Pass to LLM
+prompt := fmt.Sprintf("Context:\n%s\n\nQuestion: %s", assembled.Context, userQuery)
+response, _ := llm.Complete(ctx, prompt)
+```

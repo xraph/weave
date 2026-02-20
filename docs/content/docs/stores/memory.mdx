@@ -1,0 +1,79 @@
+---
+title: In-Memory Store
+description: In-memory MetadataStore and VectorStore for development, testing, and prototyping.
+---
+
+Weave ships two in-memory store implementations — one for metadata (collections, documents, chunks) and one for vectors. Both are zero-dependency and suitable for local development and unit tests.
+
+## MetadataStore
+
+```go
+import "github.com/xraph/weave/store/memory"
+
+store := memory.New()
+```
+
+`memory.Store` implements `store.Store` (the composite MetadataStore interface). It stores all entities in Go maps protected by a `sync.RWMutex`. All operations are scoped to tenant and app as usual — the in-memory store enforces the same isolation guarantees as the PostgreSQL implementation.
+
+## VectorStore
+
+```go
+import "github.com/xraph/weave/vectorstore/memory"
+
+vecStore := memory.New()
+```
+
+`vectorstore/memory.Store` implements `vectorstore.VectorStore`. It stores vectors in a flat slice and performs brute-force cosine similarity search on every `Search` call. This is fast enough for development and small test datasets.
+
+## Using both together
+
+```go
+import (
+    "github.com/xraph/weave"
+    "github.com/xraph/weave/engine"
+    memstore "github.com/xraph/weave/store/memory"
+    memvec "github.com/xraph/weave/vectorstore/memory"
+)
+
+eng, err := engine.New(
+    engine.WithStore(memstore.New()),
+    engine.WithVectorStore(memvec.New()),
+    engine.WithEmbedder(myEmbedder),
+)
+```
+
+## Lifecycle
+
+| Method | Behaviour |
+|--------|-----------|
+| `Migrate(ctx)` | No-op — no schema to create |
+| `Ping(ctx)` | Always returns `nil` |
+| `Close()` | No-op — nothing to release |
+
+## Limitations
+
+- **Not persistent** — all data is lost on process restart
+- **Not shared** — each `memory.New()` instance is independent; multiple servers cannot share state
+- **Brute-force search** — O(n) over all vectors; impractical for large datasets
+
+For production use, switch to the PostgreSQL MetadataStore and pgvector VectorStore.
+
+## Swapping to PostgreSQL
+
+The in-memory stores implement the same interfaces as the production stores, so switching is a one-line change at construction:
+
+```go
+// Development
+eng, _ := engine.New(
+    engine.WithStore(memstore.New()),
+    engine.WithVectorStore(memvec.New()),
+    engine.WithEmbedder(emb),
+)
+
+// Production
+eng, _ := engine.New(
+    engine.WithStore(pgstore.New(pool)),
+    engine.WithVectorStore(pgvec.New(pool)),
+    engine.WithEmbedder(emb),
+)
+```

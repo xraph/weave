@@ -1,0 +1,143 @@
+---
+title: Multi-Tenant Guide
+description: Patterns for tenant isolation, per-tenant collections, and safe data deletion in Weave.
+---
+
+Weave is built for multi-tenant SaaS. This guide covers how to structure tenants, isolate their data, and safely delete tenant content.
+
+## Tenant scope
+
+Every operation in Weave requires a tenant context. Set it once at the request boundary:
+
+```go
+// From an HTTP middleware
+func tenantMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        tenantID := extractTenantFromJWT(r)
+        appID := r.Header.Get("X-App-ID")
+
+        ctx := weave.WithTenant(r.Context(), tenantID)
+        ctx = weave.WithApp(ctx, appID)
+
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
+}
+```
+
+All subsequent `engine.*` calls in that request automatically use the correct tenant.
+
+## Isolation guarantees
+
+- **MetadataStore**: Every query includes `WHERE tenant_id = $1 AND app_id = $2`. A caller cannot access another tenant's collection even if they know the ID.
+- **VectorStore**: Each vector entry is stored with `tenant_id` and `collection_id` metadata. The `Search` call filters by both.
+- **Type-safe IDs**: `id.CollectionID`, `id.DocumentID`, and `id.ChunkID` are distinct types — passing a document ID where a collection ID is expected is a compile-time error.
+
+## Per-tenant collections
+
+Each tenant can have independent collections with different embedding models or chunk strategies:
+
+```go
+// Tenant A — lightweight model
+ctx = weave.WithTenant(ctx, tenantA.ID)
+colA := &collection.Collection{
+    Name:           "support-docs",
+    EmbeddingModel: "text-embedding-3-small",
+    EmbeddingDims:  1536,
+}
+eng.CreateCollection(ctx, colA)
+
+// Tenant B — high-accuracy model
+ctx = weave.WithTenant(ctx, tenantB.ID)
+colB := &collection.Collection{
+    Name:           "legal-docs",
+    EmbeddingModel: "text-embedding-3-large",
+    EmbeddingDims:  3072,
+}
+eng.CreateCollection(ctx, colB)
+```
+
+## Deleting tenant data
+
+### Delete a single document
+
+Removes the document record, all chunk metadata, and the corresponding vectors:
+
+```go
+ctx = weave.WithTenant(ctx, tenantID)
+err := eng.DeleteDocument(ctx, docID)
+```
+
+### Delete a collection
+
+Removes the collection, all its documents, chunks, and vectors:
+
+```go
+ctx = weave.WithTenant(ctx, tenantID)
+err := eng.DeleteCollection(ctx, colID)
+```
+
+### Delete all tenant data
+
+To delete everything for a tenant (e.g. on account deletion), list and delete each collection:
+
+```go
+ctx = weave.WithTenant(ctx, tenantID)
+
+cols, err := eng.ListCollections(ctx, &collection.ListFilter{})
+if err != nil {
+    return err
+}
+
+for _, col := range cols {
+    if err := eng.DeleteCollection(ctx, col.ID); err != nil {
+        return fmt.Errorf("delete collection %s: %w", col.ID, err)
+    }
+}
+```
+
+This cascades to all documents, chunks, and vectors in each collection.
+
+## AppID sub-namespacing
+
+`AppID` lets you further namespace within a tenant — useful when a single customer account hosts multiple independent applications:
+
+```go
+// Same tenant, different apps — isolated from each other
+ctx1 = weave.WithTenant(ctx, customer.ID)
+ctx1 = weave.WithApp(ctx1, "chatbot")
+
+ctx2 = weave.WithTenant(ctx, customer.ID)
+ctx2 = weave.WithApp(ctx2, "search")
+```
+
+A collection created under `app="chatbot"` is not visible when querying with `app="search"`.
+
+## Background jobs
+
+For background jobs (reindexing, cleanup), inject scope explicitly:
+
+```go
+func reindexTenantCollection(eng *engine.Engine, tenantID string, colID id.CollectionID) error {
+    ctx := context.Background()
+    ctx = weave.WithTenant(ctx, tenantID)
+    ctx = weave.WithApp(ctx, "myapp")
+    return eng.ReindexCollection(ctx, colID)
+}
+```
+
+Never rely on a request context for background work — the context may be cancelled before the job completes.
+
+## Verifying isolation
+
+To confirm tenant isolation is working, verify that a collection created under one tenant is not visible to another:
+
+```go
+// Create under tenant-1
+ctxA = weave.WithTenant(ctx, "tenant-1")
+col, _ := eng.CreateCollection(ctxA, &collection.Collection{Name: "private-docs"})
+
+// Query as tenant-2 — should return not found
+ctxB = weave.WithTenant(ctx, "tenant-2")
+_, err := eng.GetCollection(ctxB, col.ID)
+// err == ErrCollectionNotFound (or store returns no rows → same result)
+```
