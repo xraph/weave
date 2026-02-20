@@ -105,11 +105,11 @@ type RetrieveRequest struct {
 
 // HybridSearchRequest is the request body for hybrid search.
 type HybridSearchRequest struct {
-	Query       string              `json:"query" description:"The search query"`
-	Collections []id.CollectionID   `json:"collections,omitempty" description:"Collection IDs to search"`
-	TopK        int                 `json:"top_k,omitempty" description:"Maximum number of results"`
-	Strategy    string              `json:"strategy,omitempty" description:"Search strategy"`
-	MinScore    float64             `json:"min_score,omitempty" description:"Minimum relevance score threshold"`
+	Query       string            `json:"query" description:"The search query"`
+	Collections []id.CollectionID `json:"collections,omitempty" description:"Collection IDs to search"`
+	TopK        int               `json:"top_k,omitempty" description:"Maximum number of results"`
+	Strategy    string            `json:"strategy,omitempty" description:"Search strategy"`
+	MinScore    float64           `json:"min_score,omitempty" description:"Minimum relevance score threshold"`
 }
 
 // ──────────────────────────────────────────────────

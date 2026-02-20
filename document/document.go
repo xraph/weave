@@ -24,16 +24,16 @@ const (
 type Document struct {
 	weave.Entity
 
-	ID            id.DocumentID   `json:"id" bun:"id,pk"`
-	CollectionID  id.CollectionID `json:"collection_id" bun:"collection_id,notnull"`
-	TenantID      string          `json:"tenant_id" bun:"tenant_id,notnull"`
-	Title         string          `json:"title,omitempty" bun:"title"`
-	Source        string          `json:"source,omitempty" bun:"source"`
-	SourceType    string          `json:"source_type,omitempty" bun:"source_type"`
-	ContentHash   string          `json:"content_hash" bun:"content_hash,notnull"`
-	ContentLength int             `json:"content_length" bun:"content_length,notnull,default:0"`
-	ChunkCount    int             `json:"chunk_count" bun:"chunk_count,notnull,default:0"`
+	ID            id.DocumentID     `json:"id" bun:"id,pk"`
+	CollectionID  id.CollectionID   `json:"collection_id" bun:"collection_id,notnull"`
+	TenantID      string            `json:"tenant_id" bun:"tenant_id,notnull"`
+	Title         string            `json:"title,omitempty" bun:"title"`
+	Source        string            `json:"source,omitempty" bun:"source"`
+	SourceType    string            `json:"source_type,omitempty" bun:"source_type"`
+	ContentHash   string            `json:"content_hash" bun:"content_hash,notnull"`
+	ContentLength int               `json:"content_length" bun:"content_length,notnull,default:0"`
+	ChunkCount    int               `json:"chunk_count" bun:"chunk_count,notnull,default:0"`
 	Metadata      map[string]string `json:"metadata" bun:"metadata,notnull,default:'{}'"`
-	State         State           `json:"state" bun:"state,notnull,default:'pending'"`
-	Error         string          `json:"error,omitempty" bun:"error"`
+	State         State             `json:"state" bun:"state,notnull,default:'pending'"`
+	Error         string            `json:"error,omitempty" bun:"error"`
 }

@@ -16,9 +16,9 @@ func (c *SimpleTokenCounter) CountTokens(text string) int {
 
 // BudgetManager tracks token consumption against a budget.
 type BudgetManager struct {
-	counter  TokenCounter
+	counter   TokenCounter
 	maxTokens int
-	used     int
+	used      int
 }
 
 // NewBudgetManager creates a new budget manager.
