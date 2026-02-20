@@ -41,7 +41,7 @@ func (t *Template) Render(chunks []string) string {
 		}
 
 		if t.ChunkFormat != "" {
-			b.WriteString(fmt.Sprintf(t.ChunkFormat, i+1, chunk))
+			fmt.Fprintf(&b, t.ChunkFormat, i+1, chunk)
 		} else {
 			b.WriteString(chunk)
 		}
