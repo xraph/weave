@@ -85,7 +85,7 @@ func (r *MMRRetriever) Retrieve(ctx context.Context, query string, opts *Options
 			relevance := c.Score
 			maxSim := 0.0
 			for _, sv := range selectedVecs {
-				sim := cosine(c.Entry.Vector, sv)
+				sim := cosine(c.Vector, sv)
 				if sim > maxSim {
 					maxSim = sim
 				}
@@ -103,7 +103,7 @@ func (r *MMRRetriever) Retrieve(ctx context.Context, query string, opts *Options
 		}
 
 		selected = append(selected, bestIdx)
-		selectedVecs = append(selectedVecs, candidates[bestIdx].Entry.Vector)
+		selectedVecs = append(selectedVecs, candidates[bestIdx].Vector)
 		used[bestIdx] = true
 	}
 

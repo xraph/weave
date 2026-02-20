@@ -54,7 +54,7 @@ func (l *JSONLoader) extractFields(v any, b *strings.Builder) {
 	case map[string]any:
 		for _, field := range l.Fields {
 			if fv, ok := val[field]; ok {
-				b.WriteString(fmt.Sprintf("%v", fv))
+				fmt.Fprintf(b, "%v", fv)
 				b.WriteString("\n")
 			}
 		}
@@ -79,7 +79,7 @@ func (l *JSONLoader) extractAll(v any, b *strings.Builder) {
 		b.WriteString(val)
 		b.WriteString("\n")
 	case float64, bool:
-		b.WriteString(fmt.Sprintf("%v", val))
+		fmt.Fprintf(b, "%v", val)
 		b.WriteString("\n")
 	}
 }

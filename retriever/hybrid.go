@@ -19,10 +19,6 @@ func NewHybridRetriever(retrievers ...Retriever) *HybridRetriever {
 // Retrieve runs all sub-retrievers and fuses results via RRF.
 func (r *HybridRetriever) Retrieve(ctx context.Context, query string, opts *Options) ([]Result, error) {
 	// Collect results from all retrievers.
-	type ranked struct {
-		result Result
-		key    string
-	}
 	scores := make(map[string]float64)
 	resultMap := make(map[string]Result)
 

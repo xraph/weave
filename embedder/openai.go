@@ -99,7 +99,7 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([]EmbedResu
 	if err != nil {
 		return nil, fmt.Errorf("weave: openai embed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("weave: openai embed: status %d", resp.StatusCode)

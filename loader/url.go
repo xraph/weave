@@ -44,7 +44,7 @@ func (l *URLLoader) LoadURL(ctx context.Context, url string) (*LoadResult, error
 	if err != nil {
 		return nil, fmt.Errorf("weave: url load: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("weave: url load: status %d", resp.StatusCode)

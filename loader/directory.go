@@ -47,7 +47,7 @@ func (l *DirectoryLoader) LoadDir(ctx context.Context, dirPath string) ([]*LoadR
 		if err != nil {
 			return fmt.Errorf("weave: directory load: %w", err)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 
 		result, err := loader.Load(ctx, f)
 		if err != nil {

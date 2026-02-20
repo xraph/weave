@@ -84,7 +84,7 @@ func (c *Cache) cacheKey(sc *pipeline.StepContext) string {
 	h := sha256.New()
 	for _, k := range sc.Keys() {
 		v, _ := sc.Get(k)
-		fmt.Fprintf(h, "%s=%v;", k, v)
+		_, _ = fmt.Fprintf(h, "%s=%v;", k, v)
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
