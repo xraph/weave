@@ -3,7 +3,7 @@ module github.com/xraph/weave
 go 1.25.7
 
 require (
-	github.com/uptrace/bun v1.2.16
+	github.com/uptrace/bun v1.2.17
 	github.com/xraph/forge v0.9.12
 	github.com/xraph/go-utils v0.0.11
 	github.com/xraph/vessel v0.0.5
