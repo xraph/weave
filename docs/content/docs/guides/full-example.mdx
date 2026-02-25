@@ -12,15 +12,11 @@ package main
 
 import (
     "context"
-    "database/sql"
     "fmt"
     "log"
     "os"
 
-    "github.com/jackc/pgx/v5/pgxpool"
-    "github.com/uptrace/bun"
-    "github.com/uptrace/bun/dialect/pgdialect"
-    "github.com/uptrace/bun/driver/pgdriver"
+    "github.com/xraph/grove"
 
     "github.com/xraph/weave"
     "github.com/xraph/weave/assembler"
@@ -34,19 +30,17 @@ import (
 func main() {
     ctx := context.Background()
 
-    // PostgreSQL metadata store
-    sqldb := sql.OpenDB(pgdriver.NewConnector(
-        pgdriver.WithDSN(os.Getenv("DATABASE_URL")),
-    ))
-    db := bun.NewDB(sqldb, pgdialect.New())
-    metaStore := pgstore.New(db)
-
-    // pgvector store
-    pool, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
+    // Connect to PostgreSQL via grove
+    db, err := grove.Open("postgres", os.Getenv("DATABASE_URL"))
     if err != nil {
         log.Fatal(err)
     }
-    vecStore := pgvec.New(pool)
+
+    // PostgreSQL metadata store
+    metaStore := pgstore.New(db)
+
+    // pgvector store (shares the same grove.DB connection)
+    vecStore := pgvec.New(db)
 
     // OpenAI embedder
     emb := embedder.NewOpenAI(
@@ -67,10 +61,6 @@ func main() {
     if err := metaStore.Migrate(ctx); err != nil {
         log.Fatal("migrate:", err)
     }
-    if err := vecStore.Migrate(ctx); err != nil {
-        log.Fatal("migrate vectors:", err)
-    }
-
     // Set tenant scope
     ctx = weave.WithTenant(ctx, "acme-corp")
     ctx = weave.WithApp(ctx, "support-bot")
