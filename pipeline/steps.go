@@ -90,7 +90,10 @@ func (s *ChunkStep) Name() string { return "chunk" }
 
 // Run chunks the text content.
 func (s *ChunkStep) Run(ctx context.Context, sc *StepContext) error {
-	content := sc.MustGet(KeyContent).(string)
+	content, ok := sc.MustGet(KeyContent).(string)
+	if !ok {
+		return fmt.Errorf("chunk: content is not a string")
+	}
 
 	chunks, err := s.chunker.Chunk(ctx, content, s.opts)
 	if err != nil {
@@ -122,7 +125,10 @@ func (s *EmbedStep) Name() string { return "embed" }
 
 // Run generates embeddings.
 func (s *EmbedStep) Run(ctx context.Context, sc *StepContext) error {
-	chunks := sc.MustGet(KeyChunks).([]chunker.ChunkResult)
+	chunks, ok := sc.MustGet(KeyChunks).([]chunker.ChunkResult)
+	if !ok {
+		return fmt.Errorf("embed: chunks is not []chunker.ChunkResult")
+	}
 
 	texts := make([]string, len(chunks))
 	for i, ch := range chunks {
@@ -189,7 +195,10 @@ func (s *StoreStep) Name() string { return "store" }
 
 // Run upserts entries to the vector store.
 func (s *StoreStep) Run(ctx context.Context, sc *StepContext) error {
-	entries := sc.MustGet(KeyEntries).([]vectorstore.Entry)
+	entries, ok := sc.MustGet(KeyEntries).([]vectorstore.Entry)
+	if !ok {
+		return fmt.Errorf("store: entries is not []vectorstore.Entry")
+	}
 	return s.vs.Upsert(ctx, entries)
 }
 
@@ -215,7 +224,10 @@ func (s *RetrieveStep) Name() string { return "retrieve" }
 
 // Run retrieves relevant chunks.
 func (s *RetrieveStep) Run(ctx context.Context, sc *StepContext) error {
-	query := sc.MustGet(KeyQuery).(string)
+	query, ok := sc.MustGet(KeyQuery).(string)
+	if !ok {
+		return fmt.Errorf("retrieve: query is not a string")
+	}
 
 	results, err := s.retriever.Retrieve(ctx, query, s.opts)
 	if err != nil {
@@ -247,7 +259,10 @@ func (s *AssembleStep) Name() string { return "assemble" }
 
 // Run assembles context from retrieval results.
 func (s *AssembleStep) Run(ctx context.Context, sc *StepContext) error {
-	results := sc.MustGet(KeyResults).([]retriever.Result)
+	results, ok := sc.MustGet(KeyResults).([]retriever.Result)
+	if !ok {
+		return fmt.Errorf("assemble: results is not []retriever.Result")
+	}
 
 	assembled, err := s.assembler.Assemble(ctx, results)
 	if err != nil {

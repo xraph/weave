@@ -62,7 +62,7 @@ func (sc *StepContext) Snapshot() map[string]any {
 }
 
 // SetCacheHit restores cached values into the step context.
-func (sc *StepContext) SetCacheHit(stepName string, data any) {
+func (sc *StepContext) SetCacheHit(_ string, data any) {
 	if m, ok := data.(map[string]any); ok {
 		for k, v := range m {
 			sc.Values[k] = v

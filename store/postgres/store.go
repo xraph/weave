@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -111,7 +112,10 @@ func (s *Store) UpdateCollection(ctx context.Context, col *collection.Collection
 	if err != nil {
 		return fmt.Errorf("weave: update collection: %w", err)
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("weave: update collection rows affected: %w", err)
+	}
 	if n == 0 {
 		return weave.ErrCollectionNotFound
 	}
@@ -125,7 +129,10 @@ func (s *Store) DeleteCollection(ctx context.Context, colID id.CollectionID) err
 	if err != nil {
 		return fmt.Errorf("weave: delete collection: %w", err)
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("weave: delete collection rows affected: %w", err)
+	}
 	if n == 0 {
 		return weave.ErrCollectionNotFound
 	}
@@ -193,7 +200,10 @@ func (s *Store) UpdateDocument(ctx context.Context, doc *document.Document) erro
 	if err != nil {
 		return fmt.Errorf("weave: update document: %w", err)
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("weave: update document rows affected: %w", err)
+	}
 	if n == 0 {
 		return weave.ErrDocumentNotFound
 	}
@@ -207,7 +217,10 @@ func (s *Store) DeleteDocument(ctx context.Context, docID id.DocumentID) error {
 	if err != nil {
 		return fmt.Errorf("weave: delete document: %w", err)
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("weave: delete document rows affected: %w", err)
+	}
 	if n == 0 {
 		return weave.ErrDocumentNotFound
 	}
@@ -366,5 +379,5 @@ func (s *Store) CountChunks(ctx context.Context, filter *chunk.CountFilter) (int
 
 // isNoRows checks whether an error indicates no rows were found.
 func isNoRows(err error) bool {
-	return err == grove.ErrNoRows || err.Error() == "no rows in result set"
+	return errors.Is(err, grove.ErrNoRows) || err.Error() == "no rows in result set"
 }

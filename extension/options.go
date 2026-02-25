@@ -3,7 +3,7 @@ package extension
 
 import (
 	"github.com/xraph/weave/engine"
-	"github.com/xraph/weave/ext"
+	"github.com/xraph/weave/plugins"
 	"github.com/xraph/weave/store"
 	"github.com/xraph/weave/vectorstore"
 )
@@ -25,8 +25,8 @@ func WithVectorStore(vs vectorstore.VectorStore) ExtOption {
 	}
 }
 
-// WithExtension registers a Weave extension (lifecycle hooks).
-func WithExtension(x ext.Extension) ExtOption {
+// WithExtension registers a Weave plugin (lifecycle hooks).
+func WithExtension(x plugins.Extension) ExtOption {
 	return func(e *Extension) {
 		e.engineOpts = append(e.engineOpts, engine.WithExtension(x))
 	}

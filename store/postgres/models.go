@@ -56,7 +56,7 @@ func collectionToModel(c *collection.Collection) *collectionModel {
 }
 
 func collectionFromModel(m *collectionModel) *collection.Collection {
-	colID, _ := id.ParseCollectionID(m.ID)
+	colID, _ := id.ParseCollectionID(m.ID) //nolint:errcheck // DB rows always contain valid IDs
 	return &collection.Collection{
 		ID:             colID,
 		Name:           m.Name,
@@ -117,8 +117,8 @@ func documentToModel(d *document.Document) *documentModel {
 }
 
 func documentFromModel(m *documentModel) *document.Document {
-	docID, _ := id.ParseDocumentID(m.ID)
-	colID, _ := id.ParseCollectionID(m.CollectionID)
+	docID, _ := id.ParseDocumentID(m.ID)             //nolint:errcheck // DB rows always contain valid IDs
+	colID, _ := id.ParseCollectionID(m.CollectionID) //nolint:errcheck // DB rows always contain valid IDs
 	return &document.Document{
 		ID:            docID,
 		CollectionID:  colID,
@@ -174,9 +174,9 @@ func chunkToModel(c *chunk.Chunk) *chunkModel {
 }
 
 func chunkFromModel(m *chunkModel) *chunk.Chunk {
-	chkID, _ := id.ParseChunkID(m.ID)
-	docID, _ := id.ParseDocumentID(m.DocumentID)
-	colID, _ := id.ParseCollectionID(m.CollectionID)
+	chkID, _ := id.ParseChunkID(m.ID)                //nolint:errcheck // DB rows always contain valid IDs
+	docID, _ := id.ParseDocumentID(m.DocumentID)     //nolint:errcheck // DB rows always contain valid IDs
+	colID, _ := id.ParseCollectionID(m.CollectionID) //nolint:errcheck // DB rows always contain valid IDs
 	return &chunk.Chunk{
 		ID:           chkID,
 		DocumentID:   docID,

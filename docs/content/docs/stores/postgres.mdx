@@ -1,9 +1,9 @@
 ---
 title: PostgreSQL Store
-description: Production MetadataStore backed by PostgreSQL using bun ORM.
+description: Production MetadataStore backed by PostgreSQL using Grove ORM.
 ---
 
-The `store/postgres` package provides a production-ready MetadataStore for collections, documents, and chunks using PostgreSQL and the `bun` ORM.
+The `store/postgres` package provides a production-ready MetadataStore for collections, documents, and chunks using PostgreSQL and the Grove ORM.
 
 ## Installation
 
@@ -15,17 +15,15 @@ go get github.com/xraph/weave/store/postgres
 
 ```go
 import (
-    "database/sql"
-    "github.com/uptrace/bun"
-    "github.com/uptrace/bun/dialect/pgdialect"
-    "github.com/uptrace/bun/driver/pgdriver"
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/drivers/pgdriver"
     pgstore "github.com/xraph/weave/store/postgres"
 )
 
-sqldb := sql.OpenDB(pgdriver.NewConnector(
-    pgdriver.WithDSN("postgres://user:pass@localhost:5432/mydb?sslmode=disable"),
-))
-db := bun.NewDB(sqldb, pgdialect.New())
+db, err := grove.Open(pgdriver.Open("postgres://user:pass@localhost:5432/mydb?sslmode=disable"))
+if err != nil {
+    log.Fatal(err)
+}
 
 store := pgstore.New(db)
 ```
@@ -50,7 +48,7 @@ if err := store.Migrate(ctx); err != nil {
 }
 ```
 
-This is idempotent — running it on an already-migrated database is safe.
+This is idempotent — running it on an already-migrated database is safe. Migrations use Grove's `pgmigrate` driver internally.
 
 ## Schema
 
@@ -62,16 +60,18 @@ The PostgreSQL store creates three tables:
 | `weave_documents` | Document records — state, hashes, source info |
 | `weave_chunks` | Chunk text and byte offsets |
 
-All tables include `tenant_id` and `app_id` columns, and every query adds `WHERE tenant_id = $n AND app_id = $m` filters automatically.
+All tables include `tenant_id` and `app_id` columns for multi-tenant isolation.
 
 ## Connection pool configuration
 
-The PostgreSQL store accepts any `*bun.DB`. Configure the underlying `sql.DB` pool to match your workload:
+The PostgreSQL store accepts any `*grove.DB` opened with the `pgdriver`. Configure the underlying connection pool via Grove's driver options:
 
 ```go
-sqldb.SetMaxOpenConns(25)
-sqldb.SetMaxIdleConns(5)
-sqldb.SetConnMaxLifetime(5 * time.Minute)
+db, err := grove.Open(pgdriver.Open(dsn,
+    pgdriver.WithMaxOpenConns(25),
+    pgdriver.WithMaxIdleConns(5),
+    pgdriver.WithConnMaxLifetime(5 * time.Minute),
+))
 ```
 
 ## Lifecycle
@@ -79,16 +79,24 @@ sqldb.SetConnMaxLifetime(5 * time.Minute)
 | Method | Behaviour |
 |--------|-----------|
 | `Migrate(ctx)` | Creates tables and indexes if they don't exist |
-| `Ping(ctx)` | Runs `SELECT 1` to check connectivity |
-| `Close()` | Closes the underlying `*sql.DB` |
+| `Ping(ctx)` | Verifies database connectivity |
+| `Close()` | Closes the underlying `*grove.DB` |
 
 ## Forge extension
 
-When using Weave as a Forge extension, migrations run automatically at startup unless disabled:
+When using Weave as a Forge extension with Grove integration, you can let the extension auto-construct the store from a shared `grove.DB`:
+
+```go
+ext := extension.New(
+    extension.WithGroveDatabase(""),  // use default grove.DB from DI
+)
+```
+
+Or provide an explicit store:
 
 ```go
 ext := extension.New(
     extension.WithStore(store),
-    extension.WithDisableMigrate(false), // default — runs Migrate on Start
+    extension.WithDisableMigrate(), // disable auto-migration if needed
 )
 ```

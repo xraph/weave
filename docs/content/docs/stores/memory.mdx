@@ -72,8 +72,8 @@ eng, _ := engine.New(
 
 // Production
 eng, _ := engine.New(
-    engine.WithStore(pgstore.New(pool)),
-    engine.WithVectorStore(pgvec.New(pool)),
+    engine.WithStore(pgstore.New(db)),
+    engine.WithVectorStore(pgvec.New(db)),
     engine.WithEmbedder(emb),
 )
 ```

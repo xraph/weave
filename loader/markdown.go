@@ -21,8 +21,8 @@ var (
 	reCode       = regexp.MustCompile("`{1,3}[^`]*`{1,3}")
 	reCodeBlock  = regexp.MustCompile("(?s)```[^`]*```")
 	reHR         = regexp.MustCompile(`(?m)^[-*_]{3,}\s*$`)
-	reListMarker = regexp.MustCompile(`(?m)^[\s]*[-*+]\s+`)
-	reNumList    = regexp.MustCompile(`(?m)^[\s]*\d+\.\s+`)
+	reListMarker = regexp.MustCompile(`(?m)^\s*[-*+]\s+`)
+	reNumList    = regexp.MustCompile(`(?m)^\s*\d+\.\s+`)
 )
 
 // Load reads Markdown and returns plain text.

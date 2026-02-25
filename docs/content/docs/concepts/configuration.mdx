@@ -1,34 +1,34 @@
 ---
 title: Configuration
-description: Options and defaults for weave.NewEngine and the Forge extension.
+description: Options and defaults for engine.New and the Forge extension.
 ---
 
-## `weave.NewEngine` options
+## Engine options
 
-`weave.NewEngine` accepts a variadic list of option functions:
+`engine.New` accepts a variadic list of option functions:
 
 ```go
-engine, err := weave.NewEngine(
-    weave.WithStore(pgStore),            // required
-    weave.WithVectorStore(pgVec),        // required
-    weave.WithEmbedder(myEmbedder),      // required
-    weave.WithChunker(myChunker),        // optional
-    weave.WithLoader(myLoader),          // optional
-    weave.WithRetriever(myRetriever),    // optional
-    weave.WithExtension(metricsExt),     // optional, repeatable
-    weave.WithLogger(slog.Default()),    // optional
+eng, err := engine.New(
+    engine.WithStore(pgStore),            // required
+    engine.WithVectorStore(pgVec),        // required
+    engine.WithEmbedder(myEmbedder),      // required
+    engine.WithChunker(myChunker),        // optional
+    engine.WithLoader(myLoader),          // optional
+    engine.WithRetriever(myRetriever),    // optional
+    engine.WithExtension(metricsPlugin),  // optional, repeatable
+    engine.WithLogger(slog.Default()),    // optional
 )
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `WithStore(s)` | `store.Store` | — | **Required.** Metadata store for collections, documents, chunks. |
-| `WithVectorStore(v)` | `vectorstore.VectorStore` | — | **Required.** Vector store for embeddings. |
-| `WithEmbedder(e)` | `embedder.Embedder` | — | **Required.** Embedding model implementation. |
+| `WithStore(s)` | `store.Store` | -- | **Required.** Metadata store for collections, documents, chunks. |
+| `WithVectorStore(v)` | `vectorstore.VectorStore` | -- | **Required.** Vector store for embeddings. |
+| `WithEmbedder(e)` | `embedder.Embedder` | -- | **Required.** Embedding model implementation. |
 | `WithChunker(c)` | `chunker.Chunker` | recursive chunker | Text chunking implementation. |
 | `WithLoader(l)` | `loader.Loader` | `nil` | Document loader for binary formats. |
 | `WithRetriever(r)` | `retriever.Retriever` | built-in | Custom retrieval strategy. |
-| `WithExtension(e)` | `ext.Extension` | `nil` | Lifecycle hook extension (repeatable). |
+| `WithExtension(x)` | `plugins.Extension` | `nil` | Lifecycle hook plugin (repeatable). |
 | `WithLogger(l)` | `*slog.Logger` | `slog.Default()` | Structured logger for internal events. |
 
 ## Default Config
@@ -75,18 +75,69 @@ The `extension.New` function accepts its own set of options:
 ext := extension.New(
     extension.WithStore(pgStore),
     extension.WithVectorStore(pgVec),
-    extension.WithEmbedder(myEmbedder),
-    extension.WithLogger(logger),
-    extension.WithDisableRoutes(false),
-    extension.WithDisableMigrate(false),
+    extension.WithExtension(metricsPlugin),
+    extension.WithDisableRoutes(),
+    extension.WithDisableMigrate(),
+    extension.WithBasePath("/weave"),
+    extension.WithGroveDatabase(""),
 )
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `WithStore(s)` | `store.Store` | — | **Required.** Metadata store. |
-| `WithVectorStore(v)` | `vectorstore.VectorStore` | — | **Required.** Vector store. |
-| `WithEmbedder(e)` | `embedder.Embedder` | — | **Required.** Embedder implementation. |
-| `WithLogger(l)` | `*slog.Logger` | `slog.Default()` | Logger for all Weave components. |
-| `WithDisableRoutes(b)` | `bool` | `false` | Skip HTTP route registration in the Forge router. |
-| `WithDisableMigrate(b)` | `bool` | `false` | Skip `store.Migrate` and `vectorstore.Migrate` on `Start`. |
+| `WithStore(s)` | `store.Store` | -- | MetadataStore (auto-resolved from grove if not set). |
+| `WithVectorStore(v)` | `vectorstore.VectorStore` | -- | Vector store. |
+| `WithExtension(x)` | `plugins.Extension` | -- | Lifecycle hook plugin (repeatable). |
+| `WithEngineOption(opt)` | `engine.Option` | -- | Pass engine option directly. |
+| `WithConfig(cfg)` | `Config` | defaults | Full config struct. |
+| `WithDisableRoutes()` | -- | `false` | Skip HTTP route registration. |
+| `WithDisableMigrate()` | -- | `false` | Skip migrations on Start. |
+| `WithBasePath(path)` | `string` | `"/weave"` | URL prefix for all weave routes. |
+| `WithGroveDatabase(name)` | `string` | `""` | Named grove.DB to resolve from DI. |
+| `WithRequireConfig(b)` | `bool` | `false` | Require config in YAML files. |
+
+## File-based configuration (YAML)
+
+When running as a Forge extension, Weave automatically loads configuration from YAML config files. The extension looks for config under the following keys (in order):
+
+1. `extensions.weave` -- standard Forge extension config namespace
+2. `weave` -- top-level shorthand
+
+### Example
+
+```yaml
+# forge.yaml
+extensions:
+  weave:
+    disable_routes: false
+    disable_migrate: false
+    base_path: "/weave"
+    default_chunk_size: 512
+    default_chunk_overlap: 50
+    default_embedding_model: "text-embedding-3-small"
+    default_chunk_strategy: "recursive"
+    default_top_k: 10
+    shutdown_timeout: "30s"
+    ingest_concurrency: 4
+    grove_database: ""
+```
+
+### Config fields
+
+| YAML Key | Type | Default | Description |
+|----------|------|---------|-------------|
+| `disable_routes` | `bool` | `false` | Skip HTTP route registration |
+| `disable_migrate` | `bool` | `false` | Skip migrations on Start |
+| `base_path` | `string` | `"/weave"` | URL prefix for all routes |
+| `default_chunk_size` | `int` | `512` | Default tokens per chunk |
+| `default_chunk_overlap` | `int` | `50` | Default token overlap |
+| `default_embedding_model` | `string` | `"text-embedding-3-small"` | Default embedding model |
+| `default_chunk_strategy` | `string` | `"recursive"` | Default chunking strategy |
+| `default_top_k` | `int` | `10` | Default similarity search result count |
+| `shutdown_timeout` | `duration` | `"30s"` | Max graceful shutdown wait |
+| `ingest_concurrency` | `int` | `4` | Parallel ingest operations |
+| `grove_database` | `string` | `""` | Named grove.DB from DI |
+
+### Merge behaviour
+
+File-based configuration is merged with programmatic options. Programmatic options set via `extension.New(...)` take precedence over YAML values.

@@ -18,9 +18,6 @@ package main
 
 import (
     "github.com/xraph/forge"
-    pgstore "github.com/xraph/weave/store/postgres"
-    pgvec "github.com/xraph/weave/vectorstore/pgvector"
-    "github.com/xraph/weave/embedder"
     "github.com/xraph/weave/extension"
 )
 
@@ -28,16 +25,24 @@ func main() {
     app := forge.New()
 
     weaveExt := extension.New(
-        extension.WithStore(pgstore.New(bunDB)),
-        extension.WithVectorStore(pgvec.New(pgxPool)),
-        extension.WithEmbedder(embedder.NewOpenAI(
-            embedder.WithOpenAIKey(os.Getenv("OPENAI_API_KEY")),
-        )),
+        extension.WithGroveDatabase(""), // resolve default grove.DB from DI
     )
 
     app.RegisterExtension(weaveExt)
     app.Run()
 }
+```
+
+Or with explicit stores:
+
+```go
+weaveExt := extension.New(
+    extension.WithStore(pgstore.New(db)),
+    extension.WithVectorStore(pgvec.New(db)),
+    extension.WithEmbedder(embedder.NewOpenAI(
+        embedder.WithOpenAIKey(os.Getenv("OPENAI_API_KEY")),
+    )),
+)
 ```
 
 ## What the extension does
@@ -46,20 +51,89 @@ func main() {
 |----------------|-----------|
 | `Register` | Creates the engine from the provided options |
 | `Start` | Runs `store.Migrate` and `vectorstore.Migrate` (unless disabled) |
-| `RegisterRoutes` | Mounts all 12 Weave HTTP endpoints under `/v1` |
-| `Stop` | Calls `engine.Stop` → emits `OnShutdown` to all extensions |
+| `RegisterRoutes` | Mounts all Weave HTTP endpoints under the base path |
+| `Stop` | Calls `engine.Stop` -- emits `OnShutdown` to all plugins |
 
 ## Extension options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `WithStore(s)` | `store.Store` | — | **Required.** MetadataStore |
-| `WithVectorStore(v)` | `vectorstore.VectorStore` | — | **Required.** VectorStore |
-| `WithEmbedder(e)` | `embedder.Embedder` | — | **Required.** Embedder |
-| `WithLogger(l)` | `*slog.Logger` | `slog.Default()` | Logger |
-| `WithDisableRoutes(b)` | `bool` | `false` | Skip HTTP route registration |
-| `WithGroveDatabase(name)` | `string` | `""` | Name of the grove.DB to resolve from DI; empty uses the default DB |
-| `WithDisableMigrate(b)` | `bool` | `false` | Skip migrations on Start |
+| `WithStore(s)` | `store.Store` | -- | MetadataStore (auto-resolved from grove if not set) |
+| `WithVectorStore(v)` | `vectorstore.VectorStore` | -- | VectorStore |
+| `WithExtension(x)` | `plugins.Extension` | -- | Lifecycle hook plugin (repeatable) |
+| `WithEngineOption(opt)` | `engine.Option` | -- | Pass engine option directly |
+| `WithConfig(cfg)` | `Config` | defaults | Full config struct |
+| `WithDisableRoutes()` | -- | `false` | Skip HTTP route registration |
+| `WithDisableMigrate()` | -- | `false` | Skip migrations on Start |
+| `WithBasePath(path)` | `string` | `"/weave"` | URL prefix for all weave routes |
+| `WithGroveDatabase(name)` | `string` | `""` | Name of the grove.DB to resolve from DI |
+| `WithRequireConfig(b)` | `bool` | `false` | Require config in YAML files |
+
+## File-based configuration (YAML)
+
+When running in a Forge application, the Weave extension automatically loads configuration from YAML config files. The extension looks for config under the following keys (in order):
+
+1. `extensions.weave` -- standard Forge extension config namespace
+2. `weave` -- top-level shorthand
+
+### Example YAML config
+
+```yaml
+# forge.yaml
+extensions:
+  weave:
+    disable_routes: false
+    disable_migrate: false
+    base_path: "/weave"
+    default_chunk_size: 512
+    default_chunk_overlap: 50
+    default_embedding_model: "text-embedding-3-small"
+    default_chunk_strategy: "recursive"
+    default_top_k: 10
+    shutdown_timeout: "30s"
+    ingest_concurrency: 4
+    grove_database: ""
+```
+
+Or using the top-level shorthand:
+
+```yaml
+# forge.yaml
+weave:
+  default_chunk_size: 1024
+  default_embedding_model: "text-embedding-3-large"
+  ingest_concurrency: 8
+```
+
+### Config fields
+
+| YAML Key | Type | Default | Description |
+|----------|------|---------|-------------|
+| `disable_routes` | `bool` | `false` | Skip HTTP route registration |
+| `disable_migrate` | `bool` | `false` | Skip migrations on Start |
+| `base_path` | `string` | `"/weave"` | URL prefix for all weave routes |
+| `default_chunk_size` | `int` | `512` | Default tokens per chunk |
+| `default_chunk_overlap` | `int` | `50` | Default token overlap between chunks |
+| `default_embedding_model` | `string` | `"text-embedding-3-small"` | Default embedding model |
+| `default_chunk_strategy` | `string` | `"recursive"` | Default chunking strategy |
+| `default_top_k` | `int` | `10` | Default number of similarity search results |
+| `shutdown_timeout` | `duration` | `"30s"` | Max graceful shutdown wait time |
+| `ingest_concurrency` | `int` | `4` | Parallel ingest operations |
+| `grove_database` | `string` | `""` | Named grove.DB to resolve from DI |
+
+### Merge behaviour
+
+File-based configuration is merged with programmatic options. Programmatic options set via `extension.New(...)` take precedence over YAML values. This lets you set sensible defaults in YAML while overriding specific values in code.
+
+### Requiring configuration
+
+If your deployment requires YAML config to be present, use `WithRequireConfig`:
+
+```go
+ext := extension.New(
+    extension.WithRequireConfig(true), // error if no YAML config found
+)
+```
 
 ## Disabling auto-migration
 
@@ -68,9 +142,7 @@ If you manage migrations separately (e.g. with a migration tool), disable auto-m
 ```go
 weaveExt := extension.New(
     extension.WithStore(store),
-    extension.WithVectorStore(vecStore),
-    extension.WithEmbedder(emb),
-    extension.WithDisableMigrate(true),
+    extension.WithDisableMigrate(),
 )
 ```
 
@@ -155,7 +227,6 @@ metricsExt := observability.NewMetricsExtensionWithFactory(fapp.Metrics())
 weaveExt := extension.New(
     extension.WithStore(store),
     extension.WithVectorStore(vecStore),
-    extension.WithEmbedder(emb),
-    extension.WithEngineExtension(metricsExt), // passed to engine.New internally
+    extension.WithExtension(metricsExt), // passed to engine.New internally
 )
 ```

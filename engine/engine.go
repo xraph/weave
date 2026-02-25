@@ -14,9 +14,9 @@ import (
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/embedder"
-	"github.com/xraph/weave/ext"
 	"github.com/xraph/weave/id"
 	"github.com/xraph/weave/loader"
+	"github.com/xraph/weave/plugins"
 	"github.com/xraph/weave/retriever"
 	"github.com/xraph/weave/store"
 	"github.com/xraph/weave/vectorstore"
@@ -32,8 +32,8 @@ type Engine struct {
 	chunker     chunker.Chunker
 	loader      loader.Loader
 	retriever   retriever.Retriever
-	extensions  *ext.Registry
-	pendingExts []ext.Extension
+	extensions  *plugins.Registry
+	pendingExts []plugins.Extension
 }
 
 // New creates a new Engine with the given options.
@@ -49,7 +49,7 @@ func New(opts ...Option) (*Engine, error) {
 	}
 
 	// Wire up the extension registry.
-	e.extensions = ext.NewRegistry(e.logger)
+	e.extensions = plugins.NewRegistry(e.logger)
 	for _, extension := range e.pendingExts {
 		e.extensions.Register(extension)
 	}
@@ -85,7 +85,7 @@ func (e *Engine) Logger() *slog.Logger { return e.logger }
 func (e *Engine) Config() weave.Config { return e.config }
 
 // Extensions returns the extension registry.
-func (e *Engine) Extensions() *ext.Registry { return e.extensions }
+func (e *Engine) Extensions() *plugins.Registry { return e.extensions }
 
 // ──────────────────────────────────────────────────
 // Collection operations
@@ -299,15 +299,15 @@ func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult,
 		State:         document.StatePending,
 	}
 
-	if err := e.store.CreateDocument(ctx, doc); err != nil {
-		return nil, fmt.Errorf("weave: create document: %w", err)
+	if createErr := e.store.CreateDocument(ctx, doc); createErr != nil {
+		return nil, fmt.Errorf("weave: create document: %w", createErr)
 	}
 
 	e.extensions.EmitIngestStarted(ctx, input.CollectionID, []*document.Document{doc})
 
 	// Mark processing.
 	doc.State = document.StateProcessing
-	_ = e.store.UpdateDocument(ctx, doc)
+	_ = e.store.UpdateDocument(ctx, doc) //nolint:errcheck // best-effort status update
 
 	// Optionally load/extract text.
 	content := input.Content
@@ -397,7 +397,7 @@ func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult,
 	// Mark document as ready.
 	doc.State = document.StateReady
 	doc.ChunkCount = len(chunks)
-	_ = e.store.UpdateDocument(ctx, doc)
+	_ = e.store.UpdateDocument(ctx, doc) //nolint:errcheck // best-effort status update
 
 	elapsed := time.Since(start)
 	e.extensions.EmitIngestCompleted(ctx, input.CollectionID, 1, len(chunks), elapsed)
@@ -426,7 +426,7 @@ func (e *Engine) IngestBatch(ctx context.Context, inputs []*IngestInput) ([]*Ing
 func (e *Engine) failIngest(ctx context.Context, doc *document.Document, colID id.CollectionID, ingestErr error) (*IngestResult, error) {
 	doc.State = document.StateFailed
 	doc.Error = ingestErr.Error()
-	_ = e.store.UpdateDocument(ctx, doc)
+	_ = e.store.UpdateDocument(ctx, doc) //nolint:errcheck // best-effort status update
 
 	e.extensions.EmitIngestFailed(ctx, colID, ingestErr)
 
@@ -501,7 +501,7 @@ func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOpt
 		params.TenantID = weave.TenantFromContext(ctx)
 	}
 
-	colID, _ := id.ParseCollectionID(params.CollectionID)
+	colID, _ := id.ParseCollectionID(params.CollectionID) //nolint:errcheck // collection ID may be empty for cross-collection search
 	start := time.Now()
 
 	e.extensions.EmitRetrievalStarted(ctx, colID, query)

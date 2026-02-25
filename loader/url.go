@@ -29,13 +29,13 @@ func NewURLLoaderWithClient(client *http.Client, delegate Loader) *URLLoader {
 }
 
 // Load fetches the URL and delegates content extraction.
-func (l *URLLoader) Load(ctx context.Context, _ /* unused reader */ interface{ Read([]byte) (int, error) }) (*LoadResult, error) {
+func (l *URLLoader) Load(_ context.Context, _ /* unused reader */ interface{ Read([]byte) (int, error) }) (*LoadResult, error) {
 	return nil, fmt.Errorf("weave: URLLoader.Load requires a URL; use LoadURL instead")
 }
 
 // LoadURL fetches a URL and extracts content using the delegate loader.
 func (l *URLLoader) LoadURL(ctx context.Context, url string) (*LoadResult, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("weave: url load: %w", err)
 	}

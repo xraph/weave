@@ -42,8 +42,8 @@ func WithTokenCounter(tc TokenCounter) Option {
 }
 
 // WithMaxTokens sets the maximum token budget for assembled context.
-func WithMaxTokens(max int) Option {
-	return func(a *Assembler) { a.maxTokens = max }
+func WithMaxTokens(limit int) Option {
+	return func(a *Assembler) { a.maxTokens = limit }
 }
 
 // New creates a new Assembler with the given options.
@@ -99,7 +99,7 @@ func (a *Assembler) Assemble(_ context.Context, results []retriever.Result) (*As
 
 // AssembleSimple creates a simple context string by joining chunk contents.
 func AssembleSimple(results []retriever.Result) string {
-	var parts []string
+	parts := make([]string, 0, len(results))
 	for _, r := range results {
 		parts = append(parts, r.Chunk.Content)
 	}

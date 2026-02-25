@@ -43,7 +43,7 @@ func (a *API) RegisterRoutes(router forge.Router) {
 func (a *API) registerCollectionRoutes(router forge.Router) {
 	g := router.Group("/v1", forge.WithGroupTags("collections"))
 
-	_ = g.POST("/collections", a.createCollection,
+	_ = g.POST("/collections", a.createCollection, //nolint:errcheck // route registration
 		forge.WithSummary("Create collection"),
 		forge.WithDescription("Creates a new document collection with the specified embedding and chunking configuration."),
 		forge.WithOperationID("createCollection"),
@@ -52,7 +52,7 @@ func (a *API) registerCollectionRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.GET("/collections", a.listCollections,
+	_ = g.GET("/collections", a.listCollections, //nolint:errcheck // route registration
 		forge.WithSummary("List collections"),
 		forge.WithDescription("Returns collections with optional pagination."),
 		forge.WithOperationID("listCollections"),
@@ -61,7 +61,7 @@ func (a *API) registerCollectionRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.GET("/collections/:collectionId", a.getCollection,
+	_ = g.GET("/collections/:collectionId", a.getCollection, //nolint:errcheck // route registration
 		forge.WithSummary("Get collection"),
 		forge.WithDescription("Returns details of a specific collection."),
 		forge.WithOperationID("getCollection"),
@@ -69,7 +69,7 @@ func (a *API) registerCollectionRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.DELETE("/collections/:collectionId", a.deleteCollection,
+	_ = g.DELETE("/collections/:collectionId", a.deleteCollection, //nolint:errcheck // route registration
 		forge.WithSummary("Delete collection"),
 		forge.WithDescription("Deletes a collection and all its documents and chunks."),
 		forge.WithOperationID("deleteCollection"),
@@ -77,7 +77,7 @@ func (a *API) registerCollectionRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.GET("/collections/:collectionId/stats", a.collectionStats,
+	_ = g.GET("/collections/:collectionId/stats", a.collectionStats, //nolint:errcheck // route registration
 		forge.WithSummary("Collection statistics"),
 		forge.WithDescription("Returns aggregate statistics for a collection."),
 		forge.WithOperationID("collectionStats"),
@@ -85,7 +85,7 @@ func (a *API) registerCollectionRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.POST("/collections/:collectionId/reindex", a.reindexCollection,
+	_ = g.POST("/collections/:collectionId/reindex", a.reindexCollection, //nolint:errcheck // route registration
 		forge.WithSummary("Reindex collection"),
 		forge.WithDescription("Re-embeds and re-stores all chunks in the collection."),
 		forge.WithOperationID("reindexCollection"),
@@ -98,7 +98,7 @@ func (a *API) registerCollectionRoutes(router forge.Router) {
 func (a *API) registerDocumentRoutes(router forge.Router) {
 	g := router.Group("/v1", forge.WithGroupTags("documents"))
 
-	_ = g.POST("/collections/:collectionId/documents", a.ingestDocument,
+	_ = g.POST("/collections/:collectionId/documents", a.ingestDocument, //nolint:errcheck // route registration
 		forge.WithSummary("Ingest document"),
 		forge.WithDescription("Ingests a single document into a collection: chunk, embed, and store."),
 		forge.WithOperationID("ingestDocument"),
@@ -107,7 +107,7 @@ func (a *API) registerDocumentRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.POST("/collections/:collectionId/documents/batch", a.ingestBatch,
+	_ = g.POST("/collections/:collectionId/documents/batch", a.ingestBatch, //nolint:errcheck // route registration
 		forge.WithSummary("Ingest documents batch"),
 		forge.WithDescription("Ingests multiple documents into a collection."),
 		forge.WithOperationID("ingestBatch"),
@@ -116,7 +116,7 @@ func (a *API) registerDocumentRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.GET("/collections/:collectionId/documents", a.listDocuments,
+	_ = g.GET("/collections/:collectionId/documents", a.listDocuments, //nolint:errcheck // route registration
 		forge.WithSummary("List documents"),
 		forge.WithDescription("Returns documents in a collection with optional state filter."),
 		forge.WithOperationID("listDocuments"),
@@ -125,7 +125,7 @@ func (a *API) registerDocumentRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.GET("/documents/:documentId", a.getDocument,
+	_ = g.GET("/documents/:documentId", a.getDocument, //nolint:errcheck // route registration
 		forge.WithSummary("Get document"),
 		forge.WithDescription("Returns details of a specific document."),
 		forge.WithOperationID("getDocument"),
@@ -133,7 +133,7 @@ func (a *API) registerDocumentRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.DELETE("/documents/:documentId", a.deleteDocument,
+	_ = g.DELETE("/documents/:documentId", a.deleteDocument, //nolint:errcheck // route registration
 		forge.WithSummary("Delete document"),
 		forge.WithDescription("Deletes a document and its chunks from both metadata and vector stores."),
 		forge.WithOperationID("deleteDocument"),
@@ -146,7 +146,7 @@ func (a *API) registerDocumentRoutes(router forge.Router) {
 func (a *API) registerRetrievalRoutes(router forge.Router) {
 	g := router.Group("/v1", forge.WithGroupTags("retrieval"))
 
-	_ = g.POST("/collections/:collectionId/retrieve", a.retrieve,
+	_ = g.POST("/collections/:collectionId/retrieve", a.retrieve, //nolint:errcheck // route registration
 		forge.WithSummary("Retrieve chunks"),
 		forge.WithDescription("Performs semantic retrieval within a collection."),
 		forge.WithOperationID("retrieve"),
@@ -155,7 +155,7 @@ func (a *API) registerRetrievalRoutes(router forge.Router) {
 		forge.WithErrorResponses(),
 	)
 
-	_ = g.POST("/search", a.hybridSearch,
+	_ = g.POST("/search", a.hybridSearch, //nolint:errcheck // route registration
 		forge.WithSummary("Hybrid search"),
 		forge.WithDescription("Performs retrieval across one or more collections."),
 		forge.WithOperationID("hybridSearch"),
