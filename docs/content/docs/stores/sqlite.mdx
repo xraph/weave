@@ -1,9 +1,9 @@
 ---
 title: SQLite Store
-description: Lightweight SQLite MetadataStore for single-node deployments and development.
+description: Lightweight SQLite MetadataStore using Grove ORM with sqlitedriver.
 ---
 
-The `store/sqlite` package provides a SQLite-backed MetadataStore. It uses the same `bun` ORM as the PostgreSQL store and is suitable for embedded applications, CLI tools, and single-node services that don't require a separate database server.
+The `store/sqlite` package provides a SQLite-backed MetadataStore using the [Grove ORM](https://github.com/xraph/grove) with `sqlitedriver`. It is suitable for embedded applications, CLI tools, and single-node services that don't require a separate database server.
 
 ## Installation
 
@@ -11,34 +11,20 @@ The `store/sqlite` package provides a SQLite-backed MetadataStore. It uses the s
 go get github.com/xraph/weave/store/sqlite
 ```
 
-Requires a CGO-enabled SQLite driver. Add the blank import for your driver of choice:
-
-```go
-import _ "github.com/mattn/go-sqlite3"    // CGO
-// or
-import _ "modernc.org/sqlite"              // pure Go
-```
-
 ## Setup
 
 ```go
 import (
-    "database/sql"
-    "github.com/uptrace/bun"
-    "github.com/uptrace/bun/dialect/sqlitedialect"
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/drivers/sqlitedriver"
     sqlitestore "github.com/xraph/weave/store/sqlite"
 )
 
-sqldb, err := sql.Open("sqlite3", "weave.db?_journal=WAL&_timeout=5000")
-if err != nil {
-    log.Fatal(err)
-}
-db := bun.NewDB(sqldb, sqlitedialect.New())
+// Open a SQLite connection via Grove's sqlitedriver.
+db := grove.Open(sqlitedriver.New("weave.db"))
 
 store := sqlitestore.New(db)
 ```
-
-Use WAL journal mode for better concurrent read performance.
 
 ## Migrations
 
@@ -48,7 +34,7 @@ if err := store.Migrate(ctx); err != nil {
 }
 ```
 
-Creates the same three tables as the PostgreSQL store (`weave_collections`, `weave_documents`, `weave_chunks`) using SQLite-compatible column types.
+Creates the same three tables as the PostgreSQL store (`weave_collections`, `weave_documents`, `weave_chunks`) using the Grove migration orchestrator with SQLite-compatible column types.
 
 ## Pairing with a vector store
 
@@ -67,18 +53,31 @@ eng, err := engine.New(
 )
 ```
 
-For persistent vector storage with SQLite, implement a custom `VectorStore` backed by sqlite-vec or a file-based format.
+## Internals
+
+| Aspect | Detail |
+|--------|--------|
+| Driver | Grove ORM with `sqlitedriver` (SQLite) |
+| Migrations | Grove migration orchestrator with programmatic migrations |
+| Transactions | Database-level transactions via SQLite |
 
 ## Lifecycle
 
 | Method | Behaviour |
 |--------|-----------|
-| `Migrate(ctx)` | Creates tables if they don't exist |
-| `Ping(ctx)` | Runs `SELECT 1` |
-| `Close()` | Closes the underlying `*sql.DB` |
+| `Migrate(ctx)` | Creates tables and indexes using the Grove migration orchestrator |
+| `Ping(ctx)` | Verifies database connectivity |
+| `Close()` | Closes the underlying database connection |
+
+## When to use
+
+- **Local development** -- single-file database, no server process required.
+- **Testing** -- fast, isolated store with no external dependencies.
+- **Embedded / single-process** -- CLI tools, desktop apps, or edge deployments.
+- **CI pipelines** -- deterministic tests without a database container.
 
 ## Limitations
 
-- **Single-writer** — SQLite uses database-level write locks. High write concurrency will serialize on a single connection. Use WAL mode to allow concurrent readers.
-- **No pgvector** — vector similarity search requires a separate vector store (in-memory for development, a dedicated service for production)
-- **Not horizontally scalable** — SQLite is suited for single-process or embedded use
+- **Single-writer** -- SQLite uses database-level write locks. High write concurrency will serialize.
+- **No pgvector** -- vector similarity search requires a separate vector store.
+- **Not horizontally scalable** -- suited for single-process or embedded use.

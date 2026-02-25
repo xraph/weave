@@ -1,0 +1,90 @@
+---
+title: MongoDB Store
+description: Document-oriented MetadataStore using Grove ORM with mongodriver for MongoDB.
+---
+
+The `store/mongo` package provides a MongoDB-backed MetadataStore using the [Grove ORM](https://github.com/xraph/grove) with `mongodriver`. It stores collections, documents, and chunks in MongoDB collections with compound indexes for efficient tenant-scoped queries.
+
+## Installation
+
+```bash
+go get github.com/xraph/weave/store/mongo
+```
+
+## Setup
+
+```go
+import (
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/drivers/mongodriver"
+    mongostore "github.com/xraph/weave/store/mongo"
+)
+
+// Open a MongoDB connection via Grove's mongodriver.
+db := grove.Open(mongodriver.New(
+    mongodriver.WithURI("mongodb://localhost:27017"),
+    mongodriver.WithDatabase("weave"),
+))
+
+store := mongostore.New(db)
+```
+
+## Migrations
+
+```go
+if err := store.Migrate(ctx); err != nil {
+    log.Fatal("migrate:", err)
+}
+```
+
+Creates compound and unique indexes on all three collections (`weave_collections`, `weave_documents`, `weave_chunks`) for efficient queries scoped by tenant and app.
+
+## Pairing with a vector store
+
+Pair the MongoDB metadata store with a vector store for similarity search:
+
+```go
+import (
+    mongostore "github.com/xraph/weave/store/mongo"
+    pgvec "github.com/xraph/weave/vectorstore/pgvector"
+)
+
+eng, err := engine.New(
+    engine.WithStore(mongostore.New(db)),
+    engine.WithVectorStore(pgvec.New(pool)),
+    engine.WithEmbedder(emb),
+)
+```
+
+## Internals
+
+| Aspect | Detail |
+|--------|--------|
+| Driver | Grove ORM with `mongodriver` (MongoDB) |
+| Migrations | Creates compound and unique indexes via `mongomigrate` |
+| Transactions | Individual operations are atomic; multi-document transactions require explicit sessions |
+
+## Collections
+
+| Collection | Entity |
+|------------|--------|
+| `weave_collections` | Collection metadata -- name, model, chunk config, counters |
+| `weave_documents` | Document records -- state, hashes, source info |
+| `weave_chunks` | Chunk text and byte offsets |
+
+All collections include `tenant_id` and `app_id` fields, and queries filter on them automatically.
+
+## Lifecycle
+
+| Method | Behaviour |
+|--------|-----------|
+| `Migrate(ctx)` | Creates indexes on all collections |
+| `Ping(ctx)` | Verifies database connectivity |
+| `Close()` | Disconnects from MongoDB |
+
+## When to use
+
+- **Document-oriented workloads** -- flexible schemas that evolve with your application.
+- **Horizontal scaling** -- MongoDB sharding for large-scale deployments.
+- **Cloud-native** -- MongoDB Atlas for fully managed deployments.
+- **Teams familiar with MongoDB** -- leverage existing document database expertise.

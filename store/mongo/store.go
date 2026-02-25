@@ -1,15 +1,19 @@
-// Package postgres provides a PostgreSQL implementation of the Weave
-// composite store using grove ORM with grove migrations.
-package postgres
+// Package mongo provides a MongoDB implementation of the Weave
+// composite store using Grove ORM with the mongodriver.
+package mongo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+
 	"github.com/xraph/grove"
-	"github.com/xraph/grove/drivers/pgdriver"
-	"github.com/xraph/grove/drivers/pgdriver/pgmigrate"
+	"github.com/xraph/grove/drivers/mongodriver"
+	"github.com/xraph/grove/drivers/mongodriver/mongomigrate"
 
 	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
@@ -19,26 +23,32 @@ import (
 	"github.com/xraph/weave/store"
 )
 
+const (
+	colCollections = "weave_collections"
+	colDocuments   = "weave_documents"
+	colChunks      = "weave_chunks"
+)
+
 // Compile-time interface check.
 var _ store.Store = (*Store)(nil)
 
-// Store is a PostgreSQL implementation of the composite Weave store.
+// Store is a MongoDB implementation of the composite Weave store.
 type Store struct {
-	db *grove.DB
-	pg *pgdriver.PgDB
+	db  *grove.DB
+	mdb *mongodriver.MongoDB
 }
 
-// New creates a new PostgreSQL store.
+// New creates a new MongoDB store.
 func New(db *grove.DB) *Store {
 	return &Store{
-		db: db,
-		pg: pgdriver.Unwrap(db),
+		db:  db,
+		mdb: mongodriver.Unwrap(db),
 	}
 }
 
-// Migrate runs grove migrations for the Weave schema.
+// Migrate runs grove migrations for the Weave schema (creates indexes).
 func (s *Store) Migrate(ctx context.Context) error {
-	exec := pgmigrate.New(s.pg)
+	exec := mongomigrate.New(s.mdb)
 	for _, m := range Migrations.Migrations() {
 		if m.Up != nil {
 			if err := m.Up(ctx, exec); err != nil {
@@ -69,7 +79,7 @@ func (s *Store) CreateCollection(ctx context.Context, col *collection.Collection
 	col.UpdatedAt = now
 	m := collectionToModel(col)
 
-	_, err := s.pg.NewInsert(m).Exec(ctx)
+	_, err := s.mdb.NewInsert(m).Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: create collection: %w", err)
 	}
@@ -78,55 +88,53 @@ func (s *Store) CreateCollection(ctx context.Context, col *collection.Collection
 
 func (s *Store) GetCollection(ctx context.Context, colID id.CollectionID) (*collection.Collection, error) {
 	m := new(collectionModel)
-	err := s.pg.NewSelect(m).Where("id = $1", colID.String()).Scan(ctx)
+	err := s.mdb.NewFind(m).Filter(bson.M{"_id": colID.String()}).Scan(ctx)
 	if err != nil {
-		if isNoRows(err) {
+		if isNotFound(err) {
 			return nil, weave.ErrCollectionNotFound
 		}
 		return nil, fmt.Errorf("weave: get collection: %w", err)
 	}
-	return collectionFromModel(m), nil
+	return collectionFromModel(m)
 }
 
 func (s *Store) GetCollectionByName(ctx context.Context, tenantID, name string) (*collection.Collection, error) {
 	m := new(collectionModel)
-	err := s.pg.NewSelect(m).
-		Where("tenant_id = $1", tenantID).
-		Where("name = $2", name).
+	err := s.mdb.NewFind(m).
+		Filter(bson.M{"tenant_id": tenantID}).
+		Filter(bson.M{"name": name}).
 		Scan(ctx)
 	if err != nil {
-		if isNoRows(err) {
+		if isNotFound(err) {
 			return nil, weave.ErrCollectionNotFound
 		}
 		return nil, fmt.Errorf("weave: get collection by name: %w", err)
 	}
-	return collectionFromModel(m), nil
+	return collectionFromModel(m)
 }
 
 func (s *Store) UpdateCollection(ctx context.Context, col *collection.Collection) error {
 	col.UpdatedAt = time.Now().UTC()
 	m := collectionToModel(col)
 
-	res, err := s.pg.NewUpdate(m).WherePK().Exec(ctx)
+	res, err := s.mdb.NewUpdate(m).Filter(bson.M{"_id": m.ID}).Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: update collection: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if n := res.MatchedCount(); n == 0 {
 		return weave.ErrCollectionNotFound
 	}
 	return nil
 }
 
 func (s *Store) DeleteCollection(ctx context.Context, colID id.CollectionID) error {
-	res, err := s.pg.NewDelete((*collectionModel)(nil)).
-		Where("id = $1", colID.String()).
+	res, err := s.mdb.NewDelete((*collectionModel)(nil)).
+		Filter(bson.M{"_id": colID.String()}).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete collection: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if n := res.DeletedCount(); n == 0 {
 		return weave.ErrCollectionNotFound
 	}
 	return nil
@@ -134,14 +142,14 @@ func (s *Store) DeleteCollection(ctx context.Context, colID id.CollectionID) err
 
 func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilter) ([]*collection.Collection, error) {
 	var models []collectionModel
-	q := s.pg.NewSelect(&models).OrderExpr("created_at ASC")
+	q := s.mdb.NewFind(&models).Sort(bson.D{{Key: "created_at", Value: 1}})
 
 	if filter != nil {
 		if filter.Limit > 0 {
-			q = q.Limit(filter.Limit)
+			q = q.Limit(int64(filter.Limit))
 		}
 		if filter.Offset > 0 {
-			q = q.Offset(filter.Offset)
+			q = q.Skip(int64(filter.Offset))
 		}
 	}
 
@@ -151,7 +159,11 @@ func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilt
 
 	result := make([]*collection.Collection, len(models))
 	for i := range models {
-		result[i] = collectionFromModel(&models[i])
+		c, convErr := collectionFromModel(&models[i])
+		if convErr != nil {
+			return nil, convErr
+		}
+		result[i] = c
 	}
 	return result, nil
 }
@@ -166,7 +178,7 @@ func (s *Store) CreateDocument(ctx context.Context, doc *document.Document) erro
 	doc.UpdatedAt = now
 	m := documentToModel(doc)
 
-	_, err := s.pg.NewInsert(m).Exec(ctx)
+	_, err := s.mdb.NewInsert(m).Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: create document: %w", err)
 	}
@@ -175,40 +187,38 @@ func (s *Store) CreateDocument(ctx context.Context, doc *document.Document) erro
 
 func (s *Store) GetDocument(ctx context.Context, docID id.DocumentID) (*document.Document, error) {
 	m := new(documentModel)
-	err := s.pg.NewSelect(m).Where("id = $1", docID.String()).Scan(ctx)
+	err := s.mdb.NewFind(m).Filter(bson.M{"_id": docID.String()}).Scan(ctx)
 	if err != nil {
-		if isNoRows(err) {
+		if isNotFound(err) {
 			return nil, weave.ErrDocumentNotFound
 		}
 		return nil, fmt.Errorf("weave: get document: %w", err)
 	}
-	return documentFromModel(m), nil
+	return documentFromModel(m)
 }
 
 func (s *Store) UpdateDocument(ctx context.Context, doc *document.Document) error {
 	doc.UpdatedAt = time.Now().UTC()
 	m := documentToModel(doc)
 
-	res, err := s.pg.NewUpdate(m).WherePK().Exec(ctx)
+	res, err := s.mdb.NewUpdate(m).Filter(bson.M{"_id": m.ID}).Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: update document: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if n := res.MatchedCount(); n == 0 {
 		return weave.ErrDocumentNotFound
 	}
 	return nil
 }
 
 func (s *Store) DeleteDocument(ctx context.Context, docID id.DocumentID) error {
-	res, err := s.pg.NewDelete((*documentModel)(nil)).
-		Where("id = $1", docID.String()).
+	res, err := s.mdb.NewDelete((*documentModel)(nil)).
+		Filter(bson.M{"_id": docID.String()}).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete document: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if n := res.DeletedCount(); n == 0 {
 		return weave.ErrDocumentNotFound
 	}
 	return nil
@@ -216,20 +226,20 @@ func (s *Store) DeleteDocument(ctx context.Context, docID id.DocumentID) error {
 
 func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) ([]*document.Document, error) {
 	var models []documentModel
-	q := s.pg.NewSelect(&models).OrderExpr("created_at ASC")
+	q := s.mdb.NewFind(&models).Sort(bson.D{{Key: "created_at", Value: 1}})
 
 	if filter != nil {
 		if filter.CollectionID.String() != "" {
-			q = q.Where("collection_id = $1", filter.CollectionID.String())
+			q = q.Filter(bson.M{"collection_id": filter.CollectionID.String()})
 		}
 		if filter.State != "" {
-			q = q.Where("state = $2", string(filter.State))
+			q = q.Filter(bson.M{"state": string(filter.State)})
 		}
 		if filter.Limit > 0 {
-			q = q.Limit(filter.Limit)
+			q = q.Limit(int64(filter.Limit))
 		}
 		if filter.Offset > 0 {
-			q = q.Offset(filter.Offset)
+			q = q.Skip(int64(filter.Offset))
 		}
 	}
 
@@ -239,20 +249,24 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 
 	result := make([]*document.Document, len(models))
 	for i := range models {
-		result[i] = documentFromModel(&models[i])
+		d, convErr := documentFromModel(&models[i])
+		if convErr != nil {
+			return nil, convErr
+		}
+		result[i] = d
 	}
 	return result, nil
 }
 
 func (s *Store) CountDocuments(ctx context.Context, filter *document.CountFilter) (int64, error) {
-	q := s.pg.NewSelect((*documentModel)(nil))
+	q := s.mdb.NewFind((*documentModel)(nil))
 
 	if filter != nil {
 		if filter.CollectionID.String() != "" {
-			q = q.Where("collection_id = $1", filter.CollectionID.String())
+			q = q.Filter(bson.M{"collection_id": filter.CollectionID.String()})
 		}
 		if filter.State != "" {
-			q = q.Where("state = $2", string(filter.State))
+			q = q.Filter(bson.M{"state": string(filter.State)})
 		}
 	}
 
@@ -264,8 +278,9 @@ func (s *Store) CountDocuments(ctx context.Context, filter *document.CountFilter
 }
 
 func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.CollectionID) error {
-	_, err := s.pg.NewDelete((*documentModel)(nil)).
-		Where("collection_id = $1", colID.String()).
+	_, err := s.mdb.NewDelete((*documentModel)(nil)).
+		Filter(bson.M{"collection_id": colID.String()}).
+		Many().
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete documents by collection: %w", err)
@@ -289,7 +304,7 @@ func (s *Store) CreateChunkBatch(ctx context.Context, chunks []*chunk.Chunk) err
 		models[i] = *chunkToModel(ch)
 	}
 
-	_, err := s.pg.NewInsert(&models).Exec(ctx)
+	_, err := s.mdb.NewInsert(&models).Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: create chunk batch: %w", err)
 	}
@@ -298,21 +313,21 @@ func (s *Store) CreateChunkBatch(ctx context.Context, chunks []*chunk.Chunk) err
 
 func (s *Store) GetChunk(ctx context.Context, chunkID id.ChunkID) (*chunk.Chunk, error) {
 	m := new(chunkModel)
-	err := s.pg.NewSelect(m).Where("id = $1", chunkID.String()).Scan(ctx)
+	err := s.mdb.NewFind(m).Filter(bson.M{"_id": chunkID.String()}).Scan(ctx)
 	if err != nil {
-		if isNoRows(err) {
+		if isNotFound(err) {
 			return nil, weave.ErrChunkNotFound
 		}
 		return nil, fmt.Errorf("weave: get chunk: %w", err)
 	}
-	return chunkFromModel(m), nil
+	return chunkFromModel(m)
 }
 
 func (s *Store) ListChunksByDocument(ctx context.Context, docID id.DocumentID) ([]*chunk.Chunk, error) {
 	var models []chunkModel
-	err := s.pg.NewSelect(&models).
-		Where("document_id = $1", docID.String()).
-		OrderExpr("index ASC").
+	err := s.mdb.NewFind(&models).
+		Filter(bson.M{"document_id": docID.String()}).
+		Sort(bson.D{{Key: "index", Value: 1}}).
 		Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("weave: list chunks by document: %w", err)
@@ -320,14 +335,19 @@ func (s *Store) ListChunksByDocument(ctx context.Context, docID id.DocumentID) (
 
 	result := make([]*chunk.Chunk, len(models))
 	for i := range models {
-		result[i] = chunkFromModel(&models[i])
+		c, convErr := chunkFromModel(&models[i])
+		if convErr != nil {
+			return nil, convErr
+		}
+		result[i] = c
 	}
 	return result, nil
 }
 
 func (s *Store) DeleteChunksByDocument(ctx context.Context, docID id.DocumentID) error {
-	_, err := s.pg.NewDelete((*chunkModel)(nil)).
-		Where("document_id = $1", docID.String()).
+	_, err := s.mdb.NewDelete((*chunkModel)(nil)).
+		Filter(bson.M{"document_id": docID.String()}).
+		Many().
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete chunks by document: %w", err)
@@ -336,8 +356,9 @@ func (s *Store) DeleteChunksByDocument(ctx context.Context, docID id.DocumentID)
 }
 
 func (s *Store) DeleteChunksByCollection(ctx context.Context, colID id.CollectionID) error {
-	_, err := s.pg.NewDelete((*chunkModel)(nil)).
-		Where("collection_id = $1", colID.String()).
+	_, err := s.mdb.NewDelete((*chunkModel)(nil)).
+		Filter(bson.M{"collection_id": colID.String()}).
+		Many().
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete chunks by collection: %w", err)
@@ -346,14 +367,14 @@ func (s *Store) DeleteChunksByCollection(ctx context.Context, colID id.Collectio
 }
 
 func (s *Store) CountChunks(ctx context.Context, filter *chunk.CountFilter) (int64, error) {
-	q := s.pg.NewSelect((*chunkModel)(nil))
+	q := s.mdb.NewFind((*chunkModel)(nil))
 
 	if filter != nil {
 		if filter.CollectionID.String() != "" {
-			q = q.Where("collection_id = $1", filter.CollectionID.String())
+			q = q.Filter(bson.M{"collection_id": filter.CollectionID.String()})
 		}
 		if filter.DocumentID.String() != "" {
-			q = q.Where("document_id = $2", filter.DocumentID.String())
+			q = q.Filter(bson.M{"document_id": filter.DocumentID.String()})
 		}
 	}
 
@@ -364,7 +385,8 @@ func (s *Store) CountChunks(ctx context.Context, filter *chunk.CountFilter) (int
 	return count, nil
 }
 
-// isNoRows checks whether an error indicates no rows were found.
-func isNoRows(err error) bool {
-	return err == grove.ErrNoRows || err.Error() == "no rows in result set"
+// isNotFound checks whether an error indicates no documents were found.
+func isNotFound(err error) bool {
+	return errors.Is(err, mongo.ErrNoDocuments) ||
+		errors.Is(err, grove.ErrNoRows)
 }

@@ -2,23 +2,11 @@
 package extension
 
 import (
-	"log/slog"
-
 	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/ext"
 	"github.com/xraph/weave/store"
 	"github.com/xraph/weave/vectorstore"
 )
-
-// Config configures the Weave Forge extension.
-type Config struct {
-	// DisableRoutes prevents HTTP route registration.
-	DisableRoutes bool
-	// DisableMigrate prevents auto-migration on start.
-	DisableMigrate bool
-	// BasePath is the URL prefix for all weave routes.
-	BasePath string
-}
 
 // ExtOption configures the Weave Forge extension.
 type ExtOption func(*Extension)
@@ -53,35 +41,36 @@ func WithEngineOption(opt engine.Option) ExtOption {
 
 // WithConfig sets the extension configuration.
 func WithConfig(cfg Config) ExtOption {
-	return func(e *Extension) {
-		e.config = cfg
-	}
+	return func(e *Extension) { e.config = cfg }
 }
 
 // WithDisableRoutes disables HTTP route registration.
 func WithDisableRoutes() ExtOption {
-	return func(e *Extension) {
-		e.config.DisableRoutes = true
-	}
+	return func(e *Extension) { e.config.DisableRoutes = true }
 }
 
 // WithDisableMigrate disables auto-migration on start.
 func WithDisableMigrate() ExtOption {
-	return func(e *Extension) {
-		e.config.DisableMigrate = true
-	}
+	return func(e *Extension) { e.config.DisableMigrate = true }
 }
 
 // WithBasePath sets the URL prefix for all weave routes.
 func WithBasePath(path string) ExtOption {
-	return func(e *Extension) {
-		e.config.BasePath = path
-	}
+	return func(e *Extension) { e.config.BasePath = path }
 }
 
-// WithLogger sets the structured logger.
-func WithLogger(l *slog.Logger) ExtOption {
+// WithRequireConfig requires config to be present in YAML files.
+// If true and no config is found, Register returns an error.
+func WithRequireConfig(require bool) ExtOption {
+	return func(e *Extension) { e.config.RequireConfig = require }
+}
+
+// WithGroveDatabase sets the name of the grove.DB to resolve from the DI container.
+// The extension will auto-construct the appropriate store backend (postgres/sqlite/mongo)
+// based on the grove driver type. Pass an empty string to use the default (unnamed) grove.DB.
+func WithGroveDatabase(name string) ExtOption {
 	return func(e *Extension) {
-		e.logger = l
+		e.config.GroveDatabase = name
+		e.useGrove = true
 	}
 }

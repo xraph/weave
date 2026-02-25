@@ -58,6 +58,7 @@ func main() {
 | `WithEmbedder(e)` | `embedder.Embedder` | — | **Required.** Embedder |
 | `WithLogger(l)` | `*slog.Logger` | `slog.Default()` | Logger |
 | `WithDisableRoutes(b)` | `bool` | `false` | Skip HTTP route registration |
+| `WithGroveDatabase(name)` | `string` | `""` | Name of the grove.DB to resolve from DI; empty uses the default DB |
 | `WithDisableMigrate(b)` | `bool` | `false` | Skip migrations on Start |
 
 ## Disabling auto-migration
@@ -99,6 +100,48 @@ func tenantMiddleware(next http.Handler) http.Handler {
 
 router.Use(tenantMiddleware)
 ```
+
+## Grove database integration
+
+When your Forge app uses the [Grove extension](https://github.com/xraph/grove) to manage database connections, Weave can automatically resolve a `grove.DB` from the DI container and construct the correct store backend based on the driver type.
+
+### Using the default grove database
+
+If the Grove extension registers a single database (or a default in multi-DB mode), use `WithGroveDatabase` with an empty name:
+
+```go
+ext := extension.New(
+    extension.WithGroveDatabase(""),
+    extension.WithVectorStore(pgvec.New(pgxPool)),
+    extension.WithEmbedder(embedder.NewOpenAI(
+        embedder.WithOpenAIKey(os.Getenv("OPENAI_API_KEY")),
+    )),
+)
+```
+
+### Using a named grove database
+
+In multi-database setups, reference a specific database by name:
+
+```go
+ext := extension.New(
+    extension.WithGroveDatabase("weave"),
+    extension.WithVectorStore(pgvec.New(pgxPool)),
+    extension.WithEmbedder(embedder.NewOpenAI(
+        embedder.WithOpenAIKey(os.Getenv("OPENAI_API_KEY")),
+    )),
+)
+```
+
+This resolves the grove.DB named `"weave"` from the DI container and auto-constructs the matching store. The driver type is detected automatically -- you do not need to import individual store packages.
+
+### Store resolution order
+
+The extension resolves its store in this order:
+
+1. **Explicit store** -- if `WithStore(s)` was called, it is used directly and grove is ignored.
+2. **Grove database** -- if `WithGroveDatabase(name)` was called, the named or default `grove.DB` is resolved from DI.
+3. **In-memory fallback** -- if neither is configured, an in-memory store is used.
 
 ## Adding metrics
 
