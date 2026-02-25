@@ -1,126 +1,257 @@
-// Package id provides TypeID-based identity types for all Weave entities.
+// Package id defines TypeID-based identity types for all Weave entities.
 //
-// Every entity in Weave gets a type-prefixed, K-sortable, UUIDv7-based
-// identifier. IDs are validated at parse time to ensure the prefix matches
-// the expected type.
-//
-// Examples:
-//
-//	doc_01h2xcejqtf2nbrexx3vqjhp41
-//	col_01h2xcejqtf2nbrexx3vqjhp41
-//	chk_01h455vb4pex5vsknk084sn02q
+// Every entity in Weave uses a single ID struct with a prefix that identifies
+// the entity type. IDs are K-sortable (UUIDv7-based), globally unique,
+// and URL-safe in the format "prefix_suffix".
 package id
 
 import (
+	"database/sql/driver"
 	"fmt"
 
 	"go.jetify.com/typeid/v2"
 )
 
-// ──────────────────────────────────────────────────
-// Prefix constants
-// ──────────────────────────────────────────────────
+// Prefix identifies the entity type encoded in a TypeID.
+type Prefix string
 
+// Prefix constants for all Weave entity types.
 const (
-	// PrefixDocument is the TypeID prefix for documents.
-	PrefixDocument = "doc"
-
-	// PrefixCollection is the TypeID prefix for collections.
-	PrefixCollection = "col"
-
-	// PrefixChunk is the TypeID prefix for chunks.
-	PrefixChunk = "chk"
-
-	// PrefixPipeline is the TypeID prefix for pipelines.
-	PrefixPipeline = "pipe"
-
-	// PrefixIngestJob is the TypeID prefix for ingest jobs.
-	PrefixIngestJob = "ingjob"
+	PrefixDocument   Prefix = "doc"
+	PrefixCollection Prefix = "col"
+	PrefixChunk      Prefix = "chk"
+	PrefixPipeline   Prefix = "pipe"
+	PrefixIngestJob  Prefix = "ingjob"
 )
 
+// ID is the primary identifier type for all Weave entities.
+// It wraps a TypeID providing a prefix-qualified, globally unique,
+// sortable, URL-safe identifier in the format "prefix_suffix".
+//
+//nolint:recvcheck // Value receivers for read-only methods, pointer receivers for UnmarshalText/Scan.
+type ID struct {
+	inner typeid.TypeID
+	valid bool
+}
+
+// Nil is the zero-value ID.
+var Nil ID
+
+// New generates a new globally unique ID with the given prefix.
+// It panics if prefix is not a valid TypeID prefix (programming error).
+func New(prefix Prefix) ID {
+	tid, err := typeid.Generate(string(prefix))
+	if err != nil {
+		panic(fmt.Sprintf("id: invalid prefix %q: %v", prefix, err))
+	}
+
+	return ID{inner: tid, valid: true}
+}
+
+// Parse parses a TypeID string (e.g., "doc_01h2xcejqtf2nbrexx3vqjhp41")
+// into an ID. Returns an error if the string is not valid.
+func Parse(s string) (ID, error) {
+	if s == "" {
+		return Nil, fmt.Errorf("id: parse %q: empty string", s)
+	}
+
+	tid, err := typeid.Parse(s)
+	if err != nil {
+		return Nil, fmt.Errorf("id: parse %q: %w", s, err)
+	}
+
+	return ID{inner: tid, valid: true}, nil
+}
+
+// ParseWithPrefix parses a TypeID string and validates that its prefix
+// matches the expected value.
+func ParseWithPrefix(s string, expected Prefix) (ID, error) {
+	parsed, err := Parse(s)
+	if err != nil {
+		return Nil, err
+	}
+
+	if parsed.Prefix() != expected {
+		return Nil, fmt.Errorf("id: expected prefix %q, got %q", expected, parsed.Prefix())
+	}
+
+	return parsed, nil
+}
+
+// MustParse is like Parse but panics on error. Use for hardcoded ID values.
+func MustParse(s string) ID {
+	parsed, err := Parse(s)
+	if err != nil {
+		panic(fmt.Sprintf("id: must parse %q: %v", s, err))
+	}
+
+	return parsed
+}
+
+// MustParseWithPrefix is like ParseWithPrefix but panics on error.
+func MustParseWithPrefix(s string, expected Prefix) ID {
+	parsed, err := ParseWithPrefix(s, expected)
+	if err != nil {
+		panic(fmt.Sprintf("id: must parse with prefix %q: %v", expected, err))
+	}
+
+	return parsed
+}
+
 // ──────────────────────────────────────────────────
-// Type aliases for readability
+// Type aliases for backward compatibility
 // ──────────────────────────────────────────────────
 
 // DocumentID is a type-safe identifier for documents (prefix: "doc").
-type DocumentID = typeid.TypeID
+type DocumentID = ID
 
 // CollectionID is a type-safe identifier for collections (prefix: "col").
-type CollectionID = typeid.TypeID
+type CollectionID = ID
 
 // ChunkID is a type-safe identifier for chunks (prefix: "chk").
-type ChunkID = typeid.TypeID
+type ChunkID = ID
 
 // PipelineID is a type-safe identifier for pipelines (prefix: "pipe").
-type PipelineID = typeid.TypeID
+type PipelineID = ID
 
 // IngestJobID is a type-safe identifier for ingest jobs (prefix: "ingjob").
-type IngestJobID = typeid.TypeID
+type IngestJobID = ID
 
-// AnyID is a TypeID that accepts any valid prefix.
-type AnyID = typeid.TypeID
-
-// ──────────────────────────────────────────────────
-// Constructors
-// ──────────────────────────────────────────────────
-
-// NewDocumentID returns a new random DocumentID.
-func NewDocumentID() DocumentID { return must(typeid.Generate(PrefixDocument)) }
-
-// NewCollectionID returns a new random CollectionID.
-func NewCollectionID() CollectionID { return must(typeid.Generate(PrefixCollection)) }
-
-// NewChunkID returns a new random ChunkID.
-func NewChunkID() ChunkID { return must(typeid.Generate(PrefixChunk)) }
-
-// NewPipelineID returns a new random PipelineID.
-func NewPipelineID() PipelineID { return must(typeid.Generate(PrefixPipeline)) }
-
-// NewIngestJobID returns a new random IngestJobID.
-func NewIngestJobID() IngestJobID { return must(typeid.Generate(PrefixIngestJob)) }
+// AnyID is a type alias that accepts any valid prefix.
+type AnyID = ID
 
 // ──────────────────────────────────────────────────
-// Parsing (validates prefix at parse time)
+// Convenience constructors
 // ──────────────────────────────────────────────────
 
-// ParseDocumentID parses a string into a DocumentID. Returns an error if the
-// prefix is not "doc" or the suffix is invalid.
-func ParseDocumentID(s string) (DocumentID, error) { return parseWithPrefix(PrefixDocument, s) }
+// NewDocumentID generates a new unique document ID.
+func NewDocumentID() ID { return New(PrefixDocument) }
 
-// ParseCollectionID parses a string into a CollectionID.
-func ParseCollectionID(s string) (CollectionID, error) { return parseWithPrefix(PrefixCollection, s) }
+// NewCollectionID generates a new unique collection ID.
+func NewCollectionID() ID { return New(PrefixCollection) }
 
-// ParseChunkID parses a string into a ChunkID.
-func ParseChunkID(s string) (ChunkID, error) { return parseWithPrefix(PrefixChunk, s) }
+// NewChunkID generates a new unique chunk ID.
+func NewChunkID() ID { return New(PrefixChunk) }
 
-// ParsePipelineID parses a string into a PipelineID.
-func ParsePipelineID(s string) (PipelineID, error) { return parseWithPrefix(PrefixPipeline, s) }
+// NewPipelineID generates a new unique pipeline ID.
+func NewPipelineID() ID { return New(PrefixPipeline) }
 
-// ParseIngestJobID parses a string into an IngestJobID.
-func ParseIngestJobID(s string) (IngestJobID, error) { return parseWithPrefix(PrefixIngestJob, s) }
-
-// ParseAny parses a string into an AnyID, accepting any valid prefix.
-func ParseAny(s string) (AnyID, error) { return typeid.Parse(s) }
+// NewIngestJobID generates a new unique ingest job ID.
+func NewIngestJobID() ID { return New(PrefixIngestJob) }
 
 // ──────────────────────────────────────────────────
-// Helpers
+// Convenience parsers
 // ──────────────────────────────────────────────────
 
-// parseWithPrefix parses a TypeID and validates that its prefix matches expected.
-func parseWithPrefix(expected, s string) (typeid.TypeID, error) {
-	tid, err := typeid.Parse(s)
-	if err != nil {
-		return tid, err
+// ParseDocumentID parses a string and validates the "doc" prefix.
+func ParseDocumentID(s string) (ID, error) { return ParseWithPrefix(s, PrefixDocument) }
+
+// ParseCollectionID parses a string and validates the "col" prefix.
+func ParseCollectionID(s string) (ID, error) { return ParseWithPrefix(s, PrefixCollection) }
+
+// ParseChunkID parses a string and validates the "chk" prefix.
+func ParseChunkID(s string) (ID, error) { return ParseWithPrefix(s, PrefixChunk) }
+
+// ParsePipelineID parses a string and validates the "pipe" prefix.
+func ParsePipelineID(s string) (ID, error) { return ParseWithPrefix(s, PrefixPipeline) }
+
+// ParseIngestJobID parses a string and validates the "ingjob" prefix.
+func ParseIngestJobID(s string) (ID, error) { return ParseWithPrefix(s, PrefixIngestJob) }
+
+// ParseAny parses a string into an ID without type checking the prefix.
+func ParseAny(s string) (ID, error) { return Parse(s) }
+
+// ──────────────────────────────────────────────────
+// ID methods
+// ──────────────────────────────────────────────────
+
+// String returns the full TypeID string representation (prefix_suffix).
+// Returns an empty string for the Nil ID.
+func (i ID) String() string {
+	if !i.valid {
+		return ""
 	}
-	if tid.Prefix() != expected {
-		return tid, fmt.Errorf("id: expected prefix %q, got %q", expected, tid.Prefix())
-	}
-	return tid, nil
+
+	return i.inner.String()
 }
 
-func must[T any](v T, err error) T {
-	if err != nil {
-		panic(err)
+// Prefix returns the prefix component of this ID.
+func (i ID) Prefix() Prefix {
+	if !i.valid {
+		return ""
 	}
-	return v
+
+	return Prefix(i.inner.Prefix())
+}
+
+// IsNil reports whether this ID is the zero value.
+func (i ID) IsNil() bool {
+	return !i.valid
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (i ID) MarshalText() ([]byte, error) {
+	if !i.valid {
+		return []byte{}, nil
+	}
+
+	return []byte(i.inner.String()), nil
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (i *ID) UnmarshalText(data []byte) error {
+	if len(data) == 0 {
+		*i = Nil
+
+		return nil
+	}
+
+	parsed, err := Parse(string(data))
+	if err != nil {
+		return err
+	}
+
+	*i = parsed
+
+	return nil
+}
+
+// Value implements driver.Valuer for database storage.
+// Returns nil for the Nil ID so that optional foreign key columns store NULL.
+func (i ID) Value() (driver.Value, error) {
+	if !i.valid {
+		return nil, nil //nolint:nilnil // nil is the canonical NULL for driver.Valuer
+	}
+
+	return i.inner.String(), nil
+}
+
+// Scan implements sql.Scanner for database retrieval.
+func (i *ID) Scan(src any) error {
+	if src == nil {
+		*i = Nil
+
+		return nil
+	}
+
+	switch v := src.(type) {
+	case string:
+		if v == "" {
+			*i = Nil
+
+			return nil
+		}
+
+		return i.UnmarshalText([]byte(v))
+	case []byte:
+		if len(v) == 0 {
+			*i = Nil
+
+			return nil
+		}
+
+		return i.UnmarshalText(v)
+	default:
+		return fmt.Errorf("id: cannot scan %T into ID", src)
+	}
 }

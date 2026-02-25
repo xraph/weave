@@ -1,61 +1,65 @@
 ---
 title: Identity (TypeID)
-description: How Weave uses type-safe, prefix-qualified identifiers for every entity.
+description: How Weave uses prefix-qualified, globally unique identifiers for every entity.
 ---
 
-Weave uses [TypeID](https://github.com/jetify-com/typeid) for all entity identifiers. TypeIDs are type-prefixed, K-sortable, UUIDv7-based identifiers.
+Every entity in Weave has a TypeID. TypeIDs are globally unique, sortable, URL-safe identifiers built on UUIDv7 with a human-readable prefix that tells you what kind of entity you're looking at.
 
-## What TypeID looks like
+A TypeID looks like this:
 
 ```
-col_01h455vbjdx6ycf56rnatbxqkh
-doc_01h455vbjdx6ycf56rnatbxqki
-chunk_01h455vbjdx6ycf56rnatbxqkj
+doc_01h455vb4pex5vsknk084sn02q
 ```
 
-The prefix encodes the entity type. The suffix is a base32-encoded UUIDv7, which is K-sortable (lexicographically ordered by creation time) and globally unique.
+The `doc` prefix identifies this as a document. The suffix is a base32-encoded UUIDv7 that encodes creation time, so IDs sort chronologically.
 
-## Entity prefixes
+## The `id` package
 
-| Entity | Prefix | Example |
-|--------|--------|---------|
-| Collection | `col_` | `col_01h455vbjdx6ycf56rnatbxqkh` |
-| Document | `doc_` | `doc_01h455vbjdx6ycf56rnatbxqki` |
-| Chunk | `chunk_` | `chunk_01h455vbjdx6ycf56rnatbxqkj` |
+The `id` package wraps the [TypeID Go library](https://github.com/jetify-com/typeid-go) (v2) with a single `ID` struct. All entity types share the same struct -- the prefix distinguishes them.
 
-## Type safety
-
-The `id` package provides typed ID functions. Passing a `doc_` ID where a `col_` ID is expected is a compile-time error:
+### Creating IDs
 
 ```go
 import "github.com/xraph/weave/id"
 
-colID := id.NewCollection()  // returns id.CollectionID
-docID := id.NewDocument()    // returns id.DocumentID
-
-// This is a compile error — type mismatch
-engine.GetDocument(ctx, colID) // colID is not id.DocumentID
+documentID   := id.New(id.PrefixDocument)    // doc_01h455vb...
+collectionID := id.New(id.PrefixCollection)  // col_01h455vb...
+chunkID      := id.New(id.PrefixChunk)       // chk_01h455vb...
 ```
 
-## Parsing and validating IDs
+Convenience constructors: `id.NewDocumentID()`, `id.NewCollectionID()`, `id.NewChunkID()`, `id.NewPipelineID()`, `id.NewIngestJobID()`.
+
+### Parsing IDs
 
 ```go
-import "github.com/xraph/weave/id"
-
-// Parse an ID from a string (e.g. from HTTP request)
-colID, err := id.ParseCollection("col_01h455vbjdx6ycf56rnatbxqkh")
-if err != nil {
-    // not a valid collection ID
-}
-
-// Convert to string for storage or response
-fmt.Println(colID.String())
+parsed, err := id.Parse("doc_01h455vb4pex5vsknk084sn02q")
+parsed, err := id.ParseWithPrefix("doc_01h455vb...", id.PrefixDocument)  // validates prefix
+parsed, err := id.ParseDocumentID("doc_01h455vb...")                     // convenience
 ```
 
-## K-sortability
+### Nil ID
 
-Because TypeIDs embed UUIDv7, they are K-sortable: IDs created later sort after IDs created earlier. This means:
-- Database indexes on ID columns are naturally insertion-ordered.
-- You can range scan by ID to page through results in creation order without a separate `created_at` index.
+```go
+var empty id.ID
+empty.IsNil()  // true
+empty.String() // ""
+id.Nil.IsNil() // true
+```
 
-Weave's store implementations rely on this property for efficient pagination.
+### Database storage
+
+`id.ID` implements `Scanner` and `driver.Valuer`. Stores as a string, returns `NULL` for nil IDs.
+
+### JSON serialization
+
+`id.ID` implements `TextMarshaler` and `TextUnmarshaler`. Nil IDs serialize as empty strings.
+
+## Prefix reference
+
+| Constant | Prefix | Entity |
+|----------|--------|--------|
+| `id.PrefixDocument` | `doc` | Document |
+| `id.PrefixCollection` | `col` | Collection |
+| `id.PrefixChunk` | `chk` | Chunk |
+| `id.PrefixPipeline` | `pipe` | Pipeline |
+| `id.PrefixIngestJob` | `ingjob` | Ingest job |
