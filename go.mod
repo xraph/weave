@@ -7,9 +7,12 @@ require (
 	github.com/xraph/forge v0.9.12
 	github.com/xraph/go-utils v0.0.11
 	github.com/xraph/grove v0.0.5
+	github.com/xraph/grove/drivers/mongodriver v0.0.5
 	github.com/xraph/grove/drivers/pgdriver v0.0.5
+	github.com/xraph/grove/drivers/sqlitedriver v0.0.5
 	github.com/xraph/vessel v0.0.5
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3
+	go.mongodb.org/mongo-driver/v2 v2.5.0
 	golang.org/x/net v0.50.0
 )
 
@@ -79,10 +82,7 @@ require (
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/xraph/confy v0.0.3 // indirect
-	github.com/xraph/grove/drivers/mongodriver v0.0.5 // indirect
-	github.com/xraph/grove/drivers/sqlitedriver v0.0.5 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
-	go.mongodb.org/mongo-driver/v2 v2.5.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
