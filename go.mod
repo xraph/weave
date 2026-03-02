@@ -12,7 +12,7 @@ require (
 	github.com/xraph/vessel v0.0.5
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3
 	go.mongodb.org/mongo-driver/v2 v2.5.0
-	golang.org/x/net v0.50.0
+	golang.org/x/net v0.51.0
 )
 
 require (
