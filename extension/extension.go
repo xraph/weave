@@ -89,6 +89,16 @@ func (e *Extension) Register(fapp forge.App) error {
 			return err
 		}
 		e.engineOpts = append(e.engineOpts, engine.WithStore(s))
+	} else if db, err := vessel.Inject[*grove.DB](fapp.Container()); err == nil {
+		// Auto-discover default grove.DB from container (matches authsome/cortex pattern).
+		s, err := e.buildStoreFromGroveDB(db)
+		if err != nil {
+			return err
+		}
+		e.engineOpts = append(e.engineOpts, engine.WithStore(s))
+		e.Logger().Info("weave: auto-discovered grove.DB from container",
+			forge.F("driver", db.Driver().Name()),
+		)
 	}
 
 	eng, err := engine.New(e.engineOpts...)
@@ -102,7 +112,11 @@ func (e *Extension) Register(fapp forge.App) error {
 
 	// Register HTTP routes unless disabled.
 	if !e.config.DisableRoutes {
-		e.apiHandler.RegisterRoutes(fapp.Router())
+		basePath := e.config.BasePath
+		if basePath == "" {
+			basePath = "/weave"
+		}
+		e.apiHandler.RegisterRoutes(fapp.Router().Group(basePath))
 	}
 
 	// Register the engine in the DI container so other extensions can use it.

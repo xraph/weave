@@ -4,10 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
+	log "github.com/xraph/go-utils/log"
 	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/chunker"
@@ -25,7 +25,7 @@ import (
 // Engine is the central coordinator for the Weave RAG pipeline.
 type Engine struct {
 	config      weave.Config
-	logger      *slog.Logger
+	logger      log.Logger
 	store       store.Store
 	vectorStore vectorstore.VectorStore
 	embedder    embedder.Embedder
@@ -40,7 +40,7 @@ type Engine struct {
 func New(opts ...Option) (*Engine, error) {
 	e := &Engine{
 		config: weave.DefaultConfig(),
-		logger: slog.Default(),
+		logger: log.NewNoopLogger(),
 	}
 	for _, opt := range opts {
 		if err := opt(e); err != nil {
@@ -56,6 +56,14 @@ func New(opts ...Option) (*Engine, error) {
 	e.pendingExts = nil
 
 	return e, nil
+}
+
+// Health checks the health of the engine by pinging its store.
+func (e *Engine) Health(ctx context.Context) error {
+	if e.store != nil {
+		return e.store.Ping(ctx)
+	}
+	return nil
 }
 
 // Start initialises the engine. Currently a no-op but reserved for
@@ -79,7 +87,7 @@ func (e *Engine) Stop(ctx context.Context) error {
 func (e *Engine) Store() store.Store { return e.store }
 
 // Logger returns the engine's logger.
-func (e *Engine) Logger() *slog.Logger { return e.logger }
+func (e *Engine) Logger() log.Logger { return e.logger }
 
 // Config returns a copy of the engine's configuration.
 func (e *Engine) Config() weave.Config { return e.config }
@@ -172,8 +180,8 @@ func (e *Engine) DeleteCollection(ctx context.Context, colID id.CollectionID) er
 			"collection_id": colID.String(),
 		}); err != nil {
 			e.logger.Warn("failed to delete vector entries for collection",
-				slog.String("collection_id", colID.String()),
-				slog.String("error", err.Error()),
+				log.String("collection_id", colID.String()),
+				log.String("error", err.Error()),
 			)
 		}
 	}
@@ -612,8 +620,8 @@ func (e *Engine) DeleteDocument(ctx context.Context, docID id.DocumentID) error 
 			"document_id": docID.String(),
 		}); err != nil {
 			e.logger.Warn("failed to delete vector entries for document",
-				slog.String("document_id", docID.String()),
-				slog.String("error", err.Error()),
+				log.String("document_id", docID.String()),
+				log.String("error", err.Error()),
 			)
 		}
 	}

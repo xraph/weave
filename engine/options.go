@@ -2,8 +2,7 @@
 package engine
 
 import (
-	"log/slog"
-
+	log "github.com/xraph/go-utils/log"
 	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunker"
 	"github.com/xraph/weave/embedder"
@@ -66,7 +65,7 @@ func WithRetriever(r retriever.Retriever) Option {
 }
 
 // WithLogger sets the structured logger.
-func WithLogger(l *slog.Logger) Option {
+func WithLogger(l log.Logger) Option {
 	return func(e *Engine) error {
 		e.logger = l
 		return nil

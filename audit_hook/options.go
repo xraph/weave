@@ -1,6 +1,6 @@
 package audithook
 
-import "log/slog"
+import log "github.com/xraph/go-utils/log"
 
 // Option configures an audit hook Extension.
 type Option func(*Extension)
@@ -17,7 +17,7 @@ func WithActions(actions ...string) Option {
 }
 
 // WithLogger sets the logger used for internal warnings.
-func WithLogger(l *slog.Logger) Option {
+func WithLogger(l log.Logger) Option {
 	return func(e *Extension) {
 		e.logger = l
 	}

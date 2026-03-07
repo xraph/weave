@@ -37,7 +37,7 @@ if err := store.Migrate(ctx); err != nil {
 }
 ```
 
-Creates compound and unique indexes on all three collections (`weave_collections`, `weave_documents`, `weave_chunks`) for efficient queries scoped by tenant and app.
+Creates collections with JSON Schema validation (auto-generated from Grove model structs) and applies compound and unique indexes on all three collections (`weave_collections`, `weave_documents`, `weave_chunks`) for efficient queries scoped by tenant and app.
 
 ## Pairing with a vector store
 
@@ -61,7 +61,7 @@ eng, err := engine.New(
 | Aspect | Detail |
 |--------|--------|
 | Driver | Grove ORM with `mongodriver` (MongoDB) |
-| Migrations | Creates compound and unique indexes via `mongomigrate` |
+| Migrations | Grove migrations with JSON Schema validation + indexes |
 | Transactions | Individual operations are atomic; multi-document transactions require explicit sessions |
 
 ## Collections
@@ -78,9 +78,20 @@ All collections include `tenant_id` and `app_id` fields, and queries filter on t
 
 | Method | Behaviour |
 |--------|-----------|
-| `Migrate(ctx)` | Creates indexes on all collections |
+| `Migrate(ctx)` | Creates collections with JSON Schema validation and indexes |
 | `Ping(ctx)` | Verifies database connectivity |
 | `Close()` | Disconnects from MongoDB |
+
+## Grove Migrations
+
+The store exports a `Migrations` group for use with Grove's migration orchestrator. This enables tracked, versioned migrations across all stores in your application:
+
+```go
+import mongostore "github.com/xraph/weave/store/mongo"
+
+// mongostore.Migrations is a migrate.Group for the weave mongo store.
+// Register it with the grove migration orchestrator for coordinated migrations.
+```
 
 ## When to use
 

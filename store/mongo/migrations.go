@@ -25,9 +25,12 @@ func init() {
 				if !ok {
 					return fmt.Errorf("expected mongomigrate executor, got %T", exec)
 				}
-				coll := mexec.DB().Collection(colCollections)
 
-				indexes := []mongo.IndexModel{
+				if err := mexec.CreateCollection(ctx, (*collectionModel)(nil)); err != nil {
+					return err
+				}
+
+				return mexec.CreateIndexes(ctx, colCollections, []mongo.IndexModel{
 					{
 						Keys: bson.D{
 							{Key: "tenant_id", Value: 1},
@@ -43,20 +46,14 @@ func init() {
 						Keys:    bson.D{{Key: "created_at", Value: 1}},
 						Options: options.Index().SetName("idx_weave_collections_created_at"),
 					},
-				}
-
-				_, err := coll.Indexes().CreateMany(ctx, indexes)
-				if err != nil {
-					return fmt.Errorf("create weave_collections indexes: %w", err)
-				}
-				return nil
+				})
 			},
 			Down: func(ctx context.Context, exec migrate.Executor) error {
 				mexec, ok := exec.(*mongomigrate.Executor)
 				if !ok {
 					return fmt.Errorf("expected mongomigrate executor, got %T", exec)
 				}
-				return mexec.DB().Collection(colCollections).Drop(ctx)
+				return mexec.DropCollection(ctx, (*collectionModel)(nil))
 			},
 		},
 		&migrate.Migration{
@@ -67,9 +64,12 @@ func init() {
 				if !ok {
 					return fmt.Errorf("expected mongomigrate executor, got %T", exec)
 				}
-				coll := mexec.DB().Collection(colDocuments)
 
-				indexes := []mongo.IndexModel{
+				if err := mexec.CreateCollection(ctx, (*documentModel)(nil)); err != nil {
+					return err
+				}
+
+				return mexec.CreateIndexes(ctx, colDocuments, []mongo.IndexModel{
 					{
 						Keys: bson.D{
 							{Key: "collection_id", Value: 1},
@@ -92,20 +92,14 @@ func init() {
 						Keys:    bson.D{{Key: "created_at", Value: 1}},
 						Options: options.Index().SetName("idx_weave_documents_created_at"),
 					},
-				}
-
-				_, err := coll.Indexes().CreateMany(ctx, indexes)
-				if err != nil {
-					return fmt.Errorf("create weave_documents indexes: %w", err)
-				}
-				return nil
+				})
 			},
 			Down: func(ctx context.Context, exec migrate.Executor) error {
 				mexec, ok := exec.(*mongomigrate.Executor)
 				if !ok {
 					return fmt.Errorf("expected mongomigrate executor, got %T", exec)
 				}
-				return mexec.DB().Collection(colDocuments).Drop(ctx)
+				return mexec.DropCollection(ctx, (*documentModel)(nil))
 			},
 		},
 		&migrate.Migration{
@@ -116,9 +110,12 @@ func init() {
 				if !ok {
 					return fmt.Errorf("expected mongomigrate executor, got %T", exec)
 				}
-				coll := mexec.DB().Collection(colChunks)
 
-				indexes := []mongo.IndexModel{
+				if err := mexec.CreateCollection(ctx, (*chunkModel)(nil)); err != nil {
+					return err
+				}
+
+				return mexec.CreateIndexes(ctx, colChunks, []mongo.IndexModel{
 					{
 						Keys: bson.D{
 							{Key: "document_id", Value: 1},
@@ -134,20 +131,14 @@ func init() {
 						Keys:    bson.D{{Key: "tenant_id", Value: 1}},
 						Options: options.Index().SetName("idx_weave_chunks_tenant"),
 					},
-				}
-
-				_, err := coll.Indexes().CreateMany(ctx, indexes)
-				if err != nil {
-					return fmt.Errorf("create weave_chunks indexes: %w", err)
-				}
-				return nil
+				})
 			},
 			Down: func(ctx context.Context, exec migrate.Executor) error {
 				mexec, ok := exec.(*mongomigrate.Executor)
 				if !ok {
 					return fmt.Errorf("expected mongomigrate executor, got %T", exec)
 				}
-				return mexec.DB().Collection(colChunks).Drop(ctx)
+				return mexec.DropCollection(ctx, (*chunkModel)(nil))
 			},
 		},
 	)

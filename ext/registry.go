@@ -2,9 +2,9 @@ package ext
 
 import (
 	"context"
-	"log/slog"
 	"time"
 
+	log "github.com/xraph/go-utils/log"
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
@@ -88,7 +88,7 @@ type shutdownEntry struct {
 // iterate only over extensions that implement the relevant hook.
 type Registry struct {
 	extensions []Extension
-	logger     *slog.Logger
+	logger     log.Logger
 
 	// Type-cached slices for each lifecycle hook.
 	collectionCreated  []collectionCreatedEntry
@@ -108,7 +108,7 @@ type Registry struct {
 }
 
 // NewRegistry creates an extension registry with the given logger.
-func NewRegistry(logger *slog.Logger) *Registry {
+func NewRegistry(logger log.Logger) *Registry {
 	return &Registry{logger: logger}
 }
 
@@ -319,8 +319,8 @@ func (r *Registry) EmitShutdown(ctx context.Context) {
 // Errors from hooks are never propagated — they must not block the pipeline.
 func (r *Registry) logHookError(hook, extName string, err error) {
 	r.logger.Warn("extension hook error",
-		slog.String("hook", hook),
-		slog.String("extension", extName),
-		slog.String("error", err.Error()),
+		log.String("hook", hook),
+		log.String("extension", extName),
+		log.String("error", err.Error()),
 	)
 }
