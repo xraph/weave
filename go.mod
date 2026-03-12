@@ -3,12 +3,12 @@ module github.com/xraph/weave
 go 1.25.7
 
 require (
-	github.com/xraph/forge v1.2.0
+	github.com/xraph/forge v1.3.0
 	github.com/xraph/go-utils v1.0.0
-	github.com/xraph/grove v0.0.5
-	github.com/xraph/grove/drivers/mongodriver v0.0.5
-	github.com/xraph/grove/drivers/pgdriver v0.0.5
-	github.com/xraph/grove/drivers/sqlitedriver v0.0.5
+	github.com/xraph/grove v1.3.0
+	github.com/xraph/grove/drivers/mongodriver v1.3.0
+	github.com/xraph/grove/drivers/pgdriver v1.3.0
+	github.com/xraph/grove/drivers/sqlitedriver v1.3.0
 	github.com/xraph/vessel v1.0.0
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3
 	go.mongodb.org/mongo-driver/v2 v2.5.0
