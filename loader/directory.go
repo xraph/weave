@@ -29,9 +29,15 @@ func (l *DirectoryLoader) Load(_ context.Context, _ io.Reader) (*LoadResult, err
 func (l *DirectoryLoader) LoadDir(ctx context.Context, dirPath string) ([]*LoadResult, error) {
 	var results []*LoadResult
 
-	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	root, err := os.OpenRoot(dirPath)
+	if err != nil {
+		return nil, fmt.Errorf("weave: open root dir: %w", err)
+	}
+	defer root.Close()
+
+	err = filepath.Walk(dirPath, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
 		if info.IsDir() {
 			return nil
@@ -43,7 +49,11 @@ func (l *DirectoryLoader) LoadDir(ctx context.Context, dirPath string) ([]*LoadR
 			return nil // Skip unsupported files.
 		}
 
-		f, err := os.Open(path)
+		relPath, relErr := filepath.Rel(dirPath, path)
+		if relErr != nil {
+			return fmt.Errorf("weave: directory load rel path: %w", relErr)
+		}
+		f, err := root.Open(relPath)
 		if err != nil {
 			return fmt.Errorf("weave: directory load: %w", err)
 		}
