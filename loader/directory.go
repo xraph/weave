@@ -53,15 +53,15 @@ func (l *DirectoryLoader) LoadDir(ctx context.Context, dirPath string) ([]*LoadR
 		if relErr != nil {
 			return fmt.Errorf("weave: directory load rel path: %w", relErr)
 		}
-		f, err := root.Open(relPath)
-		if err != nil {
-			return fmt.Errorf("weave: directory load: %w", err)
+		f, openErr := root.Open(relPath)
+		if openErr != nil {
+			return fmt.Errorf("weave: directory load: %w", openErr)
 		}
 		defer func() { _ = f.Close() }()
 
-		result, err := loader.Load(ctx, f)
-		if err != nil {
-			return fmt.Errorf("weave: directory load %s: %w", path, err)
+		result, loadErr := loader.Load(ctx, f)
+		if loadErr != nil {
+			return fmt.Errorf("weave: directory load %s: %w", path, loadErr)
 		}
 
 		if result.Metadata == nil {
