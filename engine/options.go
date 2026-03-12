@@ -3,6 +3,7 @@ package engine
 
 import (
 	log "github.com/xraph/go-utils/log"
+
 	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunker"
 	"github.com/xraph/weave/embedder"

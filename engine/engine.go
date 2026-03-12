@@ -8,6 +8,7 @@ import (
 	"time"
 
 	log "github.com/xraph/go-utils/log"
+
 	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/chunker"

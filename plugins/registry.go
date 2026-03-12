@@ -5,6 +5,7 @@ import (
 	"time"
 
 	log "github.com/xraph/go-utils/log"
+
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
