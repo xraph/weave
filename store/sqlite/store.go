@@ -147,6 +147,9 @@ func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilt
 	q := s.sdb.NewSelect(&models).OrderExpr("created_at ASC")
 
 	if filter != nil {
+		if filter.Search != "" {
+			q = q.Where("name LIKE '%' || ? || '%'", filter.Search)
+		}
 		if filter.Limit > 0 {
 			q = q.Limit(filter.Limit)
 		}
@@ -168,6 +171,22 @@ func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilt
 		result[i] = c
 	}
 	return result, nil
+}
+
+func (s *Store) CountCollections(ctx context.Context, filter *collection.CountFilter) (int64, error) {
+	q := s.sdb.NewSelect((*collectionModel)(nil))
+
+	if filter != nil {
+		if filter.Search != "" {
+			q = q.Where("name LIKE '%' || ? || '%'", filter.Search)
+		}
+	}
+
+	count, err := q.Count(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("weave: count collections: %w", err)
+	}
+	return count, nil
 }
 
 // ──────────────────────────────────────────────────
@@ -244,6 +263,9 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 		}
 		if filter.State != "" {
 			q = q.Where("state = ?", string(filter.State))
+		}
+		if filter.Search != "" {
+			q = q.Where("title LIKE '%' || ? || '%'", filter.Search)
 		}
 		if filter.Limit > 0 {
 			q = q.Limit(filter.Limit)

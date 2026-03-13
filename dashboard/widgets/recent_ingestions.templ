@@ -1,0 +1,62 @@
+package widgets
+
+import (
+	"strconv"
+	"github.com/xraph/weave/document"
+	"github.com/xraph/weave/dashboard/components"
+	"github.com/xraph/forgeui/components/table"
+)
+
+templ RecentIngestionsWidget(docs []*document.Document, colNames map[string]string) {
+	if len(docs) == 0 {
+		@components.EmptyState("file-text", "No recent ingestions", "")
+	} else {
+		@table.Table() {
+			@table.Header() {
+				@table.Row() {
+					@table.Head() { Title }
+					@table.Head() { Collection }
+					@table.Head() { State }
+					@table.Head() { Chunks }
+				}
+			}
+			@table.Body() {
+				for _, d := range docs {
+					@table.Row() {
+						@table.Cell() {
+							if d.Title != "" {
+								<span class="text-sm">{ widgetTruncate(d.Title, 30) }</span>
+							} else {
+								<span class="text-sm text-muted-foreground italic">Untitled</span>
+							}
+						}
+						@table.Cell() {
+							{{ cName := widgetResolveColName(d.CollectionID.String(), colNames) }}
+							<span class="text-xs text-muted-foreground">{ widgetTruncate(cName, 20) }</span>
+						}
+						@table.Cell() {
+							@components.StateBadge(string(d.State))
+						}
+						@table.Cell() {
+							<span class="text-xs">{ strconv.Itoa(d.ChunkCount) }</span>
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func widgetTruncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
+}
+
+func widgetResolveColName(colIDStr string, nameMap map[string]string) string {
+	if name, ok := nameMap[colIDStr]; ok {
+		return name
+	}
+	return colIDStr
+}

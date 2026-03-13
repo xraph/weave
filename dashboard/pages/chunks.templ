@@ -1,0 +1,90 @@
+package pages
+
+import (
+	"fmt"
+	"strconv"
+
+	"github.com/xraph/weave/chunk"
+	"github.com/xraph/weave/document"
+	"github.com/xraph/weave/dashboard/components"
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/table"
+)
+
+templ ChunksPage(chunks []*chunk.Chunk, doc *document.Document) {
+	{{ title := "Chunks" }}
+	{{ subtitle := "Browse document chunks" }}
+	if doc != nil {
+		if doc.Title != "" {
+			{{ title = "Chunks: " + doc.Title }}
+		}
+		{{ subtitle = fmt.Sprintf("%d chunks in this document", len(chunks)) }}
+	}
+	<div class="space-y-6">
+		@components.PageHeader(title, strconv.Itoa(len(chunks)), subtitle) {
+			if doc != nil {
+				@button.Button(button.Props{
+					Variant: button.VariantOutline,
+					Attributes: templ.Attributes{
+						"hx-get":    "/documents/detail?id=" + doc.ID.String(),
+						"hx-target": "#content",
+					},
+				}) {
+					Back to Document
+				}
+			}
+		}
+		if len(chunks) == 0 {
+			@components.EmptyState("puzzle", "No chunks found", "This document has no chunks")
+		} else {
+			@table.Table() {
+				@table.Header() {
+					@table.Row() {
+						@table.Head() { # }
+						@table.Head() { Content }
+						@table.Head() { Tokens }
+						@table.Head() { Offsets }
+						@table.Head() { Actions }
+					}
+				}
+				@table.Body() {
+					for _, ch := range chunks {
+						@table.Row() {
+							@table.Cell() {
+								<span class="font-mono text-xs font-medium">{ strconv.Itoa(ch.Index) }</span>
+							}
+							@table.Cell() {
+								<span class="text-sm">{ chunkTruncate(ch.Content, 120) }</span>
+							}
+							@table.Cell() {
+								<span class="font-mono text-sm">{ strconv.Itoa(ch.TokenCount) }</span>
+							}
+							@table.Cell() {
+								<span class="text-xs text-muted-foreground font-mono">{ fmt.Sprintf("%d-%d", ch.StartOffset, ch.EndOffset) }</span>
+							}
+							@table.Cell() {
+								@button.Button(button.Props{
+									Variant: button.VariantOutline,
+									Size:    button.SizeSm,
+									Attributes: templ.Attributes{
+										"hx-get":    "/chunks/detail?id=" + ch.ID.String(),
+										"hx-target": "#content",
+									},
+								}) {
+									View
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	</div>
+}
+
+func chunkTruncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
+}

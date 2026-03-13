@@ -1,0 +1,89 @@
+package pages
+
+import (
+	"fmt"
+	"strconv"
+
+	"github.com/xraph/weave/chunk"
+	"github.com/xraph/weave/dashboard/components"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/separator"
+)
+
+templ ChunkDetailPage(ch *chunk.Chunk) {
+	<div class="space-y-6">
+		@components.PageHeader(fmt.Sprintf("Chunk #%d", ch.Index), "", "") {
+			@button.Button(button.Props{
+				Variant: button.VariantOutline,
+				Attributes: templ.Attributes{
+					"hx-get":    "/chunks/browser?doc=" + ch.DocumentID.String(),
+					"hx-target": "#content",
+				},
+			}) {
+				Back to Chunks
+			}
+			@button.Button(button.Props{
+				Variant: button.VariantOutline,
+				Attributes: templ.Attributes{
+					"hx-get":    "/documents/detail?id=" + ch.DocumentID.String(),
+					"hx-target": "#content",
+				},
+			}) {
+				View Document
+			}
+		}
+		<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+			@components.StatCard("hash", "Index", strconv.Itoa(ch.Index), "Position in document")
+			@components.StatCard("activity", "Tokens", strconv.Itoa(ch.TokenCount), "Token count")
+			@components.StatCard("layers", "Offsets", fmt.Sprintf("%d - %d", ch.StartOffset, ch.EndOffset), "Character range")
+			@components.StatCard("puzzle", "Parent", chunkDetailParent(ch.ParentID), "Parent chunk")
+		</div>
+		@separator.Separator(separator.Props{})
+		@components.ConfigDisplay("Details", []components.ConfigItem{
+			{Label: "Chunk ID", Value: ch.ID.String()},
+			{Label: "Document ID", Value: ch.DocumentID.String()},
+			{Label: "Collection ID", Value: ch.CollectionID.String()},
+			{Label: "Start Offset", Value: strconv.Itoa(ch.StartOffset)},
+			{Label: "End Offset", Value: strconv.Itoa(ch.EndOffset)},
+			{Label: "Token Count", Value: strconv.Itoa(ch.TokenCount)},
+		})
+		@card.Card() {
+			@card.Header() {
+				@card.Title() {
+					Content
+				}
+				@card.Description() {
+					Full chunk content
+				}
+			}
+			@card.Content() {
+				<pre class="bg-muted rounded-md p-4 text-sm font-mono overflow-x-auto max-h-96 overflow-y-auto whitespace-pre-wrap">{ ch.Content }</pre>
+			}
+		}
+		if len(ch.Metadata) > 0 {
+			@card.Card() {
+				@card.Header() {
+					@card.Title() {
+						Metadata
+					}
+				}
+				@card.Content() {
+					<dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+						for k, v := range ch.Metadata {
+							<dt class="text-muted-foreground font-mono text-xs">{ k }</dt>
+							<dd class="font-mono text-xs">{ v }</dd>
+						}
+					</dl>
+				}
+			}
+		}
+	</div>
+}
+
+func chunkDetailParent(parentID string) string {
+	if parentID == "" {
+		return "none"
+	}
+	return parentID
+}

@@ -1,0 +1,138 @@
+package components
+
+import (
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/dialog"
+)
+
+type ConfirmDialogProps struct {
+	ID           string
+	Title        string
+	Description  string
+	ConfirmLabel string
+	HxEndpoint   string
+	HxMethod     string
+}
+
+templ ConfirmDialog(props ConfirmDialogProps) {
+	{{ confirmLabel := props.ConfirmLabel }}
+	if confirmLabel == "" {
+		{{ confirmLabel = "Confirm" }}
+	}
+	@dialog.Dialog(dialog.Props{ID: props.ID}) {
+		@dialog.Content() {
+			@dialog.Header() {
+				@dialog.Title() {
+					{ props.Title }
+				}
+				@dialog.Description() {
+					{ props.Description }
+				}
+			}
+			<div id={ props.ID + "-errors" } class="text-sm text-destructive"></div>
+			@dialog.Footer() {
+				@dialog.Close() {
+					@button.Button(button.Props{Variant: button.VariantOutline}) {
+						Cancel
+					}
+				}
+				if props.HxMethod == "delete" {
+					@button.Button(button.Props{
+						Variant: button.VariantDestructive,
+						Attributes: templ.Attributes{
+							"hx-delete":            props.HxEndpoint,
+							"hx-target":            "#" + props.ID + "-errors",
+							"hx-swap":              "innerHTML",
+							"hx-on::after-request": "if(event.detail.successful) { document.getElementById('" + props.ID + "')?.close(); htmx.ajax('GET', window.location.pathname + window.location.search, {target:'#content'}); }",
+						},
+					}) {
+						{ confirmLabel }
+					}
+				} else {
+					@button.Button(button.Props{
+						Variant: button.VariantDestructive,
+						Attributes: templ.Attributes{
+							"hx-post":              props.HxEndpoint,
+							"hx-target":            "#" + props.ID + "-errors",
+							"hx-swap":              "innerHTML",
+							"hx-on::after-request": "if(event.detail.successful) { document.getElementById('" + props.ID + "')?.close(); htmx.ajax('GET', window.location.pathname + window.location.search, {target:'#content'}); }",
+						},
+					}) {
+						{ confirmLabel }
+					}
+				}
+			}
+		}
+	}
+}
+
+templ DialogHelpers() {
+	@dialog.Script()
+	<script>
+	(function(){
+		window.tuiOpenDialog = function(id) {
+			var el = document.getElementById(id);
+			if (!el) return;
+			var backdrop = el.querySelector('[data-tui-dialog-backdrop]');
+			var content = el.querySelector('[data-tui-dialog-content]');
+			if (backdrop) backdrop.removeAttribute('data-tui-dialog-hidden');
+			if (content) content.removeAttribute('data-tui-dialog-hidden');
+			el.removeAttribute('data-tui-dialog-hidden');
+			requestAnimationFrame(function(){
+				if (backdrop) backdrop.setAttribute('data-tui-dialog-open', 'true');
+				if (content) content.setAttribute('data-tui-dialog-open', 'true');
+				el.setAttribute('data-tui-dialog-open', 'true');
+			});
+		};
+		window.tuiCloseDialog = function(id) {
+			var el = document.getElementById(id);
+			if (!el) return;
+			var backdrop = el.querySelector('[data-tui-dialog-backdrop]');
+			var content = el.querySelector('[data-tui-dialog-content]');
+			if (backdrop) backdrop.setAttribute('data-tui-dialog-open', 'false');
+			if (content) content.setAttribute('data-tui-dialog-open', 'false');
+			el.setAttribute('data-tui-dialog-open', 'false');
+			function onDone() {
+				if (backdrop) backdrop.setAttribute('data-tui-dialog-hidden', 'true');
+				if (content) content.setAttribute('data-tui-dialog-hidden', 'true');
+				el.setAttribute('data-tui-dialog-hidden', 'true');
+			}
+			var ran = false;
+			var done = function() { if (!ran) { ran = true; onDone(); } };
+			if (content) {
+				content.addEventListener('transitionend', done, {once: true});
+			}
+			setTimeout(done, 300);
+		};
+		if (!window.__tuiDialogEventsAttached) {
+			window.__tuiDialogEventsAttached = true;
+			document.addEventListener('click', function(e) {
+				var closeBtn = e.target.closest('[data-tui-dialog-close]');
+				if (closeBtn) {
+					var dlg = closeBtn.closest('[data-tui-dialog]');
+					if (dlg && dlg.id) tuiCloseDialog(dlg.id);
+					return;
+				}
+				var backdrop = e.target.closest('[data-tui-dialog-backdrop]');
+				if (backdrop && e.target === backdrop) {
+					var dlg = backdrop.closest('[data-tui-dialog]');
+					if (dlg && !dlg.hasAttribute('data-tui-dialog-disable-click-away') && dlg.id) {
+						tuiCloseDialog(dlg.id);
+					}
+				}
+			});
+			document.addEventListener('keydown', function(e) {
+				if (e.key === 'Escape') {
+					var open = document.querySelectorAll('[data-tui-dialog][data-tui-dialog-open="true"]');
+					if (open.length > 0) {
+						var last = open[open.length - 1];
+						if (!last.hasAttribute('data-tui-dialog-disable-esc') && last.id) {
+							tuiCloseDialog(last.id);
+						}
+					}
+				}
+			});
+		}
+	})();
+	</script>
+}

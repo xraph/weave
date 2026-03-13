@@ -5,6 +5,7 @@ package memory
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -148,6 +149,11 @@ func (s *Store) ListCollections(_ context.Context, filter *collection.ListFilter
 
 	result := make([]*collection.Collection, 0, len(s.collections))
 	for _, col := range s.collections {
+		if filter != nil && filter.Search != "" {
+			if !strings.Contains(strings.ToLower(col.Name), strings.ToLower(filter.Search)) {
+				continue
+			}
+		}
 		result = append(result, col)
 	}
 
@@ -166,6 +172,23 @@ func (s *Store) ListCollections(_ context.Context, filter *collection.ListFilter
 		}
 	}
 	return result, nil
+}
+
+// CountCollections returns the count of collections matching the filter.
+func (s *Store) CountCollections(_ context.Context, filter *collection.CountFilter) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int64
+	for _, col := range s.collections {
+		if filter != nil {
+			if filter.Search != "" && !strings.Contains(strings.ToLower(col.Name), strings.ToLower(filter.Search)) {
+				continue
+			}
+		}
+		count++
+	}
+	return count, nil
 }
 
 // ──────────────────────────────────────────────────
@@ -255,6 +278,9 @@ func (s *Store) ListDocuments(_ context.Context, filter *document.ListFilter) ([
 				continue
 			}
 			if filter.State != "" && doc.State != filter.State {
+				continue
+			}
+			if filter.Search != "" && !strings.Contains(strings.ToLower(doc.Title), strings.ToLower(filter.Search)) {
 				continue
 			}
 		}

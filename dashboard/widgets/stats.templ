@@ -1,0 +1,17 @@
+package widgets
+
+import (
+	"strconv"
+	"github.com/xraph/weave/dashboard/components"
+)
+
+templ StatsWidget(counts EntityCounts) {
+	<div class="grid grid-cols-2 gap-3">
+		@components.StatCard("folders", "Collections", strconv.FormatInt(counts.Collections, 10), "")
+		@components.StatCard("file-text", "Documents", strconv.FormatInt(counts.Documents, 10), "")
+		@components.StatCard("check-circle", "Ready", strconv.FormatInt(counts.DocsReady, 10), "")
+		@components.StatCard("alert-circle", "Failed", strconv.FormatInt(counts.DocsFailed, 10), "")
+		@components.StatCard("clock", "Pending", strconv.FormatInt(counts.DocsPending, 10), "")
+		@components.StatCard("puzzle", "Chunks", strconv.FormatInt(counts.Chunks, 10), "")
+	</div>
+}

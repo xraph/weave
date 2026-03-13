@@ -145,6 +145,9 @@ func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilt
 	q := s.mdb.NewFind(&models).Sort(bson.D{{Key: "created_at", Value: 1}})
 
 	if filter != nil {
+		if filter.Search != "" {
+			q = q.Filter(bson.M{"name": bson.M{"$regex": filter.Search, "$options": "i"}})
+		}
 		if filter.Limit > 0 {
 			q = q.Limit(int64(filter.Limit))
 		}
@@ -166,6 +169,22 @@ func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilt
 		result[i] = c
 	}
 	return result, nil
+}
+
+func (s *Store) CountCollections(ctx context.Context, filter *collection.CountFilter) (int64, error) {
+	q := s.mdb.NewFind((*collectionModel)(nil))
+
+	if filter != nil {
+		if filter.Search != "" {
+			q = q.Filter(bson.M{"name": bson.M{"$regex": filter.Search, "$options": "i"}})
+		}
+	}
+
+	count, err := q.Count(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("weave: count collections: %w", err)
+	}
+	return count, nil
 }
 
 // ──────────────────────────────────────────────────
@@ -234,6 +253,9 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 		}
 		if filter.State != "" {
 			q = q.Filter(bson.M{"state": string(filter.State)})
+		}
+		if filter.Search != "" {
+			q = q.Filter(bson.M{"title": bson.M{"$regex": filter.Search, "$options": "i"}})
 		}
 		if filter.Limit > 0 {
 			q = q.Limit(int64(filter.Limit))

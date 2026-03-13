@@ -8,10 +8,18 @@ import (
 
 // ListFilter controls pagination and filtering for collection list queries.
 type ListFilter struct {
+	// Search filters collections by name (case-insensitive substring match).
+	Search string
 	// Limit is the maximum number of collections to return. Zero means no limit.
 	Limit int
 	// Offset is the number of collections to skip.
 	Offset int
+}
+
+// CountFilter controls filtering for collection count queries.
+type CountFilter struct {
+	// Search filters collections by name (case-insensitive substring match).
+	Search string
 }
 
 // Store defines the persistence contract for collections.
@@ -33,4 +41,7 @@ type Store interface {
 
 	// ListCollections returns collections matching the given filter.
 	ListCollections(ctx context.Context, filter *ListFilter) ([]*Collection, error)
+
+	// CountCollections returns the number of collections matching the given filter.
+	CountCollections(ctx context.Context, filter *CountFilter) (int64, error)
 }

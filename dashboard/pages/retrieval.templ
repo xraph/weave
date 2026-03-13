@@ -1,0 +1,173 @@
+package pages
+
+import (
+	"fmt"
+	"strconv"
+
+	"github.com/xraph/forgeui/components/badge"
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/input"
+	"github.com/xraph/weave/collection"
+	"github.com/xraph/weave/dashboard/components"
+	"github.com/xraph/weave/engine"
+)
+
+templ RetrievalPage(collections []*collection.Collection, query string, results []engine.ScoredChunk, colNames map[string]string, params map[string]string) {
+	{{ selectedCol := retrievalParamVal(params, "collection", "") }}
+	{{ strategy := retrievalParamVal(params, "strategy", "similarity") }}
+	{{ topK := retrievalParamVal(params, "top_k", "10") }}
+	{{ minScore := retrievalParamVal(params, "min_score", "0.0") }}
+	<div class="space-y-6">
+		@components.PageHeader("Retrieval Playground", "", "Test semantic search across your collections")
+		@card.Card() {
+			@card.Content(card.ContentProps{Class: "p-6"}) {
+				<form class="space-y-4"
+					hx-get="/retrieval"
+					hx-target="#content"
+					hx-swap="innerHTML">
+					<div class="space-y-2">
+						<label class="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">Query</label>
+						<textarea name="q"
+							class="flex min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+							placeholder="Enter your search query...">{ query }</textarea>
+					</div>
+					<div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+						<div class="space-y-2">
+							<label class="text-sm font-medium leading-none">Collection</label>
+							<select name="collection"
+								class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
+								<option value="" selected?={ selectedCol == "" }>All Collections</option>
+								for _, c := range collections {
+									<option value={ c.ID.String() } selected?={ selectedCol == c.ID.String() }>{ c.Name }</option>
+								}
+							</select>
+						</div>
+						<div class="space-y-2">
+							<label class="text-sm font-medium leading-none">Strategy</label>
+							<select name="strategy"
+								class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
+								<option value="similarity" selected?={ strategy == "similarity" }>Similarity</option>
+								<option value="mmr" selected?={ strategy == "mmr" }>MMR</option>
+								<option value="hybrid" selected?={ strategy == "hybrid" }>Hybrid</option>
+							</select>
+						</div>
+						<div class="space-y-2">
+							<label class="text-sm font-medium leading-none">Top K</label>
+							@input.Input(input.Props{
+								Type:  "number",
+								Name:  "top_k",
+								Value: topK,
+							})
+						</div>
+						<div class="space-y-2">
+							<label class="text-sm font-medium leading-none">Min Score</label>
+							@input.Input(input.Props{
+								Type:  "number",
+								Name:  "min_score",
+								Value: minScore,
+								Attributes: templ.Attributes{"step": "0.01", "min": "0", "max": "1"},
+							})
+						</div>
+					</div>
+					<div class="flex justify-end">
+						@button.Button(button.Props{Type: "submit"}) {
+							Search
+						}
+					</div>
+				</form>
+			}
+		}
+		if query != "" {
+			<div class="space-y-4">
+				<div class="flex items-center gap-2">
+					<h2 class="text-xl font-semibold">Results</h2>
+					@badge.Badge(badge.Props{Variant: badge.VariantSecondary}) {
+						{ strconv.Itoa(len(results)) }
+					}
+				</div>
+				if len(results) == 0 {
+					@components.EmptyState("search", "No results", "Try a different query or adjust the parameters")
+				} else {
+					for i, r := range results {
+						@card.Card() {
+							@card.Header() {
+								<div class="flex items-center justify-between w-full">
+									<div class="flex items-center gap-3">
+										<span class="text-sm font-medium text-muted-foreground">{ fmt.Sprintf("#%d", i+1) }</span>
+										@components.ScoreBadge(r.Score)
+									</div>
+									<div class="flex items-center gap-2">
+										if r.Chunk != nil && r.Chunk.CollectionID.String() != "" {
+											{{ cName := retrievalResolveColName(r.Chunk.CollectionID.String(), colNames) }}
+											@badge.Badge(badge.Props{Variant: badge.VariantOutline}) {
+												{ cName }
+											}
+										}
+										if r.Chunk != nil && r.Chunk.ID.String() != "" {
+											@button.Button(button.Props{
+												Variant: button.VariantOutline,
+												Size:    button.SizeSm,
+												Attributes: templ.Attributes{
+													"hx-get":    "/chunks/detail?id=" + r.Chunk.ID.String(),
+													"hx-target": "#content",
+												},
+											}) {
+												View Chunk
+											}
+										}
+									</div>
+								</div>
+							}
+							@card.Content() {
+								if r.Chunk != nil {
+									<div class="space-y-2">
+										<div class="w-full bg-muted rounded-full h-1.5">
+											<div class="bg-primary h-1.5 rounded-full" style={ fmt.Sprintf("width: %d%%", int(r.Score*100)) }></div>
+										</div>
+										<pre class="text-sm bg-muted/50 rounded-md p-3 font-mono overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap">{ retrievalTruncate(r.Chunk.Content, 500) }</pre>
+										<div class="flex gap-4 text-xs text-muted-foreground">
+											<span>Tokens: { strconv.Itoa(r.Chunk.TokenCount) }</span>
+											<span>Index: { strconv.Itoa(r.Chunk.Index) }</span>
+											if r.Chunk.DocumentID.String() != "" {
+												<a class="hover:underline cursor-pointer"
+													hx-get={ "/documents/detail?id=" + r.Chunk.DocumentID.String() }
+													hx-target="#content">
+													Document: { r.Chunk.DocumentID.String() }
+												</a>
+											}
+										</div>
+									</div>
+								}
+							}
+						}
+					}
+				}
+			</div>
+		}
+	</div>
+}
+
+func retrievalParamVal(params map[string]string, key, defaultVal string) string {
+	if v, ok := params[key]; ok && v != "" {
+		return v
+	}
+	return defaultVal
+}
+
+func retrievalResolveColName(colIDStr string, nameMap map[string]string) string {
+	if name, ok := nameMap[colIDStr]; ok {
+		return name
+	}
+	return colIDStr
+}
+
+func retrievalTruncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
+}

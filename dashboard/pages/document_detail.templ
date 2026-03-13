@@ -1,0 +1,214 @@
+package pages
+
+import (
+	"fmt"
+	"strconv"
+
+	"github.com/xraph/weave/chunk"
+	"github.com/xraph/weave/document"
+	"github.com/xraph/weave/dashboard/components"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/table"
+	"github.com/xraph/forgeui/components/separator"
+)
+
+templ DocumentDetailPage(doc *document.Document, previewChunks []*chunk.Chunk, chunkCount int64, colNames map[string]string) {
+	{{ docTitle := doc.Title }}
+	if docTitle == "" {
+		{{ docTitle = "Untitled Document" }}
+	}
+	<div class="space-y-6">
+		@components.PageHeader(docTitle, "", "") {
+			@button.Button(button.Props{
+				Variant: button.VariantOutline,
+				Attributes: templ.Attributes{
+					"hx-get":    "/documents",
+					"hx-target": "#content",
+				},
+			}) {
+				Back
+			}
+			@button.Button(button.Props{
+				Variant: button.VariantOutline,
+				Attributes: templ.Attributes{
+					"hx-get":    "/chunks/browser?doc=" + doc.ID.String(),
+					"hx-target": "#content",
+				},
+			}) {
+				View Chunks
+			}
+			@button.Button(button.Props{
+				Variant: button.VariantDestructive,
+				Attributes: templ.Attributes{
+					"onclick": fmt.Sprintf("tuiOpenDialog('delete-doc-detail-%s')", doc.ID.String()),
+				},
+			}) {
+				Delete
+			}
+		}
+		<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+			@components.StatCard("file-text", "State", string(doc.State), "Document lifecycle")
+			@components.StatCard("puzzle", "Chunks", strconv.FormatInt(chunkCount, 10), "Segments")
+			@components.StatCard("hash", "Content Length", strconv.Itoa(doc.ContentLength), "Characters")
+			@components.StatCard("layers", "Source Type", docDetailSourceType(doc.SourceType), "Format")
+		</div>
+		if doc.State == "failed" && doc.Error != "" {
+			@card.Card() {
+				@card.Header() {
+					@card.Title() {
+						Error
+					}
+				}
+				@card.Content() {
+					<pre class="text-sm text-destructive bg-destructive/10 p-3 rounded-md overflow-x-auto">{ doc.Error }</pre>
+				}
+			}
+		}
+		@separator.Separator(separator.Props{})
+		<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+			{{ colName := docDetailResolveColName(doc.CollectionID.String(), colNames) }}
+			@components.ConfigDisplay("Details", []components.ConfigItem{
+				{Label: "Document ID", Value: doc.ID.String()},
+				{Label: "Collection", Value: colName},
+				{Label: "Source", Value: docDetailSourceVal(doc.Source)},
+				{Label: "Source Type", Value: docDetailSourceType(doc.SourceType)},
+				{Label: "Content Hash", Value: docDetailHashPreview(doc.ContentHash)},
+				{Label: "Content Length", Value: strconv.Itoa(doc.ContentLength) + " chars"},
+			})
+			@card.Card() {
+				@card.Header() {
+					@card.Title() {
+						Metadata
+					}
+				}
+				@card.Content() {
+					if len(doc.Metadata) == 0 {
+						<span class="text-sm text-muted-foreground">No metadata</span>
+					} else {
+						<dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+							for k, v := range doc.Metadata {
+								<dt class="text-muted-foreground font-mono text-xs">{ k }</dt>
+								<dd class="font-mono text-xs">{ v }</dd>
+							}
+						</dl>
+					}
+				}
+			}
+		</div>
+		@card.Card() {
+			@card.Header() {
+				<div class="flex items-center justify-between w-full">
+					<div>
+						@card.Title() {
+							Chunks Preview
+						}
+						@card.Description() {
+							First chunks from this document
+						}
+					</div>
+					if chunkCount > 5 {
+						@button.Button(button.Props{
+							Variant: button.VariantOutline,
+							Size:    button.SizeSm,
+							Attributes: templ.Attributes{
+								"hx-get":    "/chunks/browser?doc=" + doc.ID.String(),
+								"hx-target": "#content",
+							},
+						}) {
+							{ fmt.Sprintf("View All %d", chunkCount) }
+						}
+					}
+				</div>
+			}
+			@card.Content() {
+				if len(previewChunks) == 0 {
+					@components.EmptyState("puzzle", "No chunks", "This document has not been chunked yet")
+				} else {
+					@table.Table() {
+						@table.Header() {
+							@table.Row() {
+								@table.Head() { # }
+								@table.Head() { Content }
+								@table.Head() { Tokens }
+								@table.Head() { Actions }
+							}
+						}
+						@table.Body() {
+							for _, ch := range previewChunks {
+								@table.Row() {
+									@table.Cell() {
+										<span class="font-mono text-xs">{ strconv.Itoa(ch.Index) }</span>
+									}
+									@table.Cell() {
+										<span class="text-sm">{ docDetailTruncateContent(ch.Content, 100) }</span>
+									}
+									@table.Cell() {
+										{ strconv.Itoa(ch.TokenCount) }
+									}
+									@table.Cell() {
+										@button.Button(button.Props{
+											Variant: button.VariantOutline,
+											Size:    button.SizeSm,
+											Attributes: templ.Attributes{
+												"hx-get":    "/chunks/detail?id=" + ch.ID.String(),
+												"hx-target": "#content",
+											},
+										}) {
+											View
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		{ children... }
+		@components.ConfirmDialog(components.ConfirmDialogProps{
+			ID:           "delete-doc-detail-" + doc.ID.String(),
+			Title:        "Delete Document",
+			Description:  "Are you sure you want to delete this document? All associated chunks will be permanently removed.",
+			ConfirmLabel: "Delete",
+			HxEndpoint:   "/weave/documents/" + doc.ID.String(),
+			HxMethod:     "delete",
+		})
+		@components.DialogHelpers()
+	</div>
+}
+
+func docDetailSourceType(st string) string {
+	if st == "" {
+		return "unknown"
+	}
+	return st
+}
+
+func docDetailSourceVal(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+func docDetailHashPreview(hash string) string {
+	if len(hash) > 16 {
+		return hash[:16] + "..."
+	}
+	return hash
+}
+
+func docDetailResolveColName(colIDStr string, nameMap map[string]string) string {
+	if name, ok := nameMap[colIDStr]; ok {
+		return name
+	}
+	return colIDStr
+}
+
+func docDetailTruncateContent(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
+}

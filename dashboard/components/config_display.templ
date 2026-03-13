@@ -1,0 +1,28 @@
+package components
+
+import "github.com/xraph/forgeui/components/card"
+
+type ConfigItem struct {
+	Label string
+	Value string
+}
+
+templ ConfigDisplay(title string, items []ConfigItem) {
+	@card.Card() {
+		@card.Header() {
+			@card.Title() {
+				{ title }
+			}
+		}
+		@card.Content() {
+			<div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+				for _, item := range items {
+					<div class="flex flex-col gap-0.5">
+						<span class="text-xs font-medium text-muted-foreground">{ item.Label }</span>
+						<span class="text-sm font-mono">{ item.Value }</span>
+					</div>
+				}
+			</div>
+		}
+	}
+}

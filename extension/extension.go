@@ -15,11 +15,15 @@ import (
 	"net/http"
 
 	"github.com/xraph/forge"
+	"github.com/xraph/forge/extensions/dashboard"
+	"github.com/xraph/forge/extensions/dashboard/contributor"
 	"github.com/xraph/grove"
 	"github.com/xraph/vessel"
 
 	"github.com/xraph/weave/api"
+	weavedash "github.com/xraph/weave/dashboard"
 	"github.com/xraph/weave/engine"
+	"github.com/xraph/weave/plugins"
 	"github.com/xraph/weave/store"
 	mongostore "github.com/xraph/weave/store/mongo"
 	pgstore "github.com/xraph/weave/store/postgres"
@@ -35,8 +39,11 @@ const ExtensionDescription = "Composable RAG pipeline engine for document ingest
 // ExtensionVersion is the semantic version.
 const ExtensionVersion = "0.1.0"
 
-// Ensure Extension implements forge.Extension at compile time.
-var _ forge.Extension = (*Extension)(nil)
+// Ensure Extension implements forge.Extension and dashboard.DashboardAware at compile time.
+var (
+	_ forge.Extension          = (*Extension)(nil)
+	_ dashboard.DashboardAware = (*Extension)(nil)
+)
 
 // Extension adapts Weave as a Forge extension.
 type Extension struct {
@@ -189,6 +196,18 @@ func (e *Extension) RegisterRoutes(router forge.Router) {
 	if e.apiHandler != nil {
 		e.apiHandler.RegisterRoutes(router)
 	}
+}
+
+// DashboardContributor implements [dashboard.DashboardAware].
+// It returns a LocalContributor that provides the Weave dashboard pages,
+// widgets, and settings panel.
+func (e *Extension) DashboardContributor() contributor.LocalContributor {
+	var exts []plugins.Extension
+	if e.eng != nil && e.eng.Extensions() != nil {
+		exts = e.eng.Extensions().Extensions()
+	}
+	manifest := weavedash.NewManifest(exts)
+	return weavedash.New(manifest, e.eng, exts)
 }
 
 // --- Config Loading (mirrors grove extension pattern) ---

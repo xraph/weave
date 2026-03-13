@@ -1,0 +1,181 @@
+package pages
+
+import (
+	"fmt"
+	"strconv"
+
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/separator"
+	"github.com/xraph/forgeui/components/table"
+	"github.com/xraph/weave/collection"
+	"github.com/xraph/weave/dashboard/components"
+	"github.com/xraph/weave/document"
+	"github.com/xraph/weave/engine"
+)
+
+templ CollectionDetailPage(col *collection.Collection, stats *engine.CollectionStatsResult, recentDocs []*document.Document) {
+	<div class="space-y-6">
+		@components.PageHeader(col.Name, "", col.Description) {
+			@button.Button(button.Props{
+				Variant: button.VariantOutline,
+				Attributes: templ.Attributes{
+					"hx-get":    "/collections",
+					"hx-target": "#content",
+				},
+			}) {
+				Back
+			}
+			@button.Button(button.Props{
+				Variant: button.VariantOutline,
+				Attributes: templ.Attributes{
+					"hx-get":    "/collections/edit?id=" + col.ID.String(),
+					"hx-target": "#content",
+				},
+			}) {
+				Edit
+			}
+			@button.Button(button.Props{
+				Variant: button.VariantDestructive,
+				Attributes: templ.Attributes{
+					"onclick": fmt.Sprintf("tuiOpenDialog('delete-col-detail-%s')", col.ID.String()),
+				},
+			}) {
+				Delete
+			}
+		}
+		<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+			if stats != nil {
+				@components.StatCard("file-text", "Documents", strconv.FormatInt(stats.DocumentCount, 10), "In this collection")
+				@components.StatCard("puzzle", "Chunks", strconv.FormatInt(stats.ChunkCount, 10), "Searchable segments")
+			}
+			@components.StatCard("layers", "Embedding Dims", strconv.Itoa(col.EmbeddingDims), col.EmbeddingModel)
+			@components.StatCard("settings", "Chunk Size", strconv.Itoa(col.ChunkSize), fmt.Sprintf("Overlap: %d", col.ChunkOverlap))
+		</div>
+		@separator.Separator(separator.Props{})
+		<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+			@components.ConfigDisplay("Configuration", []components.ConfigItem{
+				{Label: "ID", Value: col.ID.String()},
+				{Label: "Embedding Model", Value: col.EmbeddingModel},
+				{Label: "Embedding Dimensions", Value: strconv.Itoa(col.EmbeddingDims)},
+				{Label: "Chunk Strategy", Value: col.ChunkStrategy},
+				{Label: "Chunk Size", Value: strconv.Itoa(col.ChunkSize)},
+				{Label: "Chunk Overlap", Value: strconv.Itoa(col.ChunkOverlap)},
+			})
+			@card.Card() {
+				@card.Header() {
+					@card.Title() {
+						Metadata
+					}
+				}
+				@card.Content() {
+					if len(col.Metadata) == 0 {
+						<span class="text-sm text-muted-foreground">No metadata</span>
+					} else {
+						<dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+							for k, v := range col.Metadata {
+								<dt class="text-muted-foreground font-mono text-xs">{ k }</dt>
+								<dd class="font-mono text-xs">{ v }</dd>
+							}
+						</dl>
+					}
+				}
+			}
+		</div>
+		@card.Card() {
+			@card.Header() {
+				<div class="flex items-center justify-between w-full">
+					<div>
+						@card.Title() {
+							Recent Documents
+						}
+						@card.Description() {
+							Latest documents in this collection
+						}
+					</div>
+					@button.Button(button.Props{
+						Variant: button.VariantOutline,
+						Size:    button.SizeSm,
+						Attributes: templ.Attributes{
+							"hx-get":    "/documents?collection=" + col.ID.String(),
+							"hx-target": "#content",
+						},
+					}) {
+						View All
+					}
+				</div>
+			}
+			@card.Content() {
+				if len(recentDocs) == 0 {
+					@components.EmptyState("file-text", "No documents yet", "Ingest documents into this collection")
+				} else {
+					@table.Table() {
+						@table.Header() {
+							@table.Row() {
+								@table.Head() {
+									Title
+								}
+								@table.Head() {
+									State
+								}
+								@table.Head() {
+									Chunks
+								}
+								@table.Head() {
+									Actions
+								}
+							}
+						}
+						@table.Body() {
+							for _, d := range recentDocs {
+								@table.Row() {
+									@table.Cell() {
+										<a
+											class="font-medium hover:underline cursor-pointer"
+											hx-get={ "/documents/detail?id=" + d.ID.String() }
+											hx-target="#content"
+										>
+											if d.Title != "" {
+												{ d.Title }
+											} else {
+												<span class="text-muted-foreground italic">Untitled</span>
+											}
+										</a>
+									}
+									@table.Cell() {
+										@components.StateBadge(string(d.State))
+									}
+									@table.Cell() {
+										{ strconv.Itoa(d.ChunkCount) }
+									}
+									@table.Cell() {
+										@button.Button(button.Props{
+											Variant: button.VariantOutline,
+											Size:    button.SizeSm,
+											Attributes: templ.Attributes{
+												"hx-get":    "/documents/detail?id=" + d.ID.String(),
+												"hx-target": "#content",
+											},
+										}) {
+											View
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		{ children... }
+		@components.ConfirmDialog(components.ConfirmDialogProps{
+			ID:           "delete-col-detail-" + col.ID.String(),
+			Title:        "Delete Collection",
+			Description:  "Are you sure you want to delete collection \"" + col.Name + "\"? All documents and chunks will be permanently deleted.",
+			ConfirmLabel: "Delete",
+			HxEndpoint:   "/weave/collections/" + col.ID.String(),
+			HxMethod:     "delete",
+		})
+		@components.DialogHelpers()
+	</div>
+}

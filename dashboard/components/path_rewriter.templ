@@ -1,0 +1,38 @@
+package components
+
+templ PathRewriter(pagesBase string) {
+	<div data-weave-pages-base={ pagesBase }>
+		{ children... }
+	</div>
+	<script>
+	(function(){
+		if (window.__weavePathRewriterAttached) return;
+		window.__weavePathRewriterAttached = true;
+
+		document.addEventListener('htmx:configRequest', function(e) {
+			var el = e.detail.elt;
+			var wrapper = el.closest('[data-weave-pages-base]');
+			if (!wrapper && document.querySelector('[data-weave-pages-base]')) {
+				wrapper = document.querySelector('[data-weave-pages-base]');
+			}
+			if (!wrapper) return;
+
+			var base = wrapper.getAttribute('data-weave-pages-base');
+			if (!base) return;
+
+			var dashBase = base.replace(/\/ext\/[^/]+\/pages$/, '');
+			var path = e.detail.path;
+			if (!path || !path.startsWith('/')) return;
+
+			if (path.startsWith(base)) return;
+			if (path.startsWith('/weave/')) return;
+			if (path.startsWith('/ext/')) {
+				e.detail.path = dashBase + path;
+				return;
+			}
+
+			e.detail.path = base + path;
+		});
+	})();
+	</script>
+}

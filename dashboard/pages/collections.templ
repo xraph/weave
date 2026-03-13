@@ -1,0 +1,160 @@
+package pages
+
+import (
+	"fmt"
+	"strconv"
+
+	"github.com/xraph/forgeui/components/badge"
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/input"
+	"github.com/xraph/forgeui/components/table"
+	"github.com/xraph/weave/collection"
+	"github.com/xraph/weave/dashboard/components"
+	"github.com/xraph/weave/dashboard/shared"
+)
+
+templ CollectionsPage(items []*collection.Collection, search string, pg shared.PaginationMeta) {
+	<div class="space-y-6">
+		@components.PageHeader("Collections", fmt.Sprintf("%d", pg.Total), "Manage document collections") {
+			@button.Button(button.Props{
+				Attributes: templ.Attributes{
+					"hx-get":    "/collections/create",
+					"hx-target": "#content",
+				},
+			}) {
+				New Collection
+			}
+		}
+		<div class="flex gap-4">
+			@input.Input(input.Props{
+				Type:        "search",
+				Placeholder: "Search collections...",
+				Value:       search,
+				Class:       "max-w-sm",
+				Attributes: templ.Attributes{
+					"name":        "search",
+					"hx-get":      "/collections",
+					"hx-target":   "#content",
+					"hx-trigger":  "input changed delay:300ms",
+					"hx-push-url": "true",
+					"hx-include":  "this",
+				},
+			})
+		</div>
+		if len(items) == 0 {
+			@components.EmptyState("folders", "No collections found", "Create your first collection to get started")
+		} else {
+			@table.Table() {
+				@table.Header() {
+					@table.Row() {
+						@table.Head() {
+							Name
+						}
+						@table.Head() {
+							Embedding Model
+						}
+						@table.Head() {
+							Strategy
+						}
+						@table.Head() {
+							Docs
+						}
+						@table.Head() {
+							Chunks
+						}
+						@table.Head() {
+							Actions
+						}
+					}
+				}
+				@table.Body() {
+					for _, c := range items {
+						@table.Row() {
+							@table.Cell() {
+								<a
+									class="font-medium hover:underline cursor-pointer"
+									hx-get={ "/collections/detail?id=" + c.ID.String() }
+									hx-target="#content"
+								>
+									{ c.Name }
+								</a>
+								if c.Description != "" {
+									<p class="text-xs text-muted-foreground">{ truncate(c.Description, 60) }</p>
+								}
+							}
+							@table.Cell() {
+								@badge.Badge(badge.Props{Variant: badge.VariantOutline}) {
+									{ c.EmbeddingModel }
+								}
+							}
+							@table.Cell() {
+								@badge.Badge(badge.Props{Variant: badge.VariantSecondary}) {
+									{ c.ChunkStrategy }
+								}
+							}
+							@table.Cell() {
+								{ strconv.FormatInt(c.DocumentCount, 10) }
+							}
+							@table.Cell() {
+								{ strconv.FormatInt(c.ChunkCount, 10) }
+							}
+							@table.Cell() {
+								<div class="flex gap-1">
+									@button.Button(button.Props{
+										Variant: button.VariantOutline,
+										Size:    button.SizeSm,
+										Attributes: templ.Attributes{
+											"hx-get":    "/collections/detail?id=" + c.ID.String(),
+											"hx-target": "#content",
+										},
+									}) {
+										View
+									}
+									@button.Button(button.Props{
+										Variant: button.VariantOutline,
+										Size:    button.SizeSm,
+										Attributes: templ.Attributes{
+											"hx-get":    "/collections/edit?id=" + c.ID.String(),
+											"hx-target": "#content",
+										},
+									}) {
+										Edit
+									}
+									@button.Button(button.Props{
+										Variant: button.VariantDestructive,
+										Size:    button.SizeSm,
+										Attributes: templ.Attributes{
+											"onclick": fmt.Sprintf("tuiOpenDialog('delete-col-%s')", c.ID.String()),
+										},
+									}) {
+										Delete
+									}
+									@components.ConfirmDialog(components.ConfirmDialogProps{
+										ID:           "delete-col-" + c.ID.String(),
+										Title:        "Delete Collection",
+										Description:  "Are you sure you want to delete collection \"" + c.Name + "\"? All documents and chunks will be permanently deleted.",
+										ConfirmLabel: "Delete",
+										HxEndpoint:   "/weave/collections/" + c.ID.String(),
+										HxMethod:     "delete",
+									})
+								</div>
+							}
+						}
+					}
+				}
+			}
+			@components.Pagination(pg, "/collections?search="+search)
+		}
+		@components.DialogHelpers()
+	</div>
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
+}

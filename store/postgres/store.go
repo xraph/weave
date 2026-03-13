@@ -144,6 +144,9 @@ func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilt
 	q := s.pg.NewSelect(&models).OrderExpr("created_at ASC")
 
 	if filter != nil {
+		if filter.Search != "" {
+			q = q.Where("name ILIKE '%' || $1 || '%'", filter.Search)
+		}
 		if filter.Limit > 0 {
 			q = q.Limit(filter.Limit)
 		}
@@ -161,6 +164,22 @@ func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilt
 		result[i] = collectionFromModel(&models[i])
 	}
 	return result, nil
+}
+
+func (s *Store) CountCollections(ctx context.Context, filter *collection.CountFilter) (int64, error) {
+	q := s.pg.NewSelect((*collectionModel)(nil))
+
+	if filter != nil {
+		if filter.Search != "" {
+			q = q.Where("name ILIKE '%' || $1 || '%'", filter.Search)
+		}
+	}
+
+	count, err := q.Count(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("weave: count collections: %w", err)
+	}
+	return count, nil
 }
 
 // ──────────────────────────────────────────────────
@@ -237,6 +256,9 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 		}
 		if filter.State != "" {
 			q = q.Where("state = $2", string(filter.State))
+		}
+		if filter.Search != "" {
+			q = q.Where("title ILIKE '%' || $3 || '%'", filter.Search)
 		}
 		if filter.Limit > 0 {
 			q = q.Limit(filter.Limit)

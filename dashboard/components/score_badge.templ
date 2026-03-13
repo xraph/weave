@@ -1,0 +1,22 @@
+package components
+
+import (
+	"fmt"
+	"github.com/xraph/forgeui/components/badge"
+)
+
+templ ScoreBadge(score float64) {
+	if score >= 0.8 {
+		@badge.Badge(badge.Props{Variant: badge.VariantDefault}) {
+			{ fmt.Sprintf("%.2f", score) }
+		}
+	} else if score >= 0.5 {
+		@badge.Badge(badge.Props{Variant: badge.VariantSecondary}) {
+			{ fmt.Sprintf("%.2f", score) }
+		}
+	} else {
+		@badge.Badge(badge.Props{Variant: badge.VariantOutline}) {
+			{ fmt.Sprintf("%.2f", score) }
+		}
+	}
+}

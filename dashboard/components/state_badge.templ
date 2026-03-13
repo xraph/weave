@@ -1,0 +1,28 @@
+package components
+
+import "github.com/xraph/forgeui/components/badge"
+
+templ StateBadge(state string) {
+	switch state {
+		case "ready":
+			@badge.Badge(badge.Props{Variant: badge.VariantSecondary}) {
+				Ready
+			}
+		case "processing":
+			@badge.Badge(badge.Props{Variant: badge.VariantDefault}) {
+				Processing
+			}
+		case "pending":
+			@badge.Badge(badge.Props{Variant: badge.VariantOutline}) {
+				Pending
+			}
+		case "failed":
+			@badge.Badge(badge.Props{Variant: badge.VariantDestructive}) {
+				Failed
+			}
+		default:
+			@badge.Badge(badge.Props{Variant: badge.VariantOutline}) {
+				{ state }
+			}
+	}
+}

@@ -1,0 +1,80 @@
+name: weave
+display_name: "Weave"
+icon: layers
+version: 0.1.0
+type: templ
+build:
+  mode: local
+
+nav:
+  # Weave
+  - label: Overview
+    path: /
+    icon: layout-dashboard
+    group: Weave
+    priority: 0
+  - label: Retrieval
+    path: /retrieval
+    icon: search
+    group: Weave
+    priority: 1
+  - label: Pipeline
+    path: /pipeline
+    icon: workflow
+    group: Weave
+    priority: 2
+
+  # Content
+  - label: Collections
+    path: /collections
+    icon: folders
+    group: Content
+    priority: 0
+  - label: Documents
+    path: /documents
+    icon: file-text
+    group: Content
+    priority: 1
+  - label: Chunks
+    path: /chunks
+    icon: puzzle
+    group: Content
+    priority: 2
+
+  # Reference
+  - label: Loaders
+    path: /loaders
+    icon: upload
+    group: Reference
+    priority: 0
+  - label: Extensions
+    path: /extensions
+    icon: plug
+    group: Reference
+    priority: 1
+
+widgets:
+  - id: weave-stats
+    title: "RAG Stats"
+    description: "Collection, document, and chunk counts"
+    size: md
+    refresh_sec: 60
+  - id: weave-recent-ingestions
+    title: "Recent Ingestions"
+    description: "Recently ingested documents"
+    size: lg
+    refresh_sec: 15
+  - id: weave-pipeline-health
+    title: "Pipeline Health"
+    description: "Pipeline component status and document state breakdown"
+    size: md
+    refresh_sec: 60
+
+settings:
+  - id: weave-config
+    title: "Weave Settings"
+    description: "Configure RAG pipeline behavior"
+    group: Weave
+    icon: layers
+
+searchable: true

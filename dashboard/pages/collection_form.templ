@@ -1,0 +1,197 @@
+package pages
+
+import (
+	"strconv"
+
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/input"
+	"github.com/xraph/forgeui/components/label"
+	weave "github.com/xraph/weave"
+	"github.com/xraph/weave/collection"
+	"github.com/xraph/weave/dashboard/components"
+)
+
+templ CollectionFormPage(col *collection.Collection, cfg weave.Config) {
+	{{ isEdit := col != nil }}
+	{{ title := "Create Collection" }}
+	if isEdit {
+		{{ title = "Edit Collection" }}
+	}
+	<div class="space-y-6">
+		@components.PageHeader(title, "", "") {
+			@button.Button(button.Props{
+				Variant: button.VariantOutline,
+				Attributes: templ.Attributes{
+					"hx-get":    "/collections",
+					"hx-target": "#content",
+				},
+			}) {
+				Cancel
+			}
+		}
+		@card.Card() {
+			@card.Content(card.ContentProps{Class: "p-6"}) {
+				if isEdit {
+					<form
+						class="space-y-6"
+						hx-put={ "/weave/collections/" + col.ID.String() }
+						hx-target="#content"
+						hx-swap="innerHTML"
+					>
+						@collectionFormFields(col, cfg, isEdit)
+					</form>
+				} else {
+					<form
+						class="space-y-6"
+						hx-post="/weave/collections"
+						hx-target="#content"
+						hx-swap="innerHTML"
+					>
+						@collectionFormFields(col, cfg, isEdit)
+					</form>
+				}
+			}
+		}
+	</div>
+}
+
+templ collectionFormFields(col *collection.Collection, cfg weave.Config, isEdit bool) {
+	<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+		<div class="space-y-2">
+			@label.Label(label.Props{}) {
+				Name
+			}
+			@input.Input(input.Props{
+				Type:        "text",
+				Placeholder: "My Collection",
+				Name:        "name",
+				Value:       colFormVal(col, "name", ""),
+				Attributes:  templ.Attributes{"required": "true"},
+			})
+		</div>
+		<div class="space-y-2">
+			@label.Label(label.Props{}) {
+				Description
+			}
+			@input.Input(input.Props{
+				Type:        "text",
+				Placeholder: "Optional description",
+				Name:        "description",
+				Value:       colFormVal(col, "description", ""),
+			})
+		</div>
+		<div class="space-y-2">
+			@label.Label(label.Props{}) {
+				Embedding Model
+			}
+			@input.Input(input.Props{
+				Type:        "text",
+				Placeholder: cfg.DefaultEmbeddingModel,
+				Name:        "embedding_model",
+				Value:       colFormVal(col, "embedding_model", cfg.DefaultEmbeddingModel),
+			})
+		</div>
+		<div class="space-y-2">
+			@label.Label(label.Props{}) {
+				Chunk Strategy
+			}
+			<select
+				name="chunk_strategy"
+				class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+			>
+				<option value="recursive" selected?={ colFormVal(col, "chunk_strategy", cfg.DefaultChunkStrategy) == "recursive" }>Recursive</option>
+				<option value="semantic" selected?={ colFormVal(col, "chunk_strategy", cfg.DefaultChunkStrategy) == "semantic" }>Semantic</option>
+				<option value="sliding_window" selected?={ colFormVal(col, "chunk_strategy", cfg.DefaultChunkStrategy) == "sliding_window" }>Sliding Window</option>
+				<option value="fixed" selected?={ colFormVal(col, "chunk_strategy", cfg.DefaultChunkStrategy) == "fixed" }>Fixed</option>
+				<option value="code" selected?={ colFormVal(col, "chunk_strategy", cfg.DefaultChunkStrategy) == "code" }>Code</option>
+			</select>
+		</div>
+		<div class="space-y-2">
+			@label.Label(label.Props{}) {
+				Chunk Size
+			}
+			@input.Input(input.Props{
+				Type:        "number",
+				Placeholder: strconv.Itoa(cfg.DefaultChunkSize),
+				Name:        "chunk_size",
+				Value:       colFormValInt(col, "chunk_size", cfg.DefaultChunkSize),
+			})
+		</div>
+		<div class="space-y-2">
+			@label.Label(label.Props{}) {
+				Chunk Overlap
+			}
+			@input.Input(input.Props{
+				Type:        "number",
+				Placeholder: strconv.Itoa(cfg.DefaultChunkOverlap),
+				Name:        "chunk_overlap",
+				Value:       colFormValInt(col, "chunk_overlap", cfg.DefaultChunkOverlap),
+			})
+		</div>
+	</div>
+	<div class="flex justify-end gap-2">
+		@button.Button(button.Props{
+			Variant: button.VariantOutline,
+			Attributes: templ.Attributes{
+				"hx-get":    "/collections",
+				"hx-target": "#content",
+			},
+		}) {
+			Cancel
+		}
+		@button.Button(button.Props{
+			Type: "submit",
+		}) {
+			if isEdit {
+				Update Collection
+			} else {
+				Create Collection
+			}
+		}
+	</div>
+}
+
+func colFormVal(col *collection.Collection, field string, defaultVal string) string {
+	if col == nil {
+		return defaultVal
+	}
+	switch field {
+	case "name":
+		return col.Name
+	case "description":
+		return col.Description
+	case "embedding_model":
+		if col.EmbeddingModel != "" {
+			return col.EmbeddingModel
+		}
+		return defaultVal
+	case "chunk_strategy":
+		if col.ChunkStrategy != "" {
+			return col.ChunkStrategy
+		}
+		return defaultVal
+	default:
+		return defaultVal
+	}
+}
+
+func colFormValInt(col *collection.Collection, field string, defaultVal int) string {
+	if col == nil {
+		return strconv.Itoa(defaultVal)
+	}
+	switch field {
+	case "chunk_size":
+		if col.ChunkSize > 0 {
+			return strconv.Itoa(col.ChunkSize)
+		}
+		return strconv.Itoa(defaultVal)
+	case "chunk_overlap":
+		if col.ChunkOverlap > 0 {
+			return strconv.Itoa(col.ChunkOverlap)
+		}
+		return strconv.Itoa(defaultVal)
+	default:
+		return strconv.Itoa(defaultVal)
+	}
+}

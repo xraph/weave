@@ -1,0 +1,57 @@
+package widgets
+
+import (
+	"strconv"
+	"github.com/xraph/forgeui/components/badge"
+)
+
+templ PipelineHealthWidget(counts EntityCounts, status PipelineStatus) {
+	<div class="space-y-4">
+		<div class="space-y-2">
+			<span class="text-sm font-medium">Components</span>
+			<div class="grid grid-cols-2 gap-2">
+				@pipelineStatusItem("Loader", status.HasLoader)
+				@pipelineStatusItem("Chunker", status.HasChunker)
+				@pipelineStatusItem("Embedder", status.HasEmbedder)
+				@pipelineStatusItem("Vector Store", status.HasVectorStore)
+				@pipelineStatusItem("Retriever", status.HasRetriever)
+			</div>
+		</div>
+		<div class="space-y-2">
+			<span class="text-sm font-medium">Document States</span>
+			<div class="grid grid-cols-2 gap-2 text-sm">
+				<div class="flex justify-between">
+					<span class="text-muted-foreground">Ready</span>
+					<span class="font-medium">{ strconv.FormatInt(counts.DocsReady, 10) }</span>
+				</div>
+				<div class="flex justify-between">
+					<span class="text-muted-foreground">Processing</span>
+					<span class="font-medium">{ strconv.FormatInt(counts.DocsProcessing, 10) }</span>
+				</div>
+				<div class="flex justify-between">
+					<span class="text-muted-foreground">Pending</span>
+					<span class="font-medium">{ strconv.FormatInt(counts.DocsPending, 10) }</span>
+				</div>
+				<div class="flex justify-between">
+					<span class="text-muted-foreground">Failed</span>
+					<span class="font-medium">{ strconv.FormatInt(counts.DocsFailed, 10) }</span>
+				</div>
+			</div>
+		</div>
+	</div>
+}
+
+templ pipelineStatusItem(name string, available bool) {
+	<div class="flex items-center justify-between text-sm">
+		<span class="text-muted-foreground">{ name }</span>
+		if available {
+			@badge.Badge(badge.Props{Variant: badge.VariantSecondary}) {
+				Active
+			}
+		} else {
+			@badge.Badge(badge.Props{Variant: badge.VariantOutline}) {
+				N/A
+			}
+		}
+	</div>
+}

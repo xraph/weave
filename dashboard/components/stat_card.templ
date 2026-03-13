@@ -1,0 +1,23 @@
+package components
+
+import (
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/icons"
+)
+
+templ StatCard(iconName string, label string, value string, subtitle string) {
+	@card.Card() {
+		@card.Content(card.ContentProps{Class: "flex flex-col gap-1 p-6"}) {
+			<div class="flex items-center justify-between">
+				<span class="text-sm text-muted-foreground">{ label }</span>
+				<span class="text-muted-foreground">
+					@resolveIcon(iconName, icons.WithSize(16))
+				</span>
+			</div>
+			<div class="text-3xl font-bold">{ value }</div>
+			if subtitle != "" {
+				<span class="text-xs text-muted-foreground">{ subtitle }</span>
+			}
+		}
+	}
+}

@@ -1,0 +1,123 @@
+package pages
+
+import (
+	"strconv"
+
+	"github.com/xraph/forgeui/components/button"
+	"github.com/xraph/forgeui/components/card"
+	"github.com/xraph/forgeui/components/table"
+	"github.com/xraph/weave/dashboard/components"
+	"github.com/xraph/weave/document"
+)
+
+templ OverviewPage(counts EntityCounts, recentDocs []*document.Document, colNames map[string]string) {
+	<div class="space-y-8">
+		<div>
+			<h1 class="text-3xl font-bold tracking-tight">Overview</h1>
+			<p class="text-muted-foreground mt-1">Weave RAG pipeline dashboard</p>
+		</div>
+		<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+			@components.StatCard("folders", "Collections", strconv.FormatInt(counts.Collections, 10), "Data groups")
+			@components.StatCard("file-text", "Documents", strconv.FormatInt(counts.Documents, 10), "Total ingested")
+			@components.StatCard("check-circle", "Ready", strconv.FormatInt(counts.DocsReady, 10), "Searchable documents")
+			@components.StatCard("activity", "Processing", strconv.FormatInt(counts.DocsProcessing, 10), "In progress")
+			@components.StatCard("alert-circle", "Failed", strconv.FormatInt(counts.DocsFailed, 10), "Needs attention")
+			@components.StatCard("clock", "Pending", strconv.FormatInt(counts.DocsPending, 10), "Awaiting processing")
+			@components.StatCard("puzzle", "Chunks", strconv.FormatInt(counts.Chunks, 10), "Searchable segments")
+		</div>
+		<div class="grid grid-cols-1 gap-6">
+			@card.Card() {
+				@card.Header() {
+					@card.Title() {
+						Recent Ingestions
+					}
+					@card.Description() {
+						Last 10 ingested documents
+					}
+				}
+				@card.Content() {
+					if len(recentDocs) == 0 {
+						@components.EmptyState("file-text", "No documents yet", "Ingest documents to see recent activity")
+					} else {
+						@table.Table() {
+							@table.Header() {
+								@table.Row() {
+									@table.Head() {
+										Title
+									}
+									@table.Head() {
+										Collection
+									}
+									@table.Head() {
+										State
+									}
+									@table.Head() {
+										Chunks
+									}
+									@table.Head() {
+										Actions
+									}
+								}
+							}
+							@table.Body() {
+								for _, d := range recentDocs {
+									@table.Row() {
+										@table.Cell() {
+											<a
+												class="font-medium hover:underline cursor-pointer"
+												hx-get={ "/documents/detail?id=" + d.ID.String() }
+												hx-target="#content"
+											>
+												if d.Title != "" {
+													{ d.Title }
+												} else {
+													<span class="text-muted-foreground italic">Untitled</span>
+												}
+											</a>
+										}
+										@table.Cell() {
+											{{ colName := resolveColName(d.CollectionID.String(), colNames) }}
+											<a
+												class="text-sm hover:underline cursor-pointer"
+												hx-get={ "/collections/detail?id=" + d.CollectionID.String() }
+												hx-target="#content"
+											>
+												{ colName }
+											</a>
+										}
+										@table.Cell() {
+											@components.StateBadge(string(d.State))
+										}
+										@table.Cell() {
+											{ strconv.Itoa(d.ChunkCount) }
+										}
+										@table.Cell() {
+											@button.Button(button.Props{
+												Variant: button.VariantOutline,
+												Size:    button.SizeSm,
+												Attributes: templ.Attributes{
+													"hx-get":    "/documents/detail?id=" + d.ID.String(),
+													"hx-target": "#content",
+												},
+											}) {
+												View
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		</div>
+		{ children... }
+	</div>
+}
+
+func resolveColName(colIDStr string, nameMap map[string]string) string {
+	if name, ok := nameMap[colIDStr]; ok {
+		return name
+	}
+	return colIDStr
+}

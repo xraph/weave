@@ -12,6 +12,8 @@ type ListFilter struct {
 	CollectionID id.CollectionID
 	// State filters by document state. Empty means all states.
 	State State
+	// Search filters documents by title (case-insensitive substring match).
+	Search string
 	// Limit is the maximum number of documents to return. Zero means no limit.
 	Limit int
 	// Offset is the number of documents to skip.
