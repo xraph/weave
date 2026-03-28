@@ -123,6 +123,7 @@ func (e *Extension) Register(fapp forge.App) error {
 		if basePath == "" {
 			basePath = "/weave"
 		}
+
 		e.apiHandler.RegisterRoutes(fapp.Router().Group(basePath))
 	}
 
