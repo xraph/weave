@@ -3,7 +3,7 @@ module github.com/xraph/weave
 go 1.25.7
 
 require (
-	github.com/a-h/templ v0.3.1001
+	github.com/a-h/templ v0.3.1020
 	github.com/xraph/forge v1.6.4
 	github.com/xraph/forgeui v1.4.1
 	github.com/xraph/go-utils v1.1.1
@@ -13,8 +13,8 @@ require (
 	github.com/xraph/grove/drivers/sqlitedriver v1.5.2
 	github.com/xraph/vessel v1.0.2
 	go.jetify.com/typeid/v2 v2.0.0-alpha.3
-	go.mongodb.org/mongo-driver/v2 v2.5.0
-	golang.org/x/net v0.50.0
+	go.mongodb.org/mongo-driver/v2 v2.6.0
+	golang.org/x/net v0.51.0
 )
 
 require (
