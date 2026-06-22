@@ -1,0 +1,65 @@
+---
+title: Fabriq Vector Store
+description: Back weave's VectorStore with the fabriq data fabric, so chunk embeddings live in the same store as the rest of your system.
+---
+
+The **`fabriqvec`** adapter (`github.com/xraph/weave/vectorstore/fabriq`) implements weave's `vectorstore.VectorStore` over [fabriq](https://github.com/xraph/fabriq)'s vector plane. Instead of a standalone `weave_vectors` table (the pgvector store), weave's chunk embeddings persist into fabriq's `fabriq_embeddings` store — unifying your vector storage with the rest of the fabric and giving fabriq's own agent recall visibility into document chunks.
+
+It is a vector-store backend only: weave keeps its loaders, chunkers, retrievers, and metadata store; just the `VectorStore` port is fabriq-backed.
+
+```go
+import (
+	"github.com/xraph/weave/engine"
+	fabriqvec "github.com/xraph/weave/vectorstore/fabriq"
+)
+
+eng, err := engine.New(
+	engine.WithStore(metaStore),
+	engine.WithVectorStore(fabriqvec.New(f.Vector())),
+)
+```
+
+`New` takes a fabriq `query.VectorQuerier` — obtained from a started fabriq facade via `f.Vector()`. All weave vectors are namespaced under a single fabriq entity (default `weave_vector`; override with `WithEntity`).
+
+## Configuration
+
+```go
+fabriqvec.New(f.Vector(),
+	fabriqvec.WithEntity("kb_chunks"), // fabriq entity namespacing these vectors
+)
+```
+
+### DI auto-discovery
+
+In a Forge app where fabriq is registered in the DI container, `EngineOption` discovers the facade automatically (no-op when absent, so it is always safe to include):
+
+```go
+eng, err := engine.New(
+	engine.WithStore(metaStore),
+	fabriqvec.EngineOption(container),
+)
+```
+
+## Behavior
+
+| weave `VectorStore` | fabriq |
+|---|---|
+| `Upsert(entries)` | `Content` is folded into fabriq `meta["content"]`; `Metadata` rides alongside in `meta`. |
+| `Search(vec, opts)` | `opts.Filter` → fabriq metadata filter (`meta @> …`); `opts.TenantKey` → fabriq tenant scope; `opts.MinScore` post-filters; `Content`/`Metadata` are reconstructed from `meta`. |
+| `Delete(ids)` / `DeleteByMetadata(filter)` | fabriq `Delete` / `DeleteByMeta`. |
+
+Two intentional differences from the `pgvector` store:
+
+- **`Search` results carry a nil `Vector`.** Fabriq does not return the raw embedding on a similarity search; consumers use `Content`, `Score`, and `Metadata`. Call fabriq's `Get` if you need the vector back.
+- **`TenantKey` maps to fabriq's native tenant isolation** (a first-class scope), not a `metadata.tenant_id` convention — stronger isolation. Don't rely on a `tenant_id` metadata key.
+
+## Requirements
+
+- A started fabriq facade with the `fabriq_embeddings` table migrated (fabriq's standard migrations, including the `0025` GIN index on `meta` that keeps metadata filters fast).
+- Operate within a fabriq tenant scope (the ambient context carries it). The namespacing entity does **not** need to be registered in fabriq's registry — `fabriq_embeddings` accepts any `(tenant, entity, id)` triple.
+
+## Choosing a vector store
+
+- **`vectorstore/memory`** — development and tests.
+- **`vectorstore/pgvector`** — standalone Postgres + pgvector, weave-owned table.
+- **`vectorstore/fabriq`** — when you already run fabriq and want chunk vectors in the fabric (shared store, unified tenancy, fabriq agent recall over your chunks).
