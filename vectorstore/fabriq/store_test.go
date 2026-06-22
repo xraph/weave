@@ -80,6 +80,18 @@ func TestSearchWithTenantKey(t *testing.T) {
 	if results[0].ID != "a1" {
 		t.Errorf("expected id=a1, got %q", results[0].ID)
 	}
+
+	// Negative: a different TenantKey must return zero results — proving tenant isolation.
+	other, err := s.Search(context.Background(), []float32{1, 0, 0}, &vectorstore.SearchOptions{
+		TopK:      5,
+		TenantKey: "other",
+	})
+	if err != nil {
+		t.Fatalf("Search with TenantKey=other: %v", err)
+	}
+	if len(other) != 0 {
+		t.Errorf("expected 0 results for tenant 'other', got %d", len(other))
+	}
 }
 
 func TestSearchMinScore(t *testing.T) {
