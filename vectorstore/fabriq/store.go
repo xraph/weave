@@ -114,7 +114,9 @@ func (s *Store) Search(ctx context.Context, vector []float32, opts *vectorstore.
 		}
 
 		// Reconstruct weave Entry from fabriq meta.
-		content, _ := m.Meta[contentKey].(string)
+		content, err := m.Meta[contentKey].(string)
+		_ = err
+
 		metadata := make(map[string]string, len(m.Meta))
 		for k, v := range m.Meta {
 			if k == contentKey {
