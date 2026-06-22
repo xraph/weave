@@ -4,6 +4,7 @@ go 1.25.7
 
 require (
 	github.com/a-h/templ v0.3.1001
+	github.com/xraph/fabriq v0.0.3
 	github.com/xraph/forge v1.8.0
 	github.com/xraph/forgeui v1.4.1
 	github.com/xraph/go-utils v1.1.1
@@ -145,7 +146,6 @@ require (
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/xraph/confy v0.5.2 // indirect
-	github.com/xraph/fabriq v0.0.0-00010101000000-000000000000
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect
@@ -191,5 +191,3 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
-
-replace github.com/xraph/fabriq => ../../../TwinOS/fabriq
