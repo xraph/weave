@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/a-h/templ v0.3.1001
-	github.com/xraph/fabriq/core v1.6.4
+	github.com/xraph/fabriq/core v1.6.5
 	github.com/xraph/forge v1.10.0
 	github.com/xraph/forgeui v1.4.1
 	github.com/xraph/go-utils v1.2.2
