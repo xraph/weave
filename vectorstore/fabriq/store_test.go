@@ -6,9 +6,9 @@ import (
 
 	fabriqvec "github.com/xraph/weave/vectorstore/fabriq"
 
+	"github.com/xraph/fabriq/core/fabriqtest"
 	"github.com/xraph/fabriq/core/registry"
 	"github.com/xraph/fabriq/core/tenant"
-	"github.com/xraph/fabriq/fabriqtest"
 
 	"github.com/xraph/weave/vectorstore"
 )
