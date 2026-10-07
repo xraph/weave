@@ -143,7 +143,11 @@ func (s *Store) DeleteCollection(ctx context.Context, colID id.CollectionID) err
 
 func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilter) ([]*collection.Collection, error) {
 	var models []collectionModel
-	q := s.mdb.NewFind(&models).Sort(bson.D{{Key: "created_at", Value: 1}})
+	dir := 1
+	if filter != nil && filter.SortDesc {
+		dir = -1
+	}
+	q := s.mdb.NewFind(&models).Sort(bson.D{{Key: "created_at", Value: dir}, {Key: "_id", Value: dir}})
 
 	if filter != nil {
 		if filter.Search != "" {
@@ -246,7 +250,11 @@ func (s *Store) DeleteDocument(ctx context.Context, docID id.DocumentID) error {
 
 func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) ([]*document.Document, error) {
 	var models []documentModel
-	q := s.mdb.NewFind(&models).Sort(bson.D{{Key: "created_at", Value: 1}})
+	dir := 1
+	if filter != nil && filter.SortDesc {
+		dir = -1
+	}
+	q := s.mdb.NewFind(&models).Sort(bson.D{{Key: "created_at", Value: dir}, {Key: "_id", Value: dir}})
 
 	if filter != nil {
 		if filter.CollectionID.String() != "" {

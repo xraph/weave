@@ -14,6 +14,9 @@ type ListFilter struct {
 	Limit int
 	// Offset is the number of collections to skip.
 	Offset int
+	// SortDesc lists newest first. The default is oldest first, which API
+	// clients paging by offset already depend on.
+	SortDesc bool
 }
 
 // CountFilter controls filtering for collection count queries.

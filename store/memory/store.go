@@ -157,8 +157,19 @@ func (s *Store) ListCollections(_ context.Context, filter *collection.ListFilter
 		result = append(result, col)
 	}
 
+	desc := filter != nil && filter.SortDesc
 	sort.Slice(result, func(i, j int) bool {
-		return result[i].CreatedAt.Before(result[j].CreatedAt)
+		a, b := result[i], result[j]
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			if desc {
+				return a.CreatedAt.After(b.CreatedAt)
+			}
+			return a.CreatedAt.Before(b.CreatedAt)
+		}
+		if desc {
+			return a.ID.String() > b.ID.String()
+		}
+		return a.ID.String() < b.ID.String()
 	})
 
 	if filter != nil {
@@ -287,8 +298,19 @@ func (s *Store) ListDocuments(_ context.Context, filter *document.ListFilter) ([
 		result = append(result, doc)
 	}
 
+	desc := filter != nil && filter.SortDesc
 	sort.Slice(result, func(i, j int) bool {
-		return result[i].CreatedAt.Before(result[j].CreatedAt)
+		a, b := result[i], result[j]
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			if desc {
+				return a.CreatedAt.After(b.CreatedAt)
+			}
+			return a.CreatedAt.Before(b.CreatedAt)
+		}
+		if desc {
+			return a.ID.String() > b.ID.String()
+		}
+		return a.ID.String() < b.ID.String()
 	})
 
 	if filter != nil {

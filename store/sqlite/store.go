@@ -145,7 +145,11 @@ func (s *Store) DeleteCollection(ctx context.Context, colID id.CollectionID) err
 
 func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilter) ([]*collection.Collection, error) {
 	var models []collectionModel
-	q := s.sdb.NewSelect(&models).OrderExpr("created_at ASC")
+	order := "created_at ASC, id ASC"
+	if filter != nil && filter.SortDesc {
+		order = "created_at DESC, id DESC"
+	}
+	q := s.sdb.NewSelect(&models).OrderExpr(order)
 
 	if filter != nil {
 		if filter.Search != "" {
@@ -256,7 +260,11 @@ func (s *Store) DeleteDocument(ctx context.Context, docID id.DocumentID) error {
 
 func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) ([]*document.Document, error) {
 	var models []documentModel
-	q := s.sdb.NewSelect(&models).OrderExpr("created_at ASC")
+	order := "created_at ASC, id ASC"
+	if filter != nil && filter.SortDesc {
+		order = "created_at DESC, id DESC"
+	}
+	q := s.sdb.NewSelect(&models).OrderExpr(order)
 
 	if filter != nil {
 		if filter.CollectionID.String() != "" {
