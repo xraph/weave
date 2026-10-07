@@ -5,6 +5,7 @@ import (
 
 	"github.com/xraph/grove"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
@@ -58,6 +59,7 @@ func collectionToModel(c *collection.Collection) *collectionModel {
 func collectionFromModel(m *collectionModel) *collection.Collection {
 	colID, _ := id.ParseCollectionID(m.ID) //nolint:errcheck // DB rows always contain valid IDs
 	return &collection.Collection{
+		Entity:         weave.Entity{CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt},
 		ID:             colID,
 		Name:           m.Name,
 		Description:    m.Description,
@@ -120,6 +122,7 @@ func documentFromModel(m *documentModel) *document.Document {
 	docID, _ := id.ParseDocumentID(m.ID)             //nolint:errcheck // DB rows always contain valid IDs
 	colID, _ := id.ParseCollectionID(m.CollectionID) //nolint:errcheck // DB rows always contain valid IDs
 	return &document.Document{
+		Entity:        weave.Entity{CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt},
 		ID:            docID,
 		CollectionID:  colID,
 		TenantID:      m.TenantID,

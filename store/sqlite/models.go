@@ -6,6 +6,7 @@ import (
 
 	"github.com/xraph/grove"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
@@ -70,6 +71,7 @@ func collectionFromModel(m *collectionModel) (*collection.Collection, error) {
 		_ = json.Unmarshal([]byte(m.Metadata), &metadata) //nolint:errcheck // best-effort
 	}
 	return &collection.Collection{
+		Entity:         weave.Entity{CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt},
 		ID:             colID,
 		Name:           m.Name,
 		Description:    m.Description,
@@ -146,6 +148,7 @@ func documentFromModel(m *documentModel) (*document.Document, error) {
 		_ = json.Unmarshal([]byte(m.Metadata), &metadata) //nolint:errcheck // best-effort
 	}
 	return &document.Document{
+		Entity:        weave.Entity{CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt},
 		ID:            docID,
 		CollectionID:  colID,
 		TenantID:      m.TenantID,

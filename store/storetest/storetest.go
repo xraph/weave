@@ -1,0 +1,21 @@
+// Package storetest is the conformance suite every Weave store backend runs.
+//
+// Each case populates the fields the dashboard reads (metadata, offsets,
+// timestamps, tenants), because a suite that only builds empty structs tests
+// the absence of those features. Assertions compare identities, never bare
+// counts: a count passes when the wrong rows come back in the right number.
+package storetest
+
+import (
+	"testing"
+
+	"github.com/xraph/weave/store"
+)
+
+// Opener returns a fresh, migrated, empty store. It is called once per case.
+type Opener func(t *testing.T) store.Store
+
+// Run runs every conformance case against the backend open returns.
+func Run(t *testing.T, open Opener) {
+	t.Run("Timestamps", func(t *testing.T) { testTimestamps(t, open(t)) })
+}

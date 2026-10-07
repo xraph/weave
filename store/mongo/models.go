@@ -5,6 +5,7 @@ import (
 
 	"github.com/xraph/grove"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
@@ -59,6 +60,7 @@ func collectionFromModel(m *collectionModel) (*collection.Collection, error) {
 		return nil, err
 	}
 	return &collection.Collection{
+		Entity:         weave.Entity{CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt},
 		ID:             colID,
 		Name:           m.Name,
 		Description:    m.Description,
@@ -125,6 +127,7 @@ func documentFromModel(m *documentModel) (*document.Document, error) {
 		return nil, err
 	}
 	return &document.Document{
+		Entity:        weave.Entity{CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt},
 		ID:            docID,
 		CollectionID:  colID,
 		TenantID:      m.TenantID,
