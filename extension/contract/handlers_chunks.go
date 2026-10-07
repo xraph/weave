@@ -2,9 +2,11 @@ package contract
 
 import (
 	"context"
+	"errors"
 
 	"github.com/xraph/forge/extensions/dashboard/contract"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
 )
 
@@ -74,10 +76,17 @@ func chunksGetHandler(deps Deps) func(context.Context, idInput, contract.Princip
 		}
 		out := chunkDetail{Chunk: copyChunk(c)}
 		doc, err := deps.Engine.GetDocument(ctx, c.DocumentID)
-		if err != nil {
+		switch {
+		case err == nil:
+			out.DocumentTitle = doc.Title
+		case errors.Is(err, weave.ErrDocumentNotFound):
+			// An orphaned chunk: its document row is gone but the chunk exists,
+			// and chunks.list shows it, so the detail answers it with an empty title.
+		default:
 			return chunkDetail{}, deps.mapError(intent, err)
 		}
-		out.DocumentTitle = doc.Title
+		// Relies on a document's chunks being indexed contiguously from 0, which
+		// the chunkers guarantee.
 		neighbours, err := deps.Engine.ListChunks(ctx, &chunk.ListFilter{DocumentID: c.DocumentID, Offset: max(c.Index-1, 0), Limit: 3})
 		if err != nil {
 			return chunkDetail{}, deps.mapError(intent, err)
