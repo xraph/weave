@@ -17,6 +17,21 @@ type CountFilter struct {
 	Tenant *string
 }
 
+// ListFilter controls paging and filtering for chunk listings. Results are
+// ordered by document ID, then by index within each document.
+type ListFilter struct {
+	// DocumentID filters by document. Empty means all documents.
+	DocumentID id.DocumentID
+	// CollectionID filters by collection. Empty means all collections.
+	CollectionID id.CollectionID
+	// Tenant filters by tenant: nil means every tenant, non-nil is exact.
+	Tenant *string
+	// Limit is the maximum number of chunks to return. Zero means no limit.
+	Limit int
+	// Offset is the number of chunks to skip.
+	Offset int
+}
+
 // Store defines the persistence contract for chunks.
 type Store interface {
 	// CreateChunkBatch persists a batch of chunks.
@@ -27,6 +42,10 @@ type Store interface {
 
 	// ListChunksByDocument returns all chunks belonging to a document, ordered by index.
 	ListChunksByDocument(ctx context.Context, docID id.DocumentID) ([]*Chunk, error)
+
+	// ListChunks returns chunks matching the filter, ordered by document
+	// then index.
+	ListChunks(ctx context.Context, filter *ListFilter) ([]*Chunk, error)
 
 	// DeleteChunksByDocument removes all chunks belonging to a document.
 	DeleteChunksByDocument(ctx context.Context, docID id.DocumentID) error

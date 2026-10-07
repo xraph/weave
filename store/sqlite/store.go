@@ -411,6 +411,40 @@ func (s *Store) ListChunksByDocument(ctx context.Context, docID id.DocumentID) (
 	return result, nil
 }
 
+func (s *Store) ListChunks(ctx context.Context, filter *chunk.ListFilter) ([]*chunk.Chunk, error) {
+	var models []chunkModel
+	q := s.sdb.NewSelect(&models).OrderExpr(`document_id ASC, "index" ASC`)
+	if filter != nil {
+		if filter.DocumentID.String() != "" {
+			q = q.Where("document_id = ?", filter.DocumentID.String())
+		}
+		if filter.CollectionID.String() != "" {
+			q = q.Where("collection_id = ?", filter.CollectionID.String())
+		}
+		if filter.Tenant != nil {
+			q = q.Where("tenant_id = ?", *filter.Tenant)
+		}
+		if filter.Limit > 0 {
+			q = q.Limit(filter.Limit)
+		}
+		if filter.Offset > 0 {
+			q = q.Offset(filter.Offset)
+		}
+	}
+	if err := q.Scan(ctx); err != nil {
+		return nil, fmt.Errorf("weave: list chunks: %w", err)
+	}
+	result := make([]*chunk.Chunk, len(models))
+	for i := range models {
+		c, convErr := chunkFromModel(&models[i])
+		if convErr != nil {
+			return nil, convErr
+		}
+		result[i] = c
+	}
+	return result, nil
+}
+
 func (s *Store) DeleteChunksByDocument(ctx context.Context, docID id.DocumentID) error {
 	_, err := s.sdb.NewDelete((*chunkModel)(nil)).
 		Where("document_id = ?", docID.String()).

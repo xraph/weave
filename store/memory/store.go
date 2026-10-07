@@ -465,6 +465,45 @@ func (s *Store) DeleteChunksByCollection(_ context.Context, colID id.CollectionI
 	return nil
 }
 
+// ListChunks returns chunks matching the filter, ordered by document then index.
+func (s *Store) ListChunks(_ context.Context, filter *chunk.ListFilter) ([]*chunk.Chunk, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []*chunk.Chunk
+	for _, ch := range s.chunks {
+		if filter != nil {
+			if filter.DocumentID.String() != "" && ch.DocumentID.String() != filter.DocumentID.String() {
+				continue
+			}
+			if filter.CollectionID.String() != "" && ch.CollectionID.String() != filter.CollectionID.String() {
+				continue
+			}
+			if filter.Tenant != nil && ch.TenantID != *filter.Tenant {
+				continue
+			}
+		}
+		result = append(result, ch)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		a, b := result[i], result[j]
+		if a.DocumentID.String() != b.DocumentID.String() {
+			return a.DocumentID.String() < b.DocumentID.String()
+		}
+		return a.Index < b.Index
+	})
+	if filter != nil {
+		if filter.Offset >= len(result) {
+			return nil, nil
+		}
+		result = result[filter.Offset:]
+		if filter.Limit > 0 && filter.Limit < len(result) {
+			result = result[:filter.Limit]
+		}
+	}
+	return result, nil
+}
+
 // CountChunks returns the count of chunks matching the filter.
 func (s *Store) CountChunks(_ context.Context, filter *chunk.CountFilter) (int64, error) {
 	s.mu.RLock()

@@ -402,6 +402,40 @@ func (s *Store) ListChunksByDocument(ctx context.Context, docID id.DocumentID) (
 	return result, nil
 }
 
+func (s *Store) ListChunks(ctx context.Context, filter *chunk.ListFilter) ([]*chunk.Chunk, error) {
+	var models []chunkModel
+	q := s.mdb.NewFind(&models).Sort(bson.D{{Key: "document_id", Value: 1}, {Key: "index", Value: 1}})
+	if filter != nil {
+		if filter.DocumentID.String() != "" {
+			q = q.Filter(bson.M{"document_id": filter.DocumentID.String()})
+		}
+		if filter.CollectionID.String() != "" {
+			q = q.Filter(bson.M{"collection_id": filter.CollectionID.String()})
+		}
+		if filter.Tenant != nil {
+			q = q.Filter(bson.M{"tenant_id": *filter.Tenant})
+		}
+		if filter.Limit > 0 {
+			q = q.Limit(int64(filter.Limit))
+		}
+		if filter.Offset > 0 {
+			q = q.Skip(int64(filter.Offset))
+		}
+	}
+	if err := q.Scan(ctx); err != nil {
+		return nil, fmt.Errorf("weave: list chunks: %w", err)
+	}
+	result := make([]*chunk.Chunk, len(models))
+	for i := range models {
+		c, convErr := chunkFromModel(&models[i])
+		if convErr != nil {
+			return nil, convErr
+		}
+		result[i] = c
+	}
+	return result, nil
+}
+
 func (s *Store) DeleteChunksByDocument(ctx context.Context, docID id.DocumentID) error {
 	_, err := s.mdb.NewDelete((*chunkModel)(nil)).
 		Filter(bson.M{"document_id": docID.String()}).

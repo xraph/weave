@@ -31,8 +31,8 @@ func testTenancy(t *testing.T, s store.Store) {
 	ch2 := mustChunks(t, s, d2, 1)
 	ch0 := mustChunks(t, s, d0, 3)
 
-	// Chunk tenancy is asserted by count because no chunk listing exists yet
-	// (Task 6 adds ListChunks).
+	// Chunk tenancy is asserted by count here. The Chunks case asserts it by
+	// identity, through ListChunks.
 	cases := []struct {
 		name   string
 		tenant *string
