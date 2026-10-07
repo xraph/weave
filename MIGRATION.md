@@ -5,12 +5,13 @@ Weave's dashboard used to render server-side with templ and ForgeUI, from
 `@forge-go/dashboard-plugin-weave`, reading a `weave` contract contributor in
 `extension/contract`. The templ package is gone.
 
-Read that carefully, though, because the destination isn't built yet. At the
-commit that adds this file, the React plugin (`packages/plugin-weave` in the
-forge-dashboard repo) and the contract package in Weave are both still being
-written, and neither exists. So no new page has been run, let alone walked in a
-browser. Every entry below marked **moved** names the React page or contract
-intent it is meant to become, taken from the design spec
+Read that carefully, though, because only half of the destination is built.
+The contract exists: `extension/contract` registers the `weave` contributor and
+answers all 17 intents, with Go tests behind every one. The React plugin
+(`packages/plugin-weave` in the forge-dashboard repo) doesn't exist yet. So no
+new page has been run, let alone walked in a browser. Every entry below marked
+**moved** names the React page or contract intent it is meant to become, taken
+from the design spec
 (`docs/superpowers/specs/2026-10-07-weave-dashboard-migration-design.md` in the
 forge-dashboard repo), not from something we've watched work. Once the pages
 exist we'll walk every one of them in a browser, confirm each **moved** entry
@@ -29,10 +30,9 @@ column, stat, action, filter, form field, badge, empty state, widget and nav
 item is listed below, and each one says whether it **moved**, **changed** or
 was **dropped**, and why.
 
-The cut happens in two steps. Commit `dfe48b8` (xraph/weave#39, merged as
-`e6e7949`) stopped the extension from registering the templ dashboard. The
-commit after this file deletes the `dashboard/` package, on its own, with the
-subject `chore: delete the templ dashboard`.
+The cut happened in two steps. Commit `dfe48b8` (xraph/weave#39, merged as
+`e6e7949`) stopped the extension from registering the templ dashboard. Commit
+`9221db3`, right after this file, deleted the `dashboard/` package on its own.
 
 ## What you need to do
 
@@ -65,20 +65,68 @@ shell declares its sources with `@source`, add
 `@source "<path to>/packages/plugin-weave/src";` next to the others.
 
 Weave needs forge v1.12.0, and grove v1.7.0 with it. v1.12.0 is the first forge
-release whose dashboard packages import neither templ nor forgeui. The bump
-comes with the contract registration, in the commits after this one. Until then
-`go.mod` still pins forge v1.10.0 and still lists `github.com/a-h/templ` and
-`github.com/xraph/forgeui`, even though nothing in the module uses them. They
-leave with the bump.
+release whose dashboard packages import neither templ nor forgeui, and `go.mod`
+pins both. `github.com/a-h/templ` and `github.com/xraph/forgeui` are gone from
+the module.
 
 The contributor, the extension and the plugin are all named `weave`. The
 contributor's capabilities are `weave.read` and `weave.write`.
 
-The dashboard is operator-wide. Nothing in production calls `weave.WithTenant`
-or `weave.WithApp`, and no store query filters on tenant, so you see every
+The dashboard is operator-wide. Its requests carry no tenant, so you see every
 tenant's rows. Lists and retrieval take an optional tenant filter. Leave it out
 and you get every tenant; set it and it's an exact match, so an empty string
 gives you only the untenanted rows.
+
+Ingest from the dashboard is the one place a tenant gets set. The handler reads
+the collection first and ingests under the collection's own tenant and app, so a
+document you ingest into a collection owned by `acme` is an `acme` document, and
+so are its chunks and vectors. Without that it would have landed untenanted, and
+a list filtered to `acme` would never show it.
+
+Your YAML now reaches the engine. The extension used to keep its config to
+itself, so the engine ran on its built-in defaults whatever you wrote. From
+this release `default_chunk_size`, `default_chunk_overlap` and `default_top_k`
+take effect, and `default_embedding_model` and `default_chunk_strategy` are what
+a new collection records. If you set any of them, expect different chunking on
+new collections and a different `top_k` on retrieval after you upgrade.
+`shutdown_timeout` and `ingest_concurrency` reach the engine too, and the
+Pipeline page shows them, but nothing in Weave reads either one yet. The keys
+live under `extensions.weave` (or `weave`):
+
+```yaml
+extensions:
+  weave:
+    default_chunk_size: 512
+    default_chunk_overlap: 50
+    default_embedding_model: text-embedding-3-small
+    default_chunk_strategy: recursive
+    default_top_k: 10
+    shutdown_timeout: 30s
+```
+
+The extension refuses to start when the effective `default_chunk_overlap` is
+at or above the effective `default_chunk_size`, defaults included. So
+`default_chunk_size: 32` on its own fails, because the default overlap is 50. The
+error names both values. Before, that config made the fixed chunker loop forever
+and the recursive chunker panic on the first ingest.
+
+Mind the dashboard's request limit if you ingest big files. Weave caps ingested
+content at 1 MiB, but the dashboard transport caps the whole request at 1 MiB
+first, and JSON escaping can double the size of a text file on the way (every
+quote, backslash and newline becomes two bytes, a control character six). A file
+just under Weave's cap is refused by the transport with a BAD_REQUEST reading
+"request body exceeds 1048576 bytes". To ingest files near 1 MiB, raise the
+dashboard's limit to about 3 MiB:
+
+```yaml
+extensions:
+  dashboard:
+    contract_max_body_bytes: 3145728
+```
+
+In Go that's `dashboard.WithContractMaxBodyBytes(3 << 20)` on the dashboard
+extension. It raises the cap for every contributor's requests, not only
+Weave's.
 
 If you call Weave from Go, a few things grew, and a few things behave
 differently now:
@@ -112,8 +160,8 @@ There is no schema change.
 
 ## Fixed in Weave on the way
 
-Showing the engine's data honestly meant fixing the engine first. We did that
-first, test first, and all four stores (memory, SQLite, Postgres, Mongo) pass the
+Showing the engine's data honestly meant fixing the engine first. We did it
+test first, and all four stores (memory, SQLite, Postgres, Mongo) pass the
 same conformance suite with no skips. These are the
 things that were wrong, and that the templ pages had been hiding.
 
@@ -144,10 +192,8 @@ things that were wrong, and that the templ pages had been hiding.
 - Every list sorted `created_at` ascending, so every "recent" list was the
   oldest rows. `SortDesc` exists now, and the dashboard asks for it.
 
-Two findings carry into the open list below. `pipeline/steps.go` omits
-`tenant_id` from the vector metadata for untenanted rows, and `go mod tidy` was
-never clean on `main`: it wants to drop about 25 unrelated indirect
-requirements, and we left that for a separate decision.
+One finding carries into the open list below: `pipeline/steps.go` omits
+`tenant_id` from the vector metadata for untenanted rows.
 
 ## The templ dashboard's own defects
 
@@ -251,21 +297,15 @@ Everything else that was dropped says why where it appears below.
 
 Every templ surface either has a React replacement or is dropped with a reason,
 but a **moved** or **changed** entry isn't live until the work behind it lands.
-At the commit that adds this file, that work is all still to do:
+Two things are left:
 
 - Every **moved** and **changed** entry waits on the React plugin
-  (`packages/plugin-weave` in the forge-dashboard repo) and on the contract
-  package in Weave (`extension/contract`). Neither exists yet.
-- The Pipeline engine configuration waits on the extension passing its config to
-  the engine (`WithConfig`), or it shows the engine's built-in defaults and not
-  your YAML.
-- The forge v1.12.0 and grove v1.7.0 bump is still to come. The contract
-  registration needs it.
-- After all of that, every **moved** entry still has to be confirmed by walking
-  the page in a browser.
+  (`packages/plugin-weave` in the forge-dashboard repo). It doesn't exist yet.
+- After that, every **moved** entry still has to be confirmed by walking the
+  page in a browser.
 
-Nothing here waits on anyone outside the Weave and Forge dashboard work, but it
-isn't done either.
+The rest is done. `extension/contract` answers every intent, the extension
+hands the engine its config, and Weave is on forge v1.12.0 and grove v1.7.0.
 
 ## Page by page
 
@@ -543,7 +583,7 @@ through htmx swaps of `#content`.
 | Badge Active or "Not Configured" | `configured`, as the engine reports it | changed: it said Active whatever was wired |
 | The check or cross icon in each stage | none | dropped: it followed the Active flag |
 | Arrows between the five stages | none | dropped: decoration, and the design doesn't carry them |
-| Card "Engine Configuration": Default Chunk Size and Overlap (in "tokens"), Embedding Model, Chunk Strategy, Top-K, Shutdown Timeout, Ingest Concurrency | the engine config as the engine holds it | moved: once the extension passes its config to the engine (`WithConfig`) it's finally your YAML |
+| Card "Engine Configuration": Default Chunk Size and Overlap (in "tokens"), Embedding Model, Chunk Strategy, Top-K, Shutdown Timeout, Ingest Concurrency | the engine config as the engine holds it | moved: the extension passes its config to the engine now, so it's finally your YAML |
 
 ### Loaders
 
@@ -703,9 +743,10 @@ and so the browser walk covers every one of them.
 
 - Ingest, at `/collections/:id/ingest` (`documents.ingest`). You paste text, or
   pick a `.txt`, `.md`, `.html`, `.csv` or `.json` file the browser reads as
-  text, and the server caps it at 1 MiB. Title, source and metadata. The result
-  shows inline: ready with N chunks, failed with the stored error, or already
-  ingested for a duplicate.
+  text, and the server caps it at 1 MiB (and see the transport limit under
+  "What you need to do"). Title, source and metadata. The result shows inline:
+  ready with N chunks, failed with the stored error, or already ingested for a
+  duplicate, which can be an earlier copy that failed or stalled.
 - Reindex (`collections.reindex`). Its confirmation says what it does: it
   deletes every vector in the collection first, re-embeds `ready` documents
   only, runs synchronously, and leaves the collection partly indexed if it fails
@@ -763,7 +804,8 @@ These are known gaps. None of them is a regression from the templ pages.
   The engine has one global embedder and one global chunker.
 - Ingest is synchronous inside one request. `Start` is a no-op, and there is no
   sweeper, lease or heartbeat, so a process that dies mid-ingest leaves the
-  document in `processing` forever. A vector upsert failure marks the document
+  document in `processing` forever. A closed tab or a proxy timeout doesn't any
+  more: the dashboard's ingest and reindex run on past a cancelled request. A vector upsert failure marks the document
   failed but leaves its chunk rows. Weave's HTTP handler throws away the
   document ID that `Ingest` returns on failure.
 - The scores mean different things per retriever. MMR reorders but returns the
@@ -775,12 +817,9 @@ These are known gaps. None of them is a regression from the templ pages.
   retrieval page does. Your app may assemble its own way, so "Context sent to
   the model" is what Weave's default assembler would build, not necessarily what
   you sent.
-- The extension doesn't pass its config to the engine until it gets
-  `WithConfig`, which comes with the contract registration. Until then the YAML defaults (`default_chunk_size` and the
-  rest) never reach the engine.
-- Nothing sets a tenant on the dashboard path, and an empty tenant searches
-  everything: every vector store skips the tenant filter when `TenantKey` is
-  empty.
+- Only dashboard ingest sets a tenant on the dashboard path. Every read runs
+  with none, and an empty tenant searches everything: every vector store skips
+  the tenant filter when `TenantKey` is empty.
 - There are no component registries or getters for the loader, chunker,
   embedder, vector store or retriever. `Components()` works by type switch, and
   an unknown type is reported by its Go type name.
@@ -791,6 +830,6 @@ These are known gaps. None of them is a regression from the templ pages.
 - A freshly started Mongo container accepts TCP before `mongod` is ready, so a
   test run against a container a minute or two old can time out on server
   selection. Run it again a few seconds later.
-- `go mod tidy` is not clean on `main`, and wasn't before this work. It wants
-  to drop about 25 unrelated indirect requirements. Someone should decide on a
-  whole-module tidy on its own.
+- `collections.list` runs two count queries per row, one for documents and one
+  for chunks, so a full page of 100 collections costs 200 extra queries. A
+  grouped count would fix it. We left it for later.
