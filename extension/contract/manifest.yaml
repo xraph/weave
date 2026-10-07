@@ -1,0 +1,35 @@
+schemaVersion: 1
+contributor:
+  name: weave
+  envelope:
+    supports: [v1]
+    preferred: v1
+  capabilities: [weave.read, weave.write]
+
+# Weave resolves no tenant on the dashboard path, so this dashboard is
+# operator-wide: it sees every tenant's data. Every list and retrieval
+# intent takes an optional `tenant`. Absent means every tenant; present is
+# an exact match, and "" means rows written with no tenant.
+#
+# retrieval.run is a command although it writes nothing: every run calls
+# the embedder, usually a paid API, and a query could be cached and
+# refetched. A command fires only when somebody presses Run.
+intents:
+  - { name: system.overview,    kind: query, version: 1, capability: read }
+  - { name: system.components,  kind: query, version: 1, capability: read }
+  - { name: collections.list,   kind: query, version: 1, capability: read }
+  - { name: collections.get,    kind: query, version: 1, capability: read }
+  - { name: documents.list,     kind: query, version: 1, capability: read }
+  - { name: documents.get,      kind: query, version: 1, capability: read }
+  - { name: documents.spans,    kind: query, version: 1, capability: read }
+  - { name: chunks.list,        kind: query, version: 1, capability: read }
+  - { name: chunks.get,         kind: query, version: 1, capability: read }
+  - { name: collections.create,  kind: command, version: 1, capability: write, invalidates: [collections.list, system.overview] }
+  - { name: collections.update,  kind: command, version: 1, capability: write, invalidates: [collections.list, collections.get] }
+  - { name: collections.delete,  kind: command, version: 1, capability: write, invalidates: [collections.list, collections.get, documents.list, chunks.list, system.overview] }
+  - { name: collections.reindex, kind: command, version: 1, capability: write, invalidates: [collections.get, system.overview] }
+  - { name: documents.ingest,    kind: command, version: 1, capability: write, invalidates: [documents.list, chunks.list, collections.list, collections.get, system.overview] }
+  - { name: documents.delete,    kind: command, version: 1, capability: write, invalidates: [documents.list, documents.get, chunks.list, collections.list, collections.get, system.overview] }
+  # retrieval.run and retrieval.assemble write nothing.
+  - { name: retrieval.run,       kind: command, version: 1, capability: write }
+  - { name: retrieval.assemble,  kind: command, version: 1, capability: write }
