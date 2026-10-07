@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -625,11 +626,23 @@ func (e *Engine) hydrate(ctx context.Context, hits []ScoredChunk) ([]ScoredChunk
 		case err != nil:
 			return nil, fmt.Errorf("weave: hydrate chunk %s: %w", h.Chunk.ID, err)
 		default:
-			h.Chunk = row
+			h.Chunk = hydratedCopy(row, h.Chunk.Metadata)
 			h.Hydrated = true
 		}
 	}
 	return hits, nil
+}
+
+// hydratedCopy returns a copy of the stored row, so a caller that edits a
+// hit never edits the store's own chunk. Its metadata keeps the vector-side
+// keys (collection_id, document_id, tenant_id, chunk_index) that clients of
+// the retrieve route already read, with the row's own keys winning a clash.
+func hydratedCopy(row *chunk.Chunk, vectorMeta map[string]string) *chunk.Chunk {
+	out := *row
+	out.Metadata = make(map[string]string, len(vectorMeta)+len(row.Metadata))
+	maps.Copy(out.Metadata, vectorMeta)
+	maps.Copy(out.Metadata, row.Metadata)
+	return &out
 }
 
 // ──────────────────────────────────────────────────
