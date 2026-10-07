@@ -1,18 +1,20 @@
 # Dashboard migration: templ to React shell
 
 Weave's dashboard used to render server-side with templ and ForgeUI, from
-`dashboard/`. It now lives in the Forge dashboard's React shell as
-`@forge-go/dashboard-plugin-weave`, reading the `weave` contract contributor in
+`dashboard/`. It's moving to the Forge dashboard's React shell, as
+`@forge-go/dashboard-plugin-weave`, reading a `weave` contract contributor in
 `extension/contract`. The templ package is gone.
 
-Before you lean on this file, know that the React pages are still being built.
-The plugin is slice 2 of the migration, the contract package is slice 3 and the
-click-through in a browser is slice 4, so when we wrote this nobody had walked
-the new pages end to end. Every entry below marked **moved** names the React
-page or contract intent it is meant to become, taken from the design spec
+Read that carefully, though, because the destination isn't built yet. At the
+commit that adds this file, the React plugin (`packages/plugin-weave` in the
+forge-dashboard repo) and the contract package in Weave are both still being
+written, and neither exists. So no new page has been run, let alone walked in a
+browser. Every entry below marked **moved** names the React page or contract
+intent it is meant to become, taken from the design spec
 (`docs/superpowers/specs/2026-10-07-weave-dashboard-migration-design.md` in the
-forge-dashboard repo), not from something we've watched work. Slice 5 confirms
-each one after a browser walk, and fixes this file wherever a page turns out
+forge-dashboard repo), not from something we've watched work. Once the pages
+exist we'll walk every one of them in a browser, confirm each **moved** entry
+against what it really shows, and fix this file wherever a page turns out
 different.
 
 This file is the record of the move. We wrote it by reading every templ source
@@ -49,7 +51,7 @@ BSD grep prints paths without a leading `./`, so a filter written as
 `grep -v '^./dashboard/'` doesn't filter anything there. Filter on
 `^dashboard/` or use `--exclude-dir`.)
 
-Add the plugin to your shell:
+Once the plugin exists, add it to your shell:
 
 ```tsx
 import weavePlugin from "@forge-go/dashboard-plugin-weave"
@@ -110,9 +112,9 @@ There is no schema change.
 
 ## Fixed in Weave on the way
 
-Showing the engine's data honestly meant fixing the engine first. Slice 1 of
-this migration did that, test first, and all four stores (memory, SQLite,
-Postgres, Mongo) pass the same conformance suite with no skips. These are the
+Showing the engine's data honestly meant fixing the engine first. We did that
+first, test first, and all four stores (memory, SQLite, Postgres, Mongo) pass the
+same conformance suite with no skips. These are the
 things that were wrong, and that the templ pages had been hiding.
 
 - Retrieval hits came back anonymous. The similarity and MMR retrievers and the
@@ -247,8 +249,23 @@ Everything else that was dropped says why where it appears below.
 
 ## Blocked
 
-Nothing. Every templ surface either has a React replacement or is dropped with a
-reason, and none of them waits on work outside Weave.
+Every templ surface either has a React replacement or is dropped with a reason,
+but a **moved** or **changed** entry isn't live until the work behind it lands.
+At the commit that adds this file, that work is all still to do:
+
+- Every **moved** and **changed** entry waits on the React plugin
+  (`packages/plugin-weave` in the forge-dashboard repo) and on the contract
+  package in Weave (`extension/contract`). Neither exists yet.
+- The Pipeline engine configuration waits on the extension passing its config to
+  the engine (`WithConfig`), or it shows the engine's built-in defaults and not
+  your YAML.
+- The forge v1.12.0 and grove v1.7.0 bump is still to come. The contract
+  registration needs it.
+- After all of that, every **moved** entry still has to be confirmed by walking
+  the page in a browser.
+
+Nothing here waits on anyone outside the Weave and Forge dashboard work, but it
+isn't done either.
 
 ## Page by page
 
@@ -411,7 +428,7 @@ through htmx swaps of `#content`.
 | Column State, a `StateBadge` | Document state badge | changed: see Badges |
 | Column Chunks | Chunks | moved |
 | Column Actions: a View button | none | dropped: the title is the link |
-| Row Delete, opening a `ConfirmDialog`, "All chunks will be permanently removed." | `documents.delete` in a `ConfirmDialog` | moved: where the button sits (row or detail page) is for slice 4 to settle |
+| Row Delete, opening a `ConfirmDialog`, "All chunks will be permanently removed." | `documents.delete` in a `ConfirmDialog` | moved: where the button sits (row or detail page) gets settled when the pages are walked |
 | Pagination: Previous and Next, 20 a page | offset paging | changed |
 
 ### Document detail
@@ -526,7 +543,7 @@ through htmx swaps of `#content`.
 | Badge Active or "Not Configured" | `configured`, as the engine reports it | changed: it said Active whatever was wired |
 | The check or cross icon in each stage | none | dropped: it followed the Active flag |
 | Arrows between the five stages | none | dropped: decoration, and the design doesn't carry them |
-| Card "Engine Configuration": Default Chunk Size and Overlap (in "tokens"), Embedding Model, Chunk Strategy, Top-K, Shutdown Timeout, Ingest Concurrency | the engine config as the engine holds it | moved: with `WithConfig` in the contract slice it's finally your YAML |
+| Card "Engine Configuration": Default Chunk Size and Overlap (in "tokens"), Embedding Model, Chunk Strategy, Top-K, Shutdown Timeout, Ingest Concurrency | the engine config as the engine holds it | moved: once the extension passes its config to the engine (`WithConfig`) it's finally your YAML |
 
 ### Loaders
 
@@ -564,7 +581,7 @@ and the settings panel `weave-config` declared in `manifest.go` and in
 
 | templ | React | status |
 |---|---|---|
-| Panel `weave-config`, group Weave, icon layers, titled "Engine Settings" in `manifest.go` and "Weave Settings" in the YAML, with two different descriptions | none | dropped: the shell has no per-plugin settings panel, and the panel was a read-only copy of Pipeline's configuration |
+| Panel `weave-config`, group Weave, icon layers, titled "Engine Settings" in `manifest.go` and "Weave Settings" in the YAML, with two different descriptions | none | dropped: the panel was a read-only copy of Pipeline's configuration |
 | Card "Engine Configuration", the same seven fields as Pipeline | Pipeline's engine config | moved |
 | Card "Registered Extensions", "Lifecycle hooks registered with the engine", names as badges | Pipeline's extensions section | changed: with the hooks each implements |
 | Empty text "No extensions registered" | an empty extensions list | moved |
@@ -682,7 +699,7 @@ component is covered on the page that used it.
 
 Some things the templ dashboard never did at all. They aren't templ items, so
 they have no fate above. They're here so you know what else the plugin carries,
-and so slice 4 walks every one of them.
+and so the browser walk covers every one of them.
 
 - Ingest, at `/collections/:id/ingest` (`documents.ingest`). You paste text, or
   pick a `.txt`, `.md`, `.html`, `.csv` or `.json` file the browser reads as
@@ -754,11 +771,12 @@ These are known gaps. None of them is a regression from the templ pages.
   reciprocal rank fusion sum (k = 60), which isn't comparable to cosine. The
   reranker overwrites the score and keeps no vector score, and no concrete
   reranker ships. MMR with `TopK` of 0 returns nothing.
-- The assembler isn't wired into the engine or the HTTP API. Your app may
-  assemble its own way, so the dashboard's "Context sent to the model" is what
-  Weave's default assembler would build, not necessarily what you sent.
-- The extension doesn't pass its config to the engine until the contract slice
-  adds `WithConfig`. Until then the YAML defaults (`default_chunk_size` and the
+- Retrieval and Weave's HTTP API never call the assembler. Only the dashboard's
+  retrieval page does. Your app may assemble its own way, so "Context sent to
+  the model" is what Weave's default assembler would build, not necessarily what
+  you sent.
+- The extension doesn't pass its config to the engine until it gets
+  `WithConfig`, which comes with the contract registration. Until then the YAML defaults (`default_chunk_size` and the
   rest) never reach the engine.
 - Nothing sets a tenant on the dashboard path, and an empty tenant searches
   everything: every vector store skips the tenant filter when `TenantKey` is
@@ -766,7 +784,7 @@ These are known gaps. None of them is a regression from the templ pages.
 - There are no component registries or getters for the loader, chunker,
   embedder, vector store or retriever. `Components()` works by type switch, and
   an unknown type is reported by its Go type name.
-- Weave's own tests are thin. Slice 1 added tests for the engine, the four
+- Weave's own tests are thin. We added tests for the engine, the four
   stores, the retrievers' hit identity, comparison and the assembler, but loader
   behaviour, the chunkers' internals, the MMR, hybrid and reranker maths, and
   Fabriq stay untested.
