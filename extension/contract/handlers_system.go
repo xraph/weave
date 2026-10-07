@@ -58,7 +58,11 @@ func systemOverviewHandler(deps Deps) func(context.Context, tenantInput, contrac
 		}
 		cache := newNameCache(e)
 		for _, d := range docs {
-			out.NewestDocuments = append(out.NewestDocuments, deps.documentRow(ctx, cache, d))
+			row, err := deps.documentRow(ctx, cache, d)
+			if err != nil {
+				return overviewOutput{}, deps.mapError(intent, err)
+			}
+			out.NewestDocuments = append(out.NewestDocuments, row)
 		}
 		return out, nil
 	}

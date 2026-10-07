@@ -2,7 +2,9 @@ package contract
 
 import (
 	"context"
+	"errors"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/id"
@@ -63,26 +65,37 @@ func newNameCache(e *engine.Engine) *nameCache {
 	return &nameCache{e: e, names: map[string]string{}}
 }
 
-// name answers "" for a collection that no longer exists.
-func (c *nameCache) name(ctx context.Context, colID id.CollectionID) string {
+// name answers "" for a collection that no longer exists. Any other
+// failure (a store outage, a cancelled context) is returned and not cached,
+// so it never reads as a deleted collection.
+func (c *nameCache) name(ctx context.Context, colID id.CollectionID) (string, error) {
 	key := colID.String()
 	if n, ok := c.names[key]; ok {
-		return n
+		return n, nil
 	}
 	n := ""
-	if col, err := c.e.GetCollection(ctx, colID); err == nil {
+	col, err := c.e.GetCollection(ctx, colID)
+	switch {
+	case err == nil:
 		n = col.Name
+	case errors.Is(err, weave.ErrCollectionNotFound):
+	default:
+		return "", err
 	}
 	c.names[key] = n
-	return n
+	return n, nil
 }
 
-func (d Deps) documentRow(ctx context.Context, cache *nameCache, doc *document.Document) documentRow {
+func (d Deps) documentRow(ctx context.Context, cache *nameCache, doc *document.Document) (documentRow, error) {
 	cp := *doc
 	cp.Metadata = emptyIfNil(cp.Metadata)
+	name, err := cache.name(ctx, cp.CollectionID)
+	if err != nil {
+		return documentRow{}, err
+	}
 	return documentRow{
 		Document:       &cp,
-		CollectionName: cache.name(ctx, cp.CollectionID),
+		CollectionName: name,
 		Stalled:        cp.State == document.StateProcessing && d.now().Sub(cp.UpdatedAt) > StalledAfter,
-	}
+	}, nil
 }
