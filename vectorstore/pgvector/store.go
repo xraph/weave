@@ -109,6 +109,7 @@ func (s *Store) Search(ctx context.Context, vector []float32, opts *vectorstore.
 		TableExpr(s.tableName).
 		ColumnExpr(colExpr).
 		OrderExpr(orderExpr).
+		OrderExpr("id"). // Break distance ties by ID so the ranking is stable.
 		Limit(topK)
 
 	// Track parameter index for Where clauses (no args from ColumnExpr/TableExpr).

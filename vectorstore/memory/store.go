@@ -76,8 +76,13 @@ func (s *Store) Search(_ context.Context, vector []float32, opts *vectorstore.Se
 		})
 	}
 
+	// Equal scores fall back to ID order, so two searches over the same
+	// entries always agree. Map iteration order would otherwise decide.
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].ID < results[j].ID
 	})
 
 	if len(results) > topK {

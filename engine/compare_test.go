@@ -191,3 +191,32 @@ func TestRetrieveCompareExplainsAnEmptyResult(t *testing.T) {
 		t.Errorf("explanation: vector matches %d, best %.3f; want 1 match below the minimum", res.VectorMatches, res.BestVectorScore)
 	}
 }
+
+// Three texts with the same bag of words embed to the same vector, so every
+// raw score ties. Two separate searches must still agree on the order, or a
+// similarity retriever would look reordered on its own.
+func TestRetrieveCompareTiesDoNotFakeReordering(t *testing.T) {
+	e := newRig(t, func(r *testRig) engine.Option {
+		return engine.WithRetriever(retriever.NewSimilarityRetriever(r.Vectors, r.Embed, r.Store))
+	}).Engine
+	ctx := context.Background()
+	col := mustTestCollection(t, e, "ties")
+	mustIngest(t, ctx, e, col.ID, "a", "refund window days")
+	mustIngest(t, ctx, e, col.ID, "b", "days refund window")
+	mustIngest(t, ctx, e, col.ID, "c", "window days refund")
+
+	for run := range 50 {
+		res, err := e.RetrieveCompare(ctx, "refund window", engine.CompareParams{CollectionID: col.ID, TopK: 2})
+		if err != nil {
+			t.Fatalf("run %d: compare: %v", run, err)
+		}
+		if res.Reordered || len(res.LeftOut) != 0 {
+			t.Fatalf("run %d: reordered %v, left out %d; tied scores must not reorder", run, res.Reordered, len(res.LeftOut))
+		}
+		for _, h := range res.Hits {
+			if h.Rank != h.VectorRank {
+				t.Fatalf("run %d: rank %d, vector rank %d; want equal", run, h.Rank, h.VectorRank)
+			}
+		}
+	}
+}
