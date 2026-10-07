@@ -28,8 +28,9 @@ type AssembledContext struct {
 	// Included lists the 0-based positions of the hits that made it in, in
 	// order. Marker [n] in Context is hit Included[n-1].
 	Included []int `json:"included"`
-	// FirstExcluded is the position where the budget first ran out, or -1
-	// when everything fit. Hits after it may still be included.
+	// FirstExcluded is the first hit position that was not included, whether
+	// because the budget ran out or because the hit had no chunk to assemble;
+	// -1 when every hit was included. Hits after it may still be included.
 	FirstExcluded int `json:"first_excluded"`
 	// TokenCounter names how tokens were estimated.
 	TokenCounter string `json:"token_counter"`

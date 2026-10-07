@@ -78,8 +78,8 @@ func TestAssembleRefsReadsChunksBack(t *testing.T) {
 func TestAssembleNilChunks(t *testing.T) {
 	e := newTestEngine(t)
 	hits := []engine.ScoredChunk{
-		{Chunk: nil, Score: 0.9},                       // nil chunk, skipped
-		hit(strings.Repeat("x", 16), 0.8),             // 4 tokens: fits
+		{Chunk: nil, Score: 0.9},          // nil chunk, skipped
+		hit(strings.Repeat("x", 16), 0.8), // 4 tokens: fits
 	}
 	got, err := e.Assemble(context.Background(), hits, engine.AssembleParams{MaxTokens: 100})
 	if err != nil {
