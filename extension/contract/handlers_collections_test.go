@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
@@ -66,6 +67,63 @@ func TestCollectionsCreate_Validation(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
+}
+
+// The overlap error names the values the engine would use and where each
+// came from, so an overlap nobody typed is not a mystery.
+func TestCollectionsCreate_OverlapMessage(t *testing.T) {
+	deps := newDeps(t, openMemory(t))
+	ctx := context.Background()
+	cases := []struct {
+		in   collectionCreateInput
+		want string
+	}{
+		{collectionCreateInput{Name: "a", ChunkSize: 40}, "chunk overlap 50 (the default) must be smaller than chunk size 40"},
+		{collectionCreateInput{Name: "b", ChunkOverlap: 600}, "chunk overlap 600 must be smaller than chunk size 512 (the default)"},
+		{collectionCreateInput{Name: "c", ChunkSize: 100, ChunkOverlap: 100}, "chunk overlap 100 must be smaller than chunk size 100"},
+	}
+	for _, tc := range cases {
+		_, err := collectionsCreateHandler(deps)(ctx, tc.in, principal())
+		var ce *dashcontract.Error
+		if !errors.As(err, &ce) || ce.Code != dashcontract.CodeBadRequest || ce.Message != tc.want {
+			t.Errorf("%+v: got %v, want BAD_REQUEST %q", tc.in, err, tc.want)
+		}
+	}
+}
+
+// Collection names are unique per tenant, so a rename onto a name another
+// collection in the same tenant holds is a CONFLICT, and a blank name is
+// refused before anything is written.
+func TestCollectionsUpdate_RenameRules(t *testing.T) {
+	forEachStore(t, func(t *testing.T, deps Deps) {
+		ctx := context.Background()
+		p := principal()
+		mustCollection(t, deps, "billing")
+		col := mustCollection(t, deps, "support")
+		other := &collection.Collection{Name: "elsewhere", ChunkSize: 512}
+		if err := deps.Engine.CreateCollection(weave.WithTenant(ctx, "acme"), other); err != nil {
+			t.Fatal(err)
+		}
+
+		taken := "billing"
+		if _, err := collectionsUpdateHandler(deps)(ctx, collectionUpdateInput{ID: col.ID.String(), Name: &taken}, p); codeOf(err) != dashcontract.CodeConflict {
+			t.Errorf("rename onto a taken name: %v, want CONFLICT", err)
+		}
+		for _, blank := range []string{"", "   ", "\t\n"} {
+			if _, err := collectionsUpdateHandler(deps)(ctx, collectionUpdateInput{ID: col.ID.String(), Name: &blank}, p); codeOf(err) != dashcontract.CodeBadRequest {
+				t.Errorf("rename to %q: %v, want BAD_REQUEST", blank, err)
+			}
+		}
+		got, err := collectionsGetHandler(deps)(ctx, idInput{ID: col.ID.String()}, p)
+		if err != nil || got.Name != "support" {
+			t.Errorf("a refused rename changed the name: %+v %v", got.Collection, err)
+		}
+
+		// Another tenant's name is not taken in this tenant.
+		if _, err := collectionsUpdateHandler(deps)(ctx, collectionUpdateInput{ID: col.ID.String(), Name: &other.Name}, p); err != nil {
+			t.Errorf("rename onto another tenant's name: %v", err)
+		}
+	})
 }
 
 func TestCollectionsGet_IDs(t *testing.T) {

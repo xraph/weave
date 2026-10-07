@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -147,16 +148,20 @@ func collectionsCreateHandler(deps Deps) func(context.Context, collectionCreateI
 		}
 		cfg := deps.Engine.Config()
 		size, overlap := in.ChunkSize, in.ChunkOverlap
+		sizeFrom, overlapFrom := "", ""
 		if size == 0 {
-			size = cfg.DefaultChunkSize
+			size, sizeFrom = cfg.DefaultChunkSize, " (the default)"
 		}
 		if overlap == 0 {
 			// The engine treats 0 as "use the default", so the check
 			// must too.
-			overlap = cfg.DefaultChunkOverlap
+			overlap, overlapFrom = cfg.DefaultChunkOverlap, " (the default)"
 		}
 		if overlap >= size {
-			return collectionRow{}, badRequest("chunk overlap must be smaller than chunk size")
+			// Name the values the engine would use, and say which came
+			// from the defaults: an overlap you never typed is otherwise
+			// a mystery.
+			return collectionRow{}, badRequest(fmt.Sprintf("chunk overlap %d%s must be smaller than chunk size %d%s", overlap, overlapFrom, size, sizeFrom))
 		}
 		col := &collection.Collection{
 			Name: name, Description: in.Description,
