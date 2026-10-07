@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -490,103 +491,128 @@ func WithTenantID(tenantID string) RetrieveOption {
 type ScoredChunk struct {
 	Chunk *chunk.Chunk `json:"chunk"`
 	Score float64      `json:"score"`
+	// Hydrated is true when Chunk was read back from the metadata store by
+	// ID, so every field on it is real.
+	Hydrated bool `json:"hydrated"`
+	// Orphaned is true when the vector store returned a chunk ID that has no
+	// row in the metadata store. The hit keeps its rank and its text.
+	Orphaned bool `json:"orphaned,omitempty"`
 }
 
-// Retrieve performs a semantic retrieval query.
+// Retrieve performs a semantic retrieval query. Each hit is read back from
+// the metadata store by chunk ID; a hit whose row is missing is kept and
+// marked Orphaned.
 func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOption) ([]ScoredChunk, error) {
 	if e.retriever == nil && (e.embedder == nil || e.vectorStore == nil) {
 		return nil, fmt.Errorf("weave: no retriever or embedder+vectorstore configured")
 	}
-
-	params := &RetrieveParams{
-		TopK: e.config.DefaultTopK,
-	}
+	params := &RetrieveParams{TopK: e.config.DefaultTopK}
 	for _, opt := range opts {
 		opt(params)
 	}
 
-	// Resolve tenant from context if not explicitly set.
+	colID, _ := id.ParseCollectionID(params.CollectionID) //nolint:errcheck // empty for cross-collection search
+	start := time.Now()
+	e.extensions.EmitRetrievalStarted(ctx, colID, query)
+
+	hits, err := e.retrieveRaw(ctx, query, params)
+	if err == nil {
+		hits, err = e.hydrate(ctx, hits)
+	}
+	if err != nil {
+		e.extensions.EmitRetrievalFailed(ctx, colID, err)
+		return nil, err
+	}
+	e.extensions.EmitRetrievalCompleted(ctx, colID, len(hits), time.Since(start))
+	return hits, nil
+}
+
+// searchScope builds the metadata filter and tenant key both search paths
+// send to the vector side.
+func searchScope(params *RetrieveParams) (filter map[string]string, tenantKey string) {
+	filter = map[string]string{}
+	if params.CollectionID != "" {
+		filter["collection_id"] = params.CollectionID
+	}
+	if params.TenantID != "" {
+		filter["tenant_id"] = params.TenantID
+	}
+	return filter, params.TenantID
+}
+
+// retrieveRaw runs the configured retriever, or a plain vector search when
+// none is configured, and returns hits as the vector side reported them. It
+// emits no hooks: Retrieve does, once, around the whole call.
+func (e *Engine) retrieveRaw(ctx context.Context, query string, params *RetrieveParams) ([]ScoredChunk, error) {
 	if params.TenantID == "" {
 		params.TenantID = weave.TenantFromContext(ctx)
 	}
+	filter, tenantKey := searchScope(params)
 
-	colID, _ := id.ParseCollectionID(params.CollectionID) //nolint:errcheck // collection ID may be empty for cross-collection search
-	start := time.Now()
-
-	e.extensions.EmitRetrievalStarted(ctx, colID, query)
-
-	// Use the plugged-in retriever if available.
 	if e.retriever != nil {
-		filter := map[string]string{}
-		if params.CollectionID != "" {
-			filter["collection_id"] = params.CollectionID
-		}
-		if params.TenantID != "" {
-			filter["tenant_id"] = params.TenantID
-		}
-
 		results, err := e.retriever.Retrieve(ctx, query, &retriever.Options{
 			CollectionID: params.CollectionID,
-			TenantKey:    params.TenantID,
+			TenantKey:    tenantKey,
 			TopK:         params.TopK,
 			MinScore:     params.MinScore,
 			Filter:       filter,
 		})
 		if err != nil {
-			e.extensions.EmitRetrievalFailed(ctx, colID, err)
 			return nil, fmt.Errorf("weave: retrieve: %w", err)
 		}
-
 		scored := make([]ScoredChunk, len(results))
 		for i, r := range results {
 			scored[i] = ScoredChunk{Chunk: r.Chunk, Score: r.Score}
 		}
-
-		elapsed := time.Since(start)
-		e.extensions.EmitRetrievalCompleted(ctx, colID, len(scored), elapsed)
 		return scored, nil
 	}
 
-	// Fallback: embed query and search vector store directly.
 	embedResults, err := e.embedder.Embed(ctx, []string{query})
 	if err != nil {
-		e.extensions.EmitRetrievalFailed(ctx, colID, err)
 		return nil, fmt.Errorf("weave: embed query: %w", err)
 	}
-
-	searchFilter := map[string]string{}
-	if params.CollectionID != "" {
-		searchFilter["collection_id"] = params.CollectionID
+	if len(embedResults) == 0 {
+		return nil, fmt.Errorf("weave: embed query: no vector returned")
 	}
-	if params.TenantID != "" {
-		searchFilter["tenant_id"] = params.TenantID
-	}
-
 	searchResults, err := e.vectorStore.Search(ctx, embedResults[0].Vector, &vectorstore.SearchOptions{
 		TopK:      params.TopK,
-		Filter:    searchFilter,
-		TenantKey: params.TenantID,
+		Filter:    filter,
+		TenantKey: tenantKey,
 		MinScore:  params.MinScore,
 	})
 	if err != nil {
-		e.extensions.EmitRetrievalFailed(ctx, colID, err)
 		return nil, fmt.Errorf("weave: search: %w", err)
 	}
-
 	scored := make([]ScoredChunk, len(searchResults))
 	for i, sr := range searchResults {
-		scored[i] = ScoredChunk{
-			Chunk: &chunk.Chunk{
-				Content:  sr.Content,
-				Metadata: sr.Metadata,
-			},
-			Score: sr.Score,
+		scored[i] = ScoredChunk{Chunk: retriever.ChunkFromSearchResult(sr), Score: sr.Score}
+	}
+	return scored, nil
+}
+
+// hydrate replaces each hit's chunk with the stored row. A hit with no chunk
+// ID (a custom retriever that sets none) is left as it is, unhydrated.
+func (e *Engine) hydrate(ctx context.Context, hits []ScoredChunk) ([]ScoredChunk, error) {
+	if e.store == nil {
+		return hits, nil
+	}
+	for i := range hits {
+		h := &hits[i]
+		if h.Chunk == nil || h.Chunk.ID.String() == "" {
+			continue
+		}
+		row, err := e.store.GetChunk(ctx, h.Chunk.ID)
+		switch {
+		case errors.Is(err, weave.ErrChunkNotFound):
+			h.Orphaned = true
+		case err != nil:
+			return nil, fmt.Errorf("weave: hydrate chunk %s: %w", h.Chunk.ID, err)
+		default:
+			h.Chunk = row
+			h.Hydrated = true
 		}
 	}
-
-	elapsed := time.Since(start)
-	e.extensions.EmitRetrievalCompleted(ctx, colID, len(scored), elapsed)
-	return scored, nil
+	return hits, nil
 }
 
 // ──────────────────────────────────────────────────

@@ -57,10 +57,7 @@ func (r *SimilarityRetriever) Retrieve(ctx context.Context, query string, opts *
 	results := make([]Result, len(searchResults))
 	for i, sr := range searchResults {
 		results[i] = Result{
-			Chunk: &chunk.Chunk{
-				Content:  sr.Content,
-				Metadata: sr.Metadata,
-			},
+			Chunk: ChunkFromSearchResult(sr),
 			Score: sr.Score,
 		}
 	}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/embedder"
 	"github.com/xraph/weave/vectorstore"
 )
@@ -111,10 +110,7 @@ func (r *MMRRetriever) Retrieve(ctx context.Context, query string, opts *Options
 	for i, idx := range selected {
 		c := candidates[idx]
 		results[i] = Result{
-			Chunk: &chunk.Chunk{
-				Content:  c.Content,
-				Metadata: c.Metadata,
-			},
+			Chunk: ChunkFromSearchResult(c),
 			Score: c.Score,
 		}
 	}

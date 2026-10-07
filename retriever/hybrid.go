@@ -29,7 +29,10 @@ func (r *HybridRetriever) Retrieve(ctx context.Context, query string, opts *Opti
 		}
 
 		for rank, res := range results {
-			key := res.Chunk.Content // Use content as dedup key.
+			key := res.Chunk.ID.String()
+			if key == "" {
+				key = res.Chunk.Content // a retriever that sets no IDs still dedupes by text
+			}
 			rrfScore := 1.0 / (r.k + float64(rank+1))
 			scores[key] += rrfScore
 			if _, exists := resultMap[key]; !exists {
