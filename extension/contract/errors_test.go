@@ -77,3 +77,14 @@ func TestParseIDs(t *testing.T) {
 		t.Errorf("optional empty: %v %v", got, err)
 	}
 }
+
+// A retry after a failed or stalled ingest hits the old row's hash. The
+// message has to say so, or the CONFLICT reads like success.
+func TestMapError_DuplicateDocumentNamesFailedCopies(t *testing.T) {
+	var ce *dashcontract.Error
+	errors.As(mapError(weave.ErrDuplicateDocument), &ce)
+	want := "this collection already has a document with exactly the same content (including a failed or stalled one; delete it to ingest again)"
+	if ce == nil || ce.Message != want {
+		t.Errorf("got %+v, want %q", ce, want)
+	}
+}

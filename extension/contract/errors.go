@@ -12,6 +12,11 @@ import (
 	"github.com/xraph/weave/id"
 )
 
+// duplicateDocumentMessage answers an ingest whose content is already in
+// the collection. The earlier copy may have failed or stalled, so the
+// message says so: a retry after a failure would otherwise read as success.
+const duplicateDocumentMessage = "this collection already has a document with exactly the same content (including a failed or stalled one; delete it to ingest again)"
+
 // mapError turns a Weave error into a *contract.Error the client can branch
 // on. Anything unrecognised becomes CodeInternal with a generic message: a
 // store error can carry a DSN or a host, so its text never reaches the
@@ -31,7 +36,7 @@ func mapError(err error) error {
 	case errors.Is(err, weave.ErrChunkNotFound):
 		return notFound("chunk not found")
 	case errors.Is(err, weave.ErrDuplicateDocument):
-		return conflict("this collection already has a document with exactly the same content")
+		return conflict(duplicateDocumentMessage)
 	case errors.Is(err, weave.ErrCollectionAlreadyExists):
 		return conflict("a collection with this name already exists")
 	case errors.Is(err, weave.ErrEmptyContent):
