@@ -20,4 +20,5 @@ func Run(t *testing.T, open Opener) {
 	t.Run("Timestamps", func(t *testing.T) { testTimestamps(t, open(t)) })
 	t.Run("Filters", func(t *testing.T) { testFilters(t, open(t)) })
 	t.Run("Ordering", func(t *testing.T) { testOrdering(t, open(t)) })
+	t.Run("Duplicates", func(t *testing.T) { testDuplicates(t, open(t)) })
 }

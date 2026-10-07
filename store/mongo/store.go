@@ -82,6 +82,9 @@ func (s *Store) CreateCollection(ctx context.Context, col *collection.Collection
 
 	_, err := s.mdb.NewInsert(m).Exec(ctx)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("weave: create collection: %w", weave.ErrCollectionAlreadyExists)
+		}
 		return fmt.Errorf("weave: create collection: %w", err)
 	}
 	return nil
@@ -120,6 +123,9 @@ func (s *Store) UpdateCollection(ctx context.Context, col *collection.Collection
 
 	res, err := s.mdb.NewUpdate(m).Filter(bson.M{"_id": m.ID}).Exec(ctx)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("weave: update collection: %w", weave.ErrCollectionAlreadyExists)
+		}
 		return fmt.Errorf("weave: update collection: %w", err)
 	}
 	if n := res.MatchedCount(); n == 0 {
@@ -204,6 +210,9 @@ func (s *Store) CreateDocument(ctx context.Context, doc *document.Document) erro
 
 	_, err := s.mdb.NewInsert(m).Exec(ctx)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("weave: create document: %w", weave.ErrDuplicateDocument)
+		}
 		return fmt.Errorf("weave: create document: %w", err)
 	}
 	return nil

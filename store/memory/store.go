@@ -112,6 +112,12 @@ func (s *Store) UpdateCollection(_ context.Context, col *collection.Collection) 
 		return weave.ErrCollectionNotFound
 	}
 
+	for k, existing := range s.collections {
+		if k != key && existing.TenantID == col.TenantID && existing.Name == col.Name {
+			return weave.ErrCollectionAlreadyExists
+		}
+	}
+
 	col.UpdatedAt = time.Now().UTC()
 	s.collections[key] = col
 	return nil
