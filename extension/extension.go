@@ -108,6 +108,9 @@ func (e *Extension) Register(fapp forge.App) error {
 	if err != nil {
 		return fmt.Errorf("weave: create engine: %w", err)
 	}
+	if err := checkChunkDefaults(eng.Config()); err != nil {
+		return err
+	}
 	e.eng = eng
 
 	// Create the API handler.

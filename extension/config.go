@@ -1,6 +1,7 @@
 package extension
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/xraph/weave"
@@ -91,4 +92,17 @@ func (c Config) engineConfig() weave.Config {
 		cfg.IngestConcurrency = c.IngestConcurrency
 	}
 	return cfg
+}
+
+// checkChunkDefaults refuses default chunk settings no chunker can use. An
+// overlap at or above the chunk size makes the fixed chunker loop forever
+// and the recursive chunker panic, so the extension refuses it at startup.
+// It reads the engine's config, after every default is applied, so the
+// values it names are the ones ingest would use.
+func checkChunkDefaults(cfg weave.Config) error {
+	if cfg.DefaultChunkOverlap >= cfg.DefaultChunkSize {
+		return fmt.Errorf("weave: default_chunk_overlap %d must be smaller than default_chunk_size %d",
+			cfg.DefaultChunkOverlap, cfg.DefaultChunkSize)
+	}
+	return nil
 }
