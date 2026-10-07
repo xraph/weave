@@ -88,6 +88,8 @@ func bindings(deps Deps) []binding {
 		query("documents.spans", documentsSpansHandler(deps)),
 		command("documents.ingest", documentsIngestHandler(deps)),
 		command("documents.delete", documentsDeleteHandler(deps)),
+		query("chunks.list", chunksListHandler(deps)),
+		query("chunks.get", chunksGetHandler(deps)),
 	}
 }
 
