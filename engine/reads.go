@@ -53,5 +53,13 @@ func (e *Engine) ListChunks(ctx context.Context, filter *chunk.ListFilter) ([]*c
 	if filter == nil || (filter.DocumentID.String() == "" && filter.CollectionID.String() == "") {
 		return nil, fmt.Errorf("%w: list chunks needs a document or a collection", weave.ErrInvalidArgument)
 	}
-	return e.store.ListChunks(ctx, filter)
+	chunks, err := e.store.ListChunks(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if chunks == nil {
+		// An empty page is [] on the wire, never null.
+		chunks = []*chunk.Chunk{}
+	}
+	return chunks, nil
 }

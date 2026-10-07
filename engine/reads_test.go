@@ -57,3 +57,18 @@ func TestListChunksNeedsAScope(t *testing.T) {
 		t.Errorf("unscoped ListChunks: got %v, want ErrInvalidArgument", err)
 	}
 }
+
+func TestListChunksPastTheEndIsAnEmptyArray(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	col := mustTestCollection(t, r.Engine, "past-the-end")
+	mustIngest(t, ctx, r.Engine, col.ID, "refunds", "refunds are issued within thirty days")
+
+	got, err := r.Engine.ListChunks(ctx, &chunk.ListFilter{CollectionID: col.ID, Offset: 10})
+	if err != nil {
+		t.Fatalf("list chunks: %v", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Errorf("list chunks past the end: got %#v, want a non-nil empty slice", got)
+	}
+}

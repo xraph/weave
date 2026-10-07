@@ -2,6 +2,8 @@ package engine_test
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/xraph/weave"
@@ -217,6 +219,26 @@ func TestRetrieveCompareTiesDoNotFakeReordering(t *testing.T) {
 			if h.Rank != h.VectorRank {
 				t.Fatalf("run %d: rank %d, vector rank %d; want equal", run, h.Rank, h.VectorRank)
 			}
+		}
+	}
+}
+
+func TestRetrieveCompareAnswersEmptyListsAsArrays(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	col := mustTestCollection(t, r.Engine, "empty")
+
+	res, err := r.Engine.RetrieveCompare(ctx, "refund policy window", engine.CompareParams{CollectionID: col.ID, TopK: 2})
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	raw, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"hits":[]`, `"left_out":[]`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("compare JSON: missing %s in %s", want, raw)
 		}
 	}
 }

@@ -79,7 +79,11 @@ func (e *Engine) RetrieveCompare(ctx context.Context, query string, p ComparePar
 	}
 	window := max(3*topK, 50)
 	comps := e.Components()
-	res := &CompareResult{Window: window, Score: comps.Score, SameSearch: e.retriever == nil}
+	// Hits and LeftOut start empty, not nil, so they marshal as [] and never null.
+	res := &CompareResult{
+		Hits: []CompareHit{}, LeftOut: []CompareHit{},
+		Window: window, Score: comps.Score, SameSearch: e.retriever == nil,
+	}
 
 	// Raw side.
 	vecStart := time.Now()
