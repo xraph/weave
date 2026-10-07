@@ -103,24 +103,33 @@ func Register(d *dispatcher.Dispatcher, reg contract.Registry, wreg contract.War
 	if deps.Engine == nil {
 		return fmt.Errorf("weave/contract: Engine is required")
 	}
-	m, err := loader.Load(bytes.NewReader(manifestYAML), "weave/contract/manifest.yaml")
+	return register(d, reg, wreg, manifestYAML, bindings(deps))
+}
+
+// register does Register's work on a given manifest and binding list. Every
+// check runs before reg.Register, so a mistake never leaves a contributor
+// registered with intents nothing answers.
+func register(d *dispatcher.Dispatcher, reg contract.Registry, wreg contract.WardenRegistry, raw []byte, bs []binding) error {
+	m, err := loader.Load(bytes.NewReader(raw), "weave/contract/manifest.yaml")
 	if err != nil {
 		return fmt.Errorf("weave/contract: load manifest: %w", err)
 	}
 	if err := loader.Validate(m, wreg); err != nil {
 		return fmt.Errorf("weave/contract: validate manifest: %w", err)
 	}
-	if err := reg.Register(m); err != nil {
-		return fmt.Errorf("weave/contract: register manifest: %w", err)
-	}
 	declared := make(map[string]bool, len(m.Intents))
 	for _, in := range m.Intents {
 		declared[in.Name] = true
 	}
-	for _, b := range bindings(deps) {
+	for _, b := range bs {
 		if !declared[b.intent] {
 			return fmt.Errorf("weave/contract: %s is bound but the manifest does not declare it", b.intent)
 		}
+	}
+	if err := reg.Register(m); err != nil {
+		return fmt.Errorf("weave/contract: register manifest: %w", err)
+	}
+	for _, b := range bs {
 		if err := b.bind(d); err != nil {
 			return fmt.Errorf("weave/contract: register %s: %w", b.intent, err)
 		}
