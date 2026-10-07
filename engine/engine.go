@@ -541,12 +541,12 @@ func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOpt
 // send to the vector side. An explicit TenantFilter wins over the context
 // tenant and is always applied as an exact metadata match, because every
 // vector store treats an empty TenantKey as "no filter".
-func searchScope(params *RetrieveParams) (map[string]string, string) {
-	filter := map[string]string{}
+func searchScope(params *RetrieveParams) (filter map[string]string, tenantKey string) {
+	filter = map[string]string{}
 	if params.CollectionID != "" {
 		filter["collection_id"] = params.CollectionID
 	}
-	tenantKey := params.TenantID
+	tenantKey = params.TenantID
 	switch {
 	case params.TenantFilter != nil:
 		filter["tenant_id"] = *params.TenantFilter

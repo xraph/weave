@@ -42,7 +42,8 @@ func TestUpdateCollection(t *testing.T) {
 	}
 
 	blank := "   "
-	if _, err := e.UpdateCollection(ctx, col.ID, engine.CollectionUpdate{Name: &blank}); !errors.Is(err, weave.ErrInvalidArgument) {
+	_, err = e.UpdateCollection(ctx, col.ID, engine.CollectionUpdate{Name: &blank})
+	if !errors.Is(err, weave.ErrInvalidArgument) {
 		t.Errorf("blank name: got %v, want ErrInvalidArgument", err)
 	}
 	stored, err := e.GetCollection(ctx, col.ID)

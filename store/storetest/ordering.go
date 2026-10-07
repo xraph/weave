@@ -15,12 +15,12 @@ import (
 func testOrdering(t *testing.T, s store.Store) {
 	ctx := context.Background()
 
-	var cols []*collection.Collection
+	cols := make([]*collection.Collection, 0, 3)
 	for _, name := range []string{"first", "second", "third"} {
 		cols = append(cols, mustCollection(t, s, name, "t1"))
 		time.Sleep(5 * time.Millisecond)
 	}
-	var docs []*document.Document
+	docs := make([]*document.Document, 0, 3)
 	for _, title := range []string{"one", "two", "three"} {
 		docs = append(docs, mustDocument(t, s, cols[0], title, document.StateReady))
 		time.Sleep(5 * time.Millisecond)

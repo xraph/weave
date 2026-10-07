@@ -58,7 +58,8 @@ func testDuplicates(t *testing.T, s store.Store) {
 	}
 	clone := *rename
 	clone.Name = "dupes"
-	if err := s.UpdateCollection(ctx, &clone); !errors.Is(err, weave.ErrCollectionAlreadyExists) {
+	err = s.UpdateCollection(ctx, &clone)
+	if !errors.Is(err, weave.ErrCollectionAlreadyExists) {
 		t.Errorf("rename onto taken name: got %v, want ErrCollectionAlreadyExists", err)
 	}
 	still, err := s.GetCollection(ctx, b.ID)
