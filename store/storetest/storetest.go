@@ -18,4 +18,5 @@ type Opener func(t *testing.T) store.Store
 // Run runs every conformance case against the backend open returns.
 func Run(t *testing.T, open Opener) {
 	t.Run("Timestamps", func(t *testing.T) { testTimestamps(t, open(t)) })
+	t.Run("Filters", func(t *testing.T) { testFilters(t, open(t)) })
 }

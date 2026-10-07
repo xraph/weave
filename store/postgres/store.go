@@ -145,7 +145,7 @@ func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilt
 
 	if filter != nil {
 		if filter.Search != "" {
-			q = q.Where("name ILIKE '%' || $1 || '%'", filter.Search)
+			q = q.Where("name ILIKE '%' || ? || '%'", filter.Search)
 		}
 		if filter.Limit > 0 {
 			q = q.Limit(filter.Limit)
@@ -171,7 +171,7 @@ func (s *Store) CountCollections(ctx context.Context, filter *collection.CountFi
 
 	if filter != nil {
 		if filter.Search != "" {
-			q = q.Where("name ILIKE '%' || $1 || '%'", filter.Search)
+			q = q.Where("name ILIKE '%' || ? || '%'", filter.Search)
 		}
 	}
 
@@ -252,13 +252,13 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 
 	if filter != nil {
 		if filter.CollectionID.String() != "" {
-			q = q.Where("collection_id = $1", filter.CollectionID.String())
+			q = q.Where("collection_id = ?", filter.CollectionID.String())
 		}
 		if filter.State != "" {
-			q = q.Where("state = $2", string(filter.State))
+			q = q.Where("state = ?", string(filter.State))
 		}
 		if filter.Search != "" {
-			q = q.Where("title ILIKE '%' || $3 || '%'", filter.Search)
+			q = q.Where("title ILIKE '%' || ? || '%'", filter.Search)
 		}
 		if filter.Limit > 0 {
 			q = q.Limit(filter.Limit)
@@ -284,10 +284,13 @@ func (s *Store) CountDocuments(ctx context.Context, filter *document.CountFilter
 
 	if filter != nil {
 		if filter.CollectionID.String() != "" {
-			q = q.Where("collection_id = $1", filter.CollectionID.String())
+			q = q.Where("collection_id = ?", filter.CollectionID.String())
 		}
 		if filter.State != "" {
-			q = q.Where("state = $2", string(filter.State))
+			q = q.Where("state = ?", string(filter.State))
+		}
+		if filter.Search != "" {
+			q = q.Where("title ILIKE '%' || ? || '%'", filter.Search)
 		}
 	}
 
@@ -385,10 +388,10 @@ func (s *Store) CountChunks(ctx context.Context, filter *chunk.CountFilter) (int
 
 	if filter != nil {
 		if filter.CollectionID.String() != "" {
-			q = q.Where("collection_id = $1", filter.CollectionID.String())
+			q = q.Where("collection_id = ?", filter.CollectionID.String())
 		}
 		if filter.DocumentID.String() != "" {
-			q = q.Where("document_id = $2", filter.DocumentID.String())
+			q = q.Where("document_id = ?", filter.DocumentID.String())
 		}
 	}
 

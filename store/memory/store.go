@@ -318,6 +318,9 @@ func (s *Store) CountDocuments(_ context.Context, filter *document.CountFilter) 
 			if filter.State != "" && doc.State != filter.State {
 				continue
 			}
+			if filter.Search != "" && !strings.Contains(strings.ToLower(doc.Title), strings.ToLower(filter.Search)) {
+				continue
+			}
 		}
 		count++
 	}

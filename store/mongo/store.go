@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -146,7 +147,7 @@ func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilt
 
 	if filter != nil {
 		if filter.Search != "" {
-			q = q.Filter(bson.M{"name": bson.M{"$regex": filter.Search, "$options": "i"}})
+			q = q.Filter(bson.M{"name": containsCI(filter.Search)})
 		}
 		if filter.Limit > 0 {
 			q = q.Limit(int64(filter.Limit))
@@ -176,7 +177,7 @@ func (s *Store) CountCollections(ctx context.Context, filter *collection.CountFi
 
 	if filter != nil {
 		if filter.Search != "" {
-			q = q.Filter(bson.M{"name": bson.M{"$regex": filter.Search, "$options": "i"}})
+			q = q.Filter(bson.M{"name": containsCI(filter.Search)})
 		}
 	}
 
@@ -255,7 +256,7 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 			q = q.Filter(bson.M{"state": string(filter.State)})
 		}
 		if filter.Search != "" {
-			q = q.Filter(bson.M{"title": bson.M{"$regex": filter.Search, "$options": "i"}})
+			q = q.Filter(bson.M{"title": containsCI(filter.Search)})
 		}
 		if filter.Limit > 0 {
 			q = q.Limit(int64(filter.Limit))
@@ -289,6 +290,9 @@ func (s *Store) CountDocuments(ctx context.Context, filter *document.CountFilter
 		}
 		if filter.State != "" {
 			q = q.Filter(bson.M{"state": string(filter.State)})
+		}
+		if filter.Search != "" {
+			q = q.Filter(bson.M{"title": containsCI(filter.Search)})
 		}
 	}
 
@@ -411,4 +415,11 @@ func (s *Store) CountChunks(ctx context.Context, filter *chunk.CountFilter) (int
 func isNotFound(err error) bool {
 	return errors.Is(err, mongo.ErrNoDocuments) ||
 		errors.Is(err, grove.ErrNoRows)
+}
+
+// containsCI matches s anywhere in the field, case-insensitively, treating
+// every character literally. User input must never reach $regex unquoted:
+// "(" is a regex error and ".*" matches everything.
+func containsCI(s string) bson.M {
+	return bson.M{"$regex": regexp.QuoteMeta(s), "$options": "i"}
 }

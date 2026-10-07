@@ -300,6 +300,9 @@ func (s *Store) CountDocuments(ctx context.Context, filter *document.CountFilter
 		if filter.State != "" {
 			q = q.Where("state = ?", string(filter.State))
 		}
+		if filter.Search != "" {
+			q = q.Where("title LIKE '%' || ? || '%'", filter.Search)
+		}
 	}
 
 	count, err := q.Count(ctx)

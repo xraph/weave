@@ -26,6 +26,8 @@ type CountFilter struct {
 	CollectionID id.CollectionID
 	// State filters by document state. Empty means all states.
 	State State
+	// Search filters by title, matched exactly as ListFilter.Search.
+	Search string
 }
 
 // Store defines the persistence contract for documents.
