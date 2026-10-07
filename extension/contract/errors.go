@@ -120,11 +120,11 @@ func parseChunkID(field, s string) (id.ChunkID, error) {
 }
 
 // optionalCollectionID treats an empty value as "no filter".
-func optionalCollectionID(field, s string) (id.CollectionID, error) {
+func optionalCollectionID(s string) (id.CollectionID, error) {
 	if s == "" {
 		return id.Nil, nil
 	}
-	return parseCollectionID(field, s)
+	return parseCollectionID("collection_id", s)
 }
 
 // optionalDocumentID treats an empty value as "no filter".

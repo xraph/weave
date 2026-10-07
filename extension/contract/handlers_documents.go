@@ -84,7 +84,7 @@ func documentsListHandler(deps Deps) func(context.Context, documentsListInput, c
 		if !validState(in.State) {
 			return listOutput[documentRow]{}, badRequest("state must be pending, processing, ready or failed")
 		}
-		colID, err := optionalCollectionID("collection_id", in.CollectionID)
+		colID, err := optionalCollectionID(in.CollectionID)
 		if err != nil {
 			return listOutput[documentRow]{}, err
 		}

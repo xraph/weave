@@ -72,7 +72,7 @@ func command[I, O any](intent string, fn func(context.Context, I, contract.Princ
 	}}
 }
 
-// bindings lists every intent this package answers. Tasks 4 to 8 add to it.
+// bindings lists every intent this package answers.
 func bindings(deps Deps) []binding {
 	return []binding{
 		query("system.overview", systemOverviewHandler(deps)),
@@ -90,6 +90,8 @@ func bindings(deps Deps) []binding {
 		command("documents.delete", documentsDeleteHandler(deps)),
 		query("chunks.list", chunksListHandler(deps)),
 		query("chunks.get", chunksGetHandler(deps)),
+		command("retrieval.run", retrievalRunHandler(deps)),
+		command("retrieval.assemble", retrievalAssembleHandler(deps)),
 	}
 }
 

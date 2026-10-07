@@ -43,7 +43,7 @@ func chunksListHandler(deps Deps) func(context.Context, chunksListInput, contrac
 		if err != nil {
 			return listOutput[*chunk.Chunk]{}, err
 		}
-		colID, err := optionalCollectionID("collection_id", in.CollectionID)
+		colID, err := optionalCollectionID(in.CollectionID)
 		if err != nil {
 			return listOutput[*chunk.Chunk]{}, err
 		}

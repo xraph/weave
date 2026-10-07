@@ -73,7 +73,7 @@ func TestParseIDs(t *testing.T) {
 	if err != nil || got.String() != good.String() {
 		t.Errorf("good: %v %v", got, err)
 	}
-	if got, err := optionalCollectionID("collection_id", ""); err != nil || !got.IsNil() {
+	if got, err := optionalCollectionID(""); err != nil || !got.IsNil() {
 		t.Errorf("optional empty: %v %v", got, err)
 	}
 }
