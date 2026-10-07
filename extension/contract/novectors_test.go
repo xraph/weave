@@ -82,13 +82,7 @@ func TestNoResponseCarriesAVector(t *testing.T) {
 	check("retrieval.run", run, err)
 
 	// Echo the run's hits back, the way the console does.
-	var hits []assembleHit
-	for _, h := range run.Result.Hits {
-		if h.Chunk == nil {
-			continue
-		}
-		hits = append(hits, assembleHit{ChunkID: h.Chunk.ID.String(), Content: h.Chunk.Content, Score: h.Score})
-	}
+	hits := echo(run.Result)
 	if len(hits) == 0 {
 		t.Fatal("retrieval.run: no hits to assemble")
 	}

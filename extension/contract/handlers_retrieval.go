@@ -38,9 +38,11 @@ type runOutput struct {
 
 // assembleHit is one hit of an earlier run, echoed back exactly as the run
 // returned it. chunk_id is "" for a hit a custom retriever did not identify.
+// content is null for a hit that had no chunk at all: the run skipped it,
+// so re-assembly skips it too.
 type assembleHit struct {
 	ChunkID string  `json:"chunk_id"`
-	Content string  `json:"content"`
+	Content *string `json:"content"`
 	Score   float64 `json:"score"`
 }
 
@@ -115,8 +117,9 @@ func retrievalRunHandler(deps Deps) func(context.Context, runInput, contract.Pri
 
 // retrievalAssembleHandler re-assembles exactly the hits it is sent, so the
 // same hits and budget always give the context retrieval.run gave. That
-// includes an orphaned hit (a vector whose chunk row is gone) and a hit with
-// no chunk ID. It never embeds and never reads the store.
+// includes an orphaned hit (a vector whose chunk row is gone), a hit with
+// no chunk ID and a hit with no chunk at all. It never embeds and never
+// reads the store.
 func retrievalAssembleHandler(deps Deps) func(context.Context, assembleInput, contract.Principal) (*engine.AssembledContext, error) {
 	return func(ctx context.Context, in assembleInput, _ contract.Principal) (*engine.AssembledContext, error) {
 		if len(in.Hits) > maxAssembleRefs {
@@ -124,7 +127,9 @@ func retrievalAssembleHandler(deps Deps) func(context.Context, assembleInput, co
 		}
 		total := 0
 		for _, h := range in.Hits {
-			total += len(h.Content)
+			if h.Content != nil {
+				total += len(*h.Content)
+			}
 		}
 		if total > maxAssembleBytes {
 			return nil, badRequest("the hits hold more than 1 MiB of text in total")
@@ -135,11 +140,17 @@ func retrievalAssembleHandler(deps Deps) func(context.Context, assembleInput, co
 		}
 		hits := make([]engine.ScoredChunk, len(in.Hits))
 		for i, h := range in.Hits {
+			if h.Content == nil {
+				// The run's hit had no chunk, and Engine.Assemble
+				// skipped it. A nil chunk here skips it the same way.
+				hits[i] = engine.ScoredChunk{Score: h.Score}
+				continue
+			}
 			cid, perr := id.ParseChunkID(h.ChunkID)
 			if perr != nil {
 				cid = id.Nil
 			}
-			hits[i] = engine.ScoredChunk{Chunk: &chunk.Chunk{ID: cid, Content: h.Content}, Score: h.Score}
+			hits[i] = engine.ScoredChunk{Chunk: &chunk.Chunk{ID: cid, Content: *h.Content}, Score: h.Score}
 		}
 		ac, err := deps.Engine.Assemble(ctx, hits, engine.AssembleParams{MaxTokens: budget})
 		if err != nil {

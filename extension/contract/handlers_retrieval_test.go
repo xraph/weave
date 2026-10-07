@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -9,23 +10,30 @@ import (
 	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
 
 	"github.com/xraph/weave"
+	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/chunker"
 	"github.com/xraph/weave/engine"
+	"github.com/xraph/weave/retriever"
 	"github.com/xraph/weave/store/memory"
 )
 
 // echo returns a run's hits the way the page sends them back to
-// retrieval.assemble: in order, as {chunk_id, content, score}.
+// retrieval.assemble: in order, as {chunk_id, content, score}, with null
+// content for a hit that had no chunk.
 func echo(r *engine.CompareResult) []assembleHit {
 	hits := make([]assembleHit, len(r.Hits))
 	for i, h := range r.Hits {
-		hits[i] = assembleHit{Content: h.Chunk.Content, Score: h.Score}
-		if h.Chunk.ID.String() != "" {
-			hits[i].ChunkID = h.Chunk.ID.String()
+		hits[i] = assembleHit{Score: h.Score}
+		if h.Chunk == nil {
+			continue
 		}
+		hits[i].Content = text(h.Chunk.Content)
+		hits[i].ChunkID = h.Chunk.ID.String()
 	}
 	return hits
 }
+
+func text(s string) *string { return &s }
 
 func sameContext(t *testing.T, label string, got, want *engine.AssembledContext) {
 	t.Helper()
@@ -178,7 +186,7 @@ func TestRetrievalAssemble_OrphanParity(t *testing.T) {
 
 func TestRetrievalAssemble_UnidentifiedHit(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ac, err := retrievalAssembleHandler(deps)(context.Background(), assembleInput{Hits: []assembleHit{{Content: "from a custom retriever", Score: 0.5}}}, principal())
+	ac, err := retrievalAssembleHandler(deps)(context.Background(), assembleInput{Hits: []assembleHit{{Content: text("from a custom retriever"), Score: 0.5}}}, principal())
 	if err != nil {
 		t.Fatalf("assemble: %v", err)
 	}
@@ -193,11 +201,79 @@ func TestRetrievalAssemble_Caps(t *testing.T) {
 	if _, err := retrievalAssembleHandler(deps)(ctx, assembleInput{Hits: make([]assembleHit, maxAssembleRefs+1)}, principal()); codeOf(err) != dashcontract.CodeBadRequest {
 		t.Errorf("too many hits: %v", err)
 	}
-	big := []assembleHit{{Content: strings.Repeat("x", maxAssembleBytes/2+1)}, {Content: strings.Repeat("x", maxAssembleBytes/2)}}
+	big := []assembleHit{{Content: text(strings.Repeat("x", maxAssembleBytes/2+1))}, {Content: text(strings.Repeat("x", maxAssembleBytes/2))}}
 	if _, err := retrievalAssembleHandler(deps)(ctx, assembleInput{Hits: big}, principal()); codeOf(err) != dashcontract.CodeBadRequest {
 		t.Errorf("too much text: %v", err)
 	}
-	if _, err := retrievalAssembleHandler(deps)(ctx, assembleInput{Hits: []assembleHit{{Content: "x"}}, MaxTokens: -1}, principal()); codeOf(err) != dashcontract.CodeBadRequest {
+	// A null content counts nothing toward the cap.
+	full := []assembleHit{{Content: text(strings.Repeat("x", maxAssembleBytes))}, {}}
+	if _, err := retrievalAssembleHandler(deps)(ctx, assembleInput{Hits: full}, principal()); err != nil {
+		t.Errorf("exactly 1 MiB plus a null hit: %v", err)
+	}
+	if _, err := retrievalAssembleHandler(deps)(ctx, assembleInput{Hits: []assembleHit{{Content: text("x")}}, MaxTokens: -1}, principal()); codeOf(err) != dashcontract.CodeBadRequest {
 		t.Errorf("negative budget: %v", err)
+	}
+}
+
+// mixedRetriever returns what a careless custom retriever can: an
+// identified chunk, a hit with no chunk at all, an empty chunk and an
+// unidentified chunk.
+type mixedRetriever struct{ keep *chunk.Chunk }
+
+func (m mixedRetriever) Retrieve(context.Context, string, *retriever.Options) ([]retriever.Result, error) {
+	return []retriever.Result{
+		{Chunk: m.keep, Score: 0.9},
+		{Chunk: nil, Score: 0.8},
+		{Chunk: &chunk.Chunk{}, Score: 0.7},
+		{Chunk: &chunk.Chunk{Content: "unidentified text from a custom retriever"}, Score: 0.6},
+	}, nil
+}
+
+// A hit with a null chunk is skipped by the run's assembler. Re-assembly
+// must skip it too, or the context and the markers drift.
+func TestRetrievalAssemble_NullChunkParity(t *testing.T) {
+	ctx := context.Background()
+	seed := newDeps(t, openMemory(t))
+	col := mustCollection(t, seed, "kb")
+	docID := mustIngest(t, ctx, seed, col.ID, "refunds", "refunds are issued within thirty days")
+	chunks, err := seed.Engine.ListChunks(ctx, &chunk.ListFilter{DocumentID: docID})
+	if err != nil || len(chunks) == 0 {
+		t.Fatalf("chunks: %v %v", chunks, err)
+	}
+	deps := newDeps(t, seed.Engine.Store(), engine.WithRetriever(mixedRetriever{keep: chunks[0]}))
+
+	out, err := retrievalRunHandler(deps)(ctx, runInput{Query: "refunds", MaxTokens: 200}, principal())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(out.Result.Hits) != 4 || out.Result.Hits[1].Chunk != nil {
+		t.Fatalf("want four hits with a null second chunk: %+v", out.Result.Hits)
+	}
+
+	sent := echo(out.Result)
+	if sent[1].Content != nil {
+		t.Fatalf("echo sent content for a null chunk: %q", *sent[1].Content)
+	}
+	raw, err := json.Marshal(sent[1])
+	if err != nil || !strings.Contains(string(raw), `"content":null`) {
+		t.Fatalf("a null chunk must echo as content null: %s %v", raw, err)
+	}
+
+	runHits := make([]engine.ScoredChunk, len(out.Result.Hits))
+	for i, h := range out.Result.Hits {
+		runHits[i] = h.ScoredChunk
+	}
+	direct, err := deps.Engine.Assemble(ctx, runHits, engine.AssembleParams{MaxTokens: 200})
+	if err != nil {
+		t.Fatalf("Engine.Assemble: %v", err)
+	}
+	viaHandler, err := retrievalAssembleHandler(deps)(ctx, assembleInput{Hits: sent, MaxTokens: 200}, principal())
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	sameContext(t, "run vs Engine.Assemble", out.Context, direct)
+	sameContext(t, "handler vs Engine.Assemble", viaHandler, direct)
+	if direct.FirstExcluded != 1 || slices.Contains(direct.Included, 1) {
+		t.Errorf("the null hit should be the first excluded and never included: %+v", direct)
 	}
 }
