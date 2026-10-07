@@ -49,7 +49,6 @@ type testRig struct {
 // wire a retriever onto the same stores the engine uses.
 type rigOption func(r *testRig) engine.Option
 
-//nolint:unused // used by the engine tests that follow
 func withOpt(o engine.Option) rigOption { return func(*testRig) engine.Option { return o } }
 
 func newRig(t *testing.T, extra ...rigOption) *testRig {
