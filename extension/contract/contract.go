@@ -77,6 +77,12 @@ func bindings(deps Deps) []binding {
 	return []binding{
 		query("system.overview", systemOverviewHandler(deps)),
 		query("system.components", systemComponentsHandler(deps)),
+		query("collections.list", collectionsListHandler(deps)),
+		query("collections.get", collectionsGetHandler(deps)),
+		command("collections.create", collectionsCreateHandler(deps)),
+		command("collections.update", collectionsUpdateHandler(deps)),
+		command("collections.delete", collectionsDeleteHandler(deps)),
+		command("collections.reindex", collectionsReindexHandler(deps)),
 	}
 }
 
