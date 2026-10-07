@@ -101,7 +101,10 @@ func (e *Extension) Register(fapp forge.App) error {
 		)
 	}
 
-	eng, err := engine.New(e.engineOpts...)
+	// The config goes first so an engine option the caller passed with
+	// WithEngineOption still wins.
+	opts := append([]engine.Option{engine.WithConfig(e.config.engineConfig())}, e.engineOpts...)
+	eng, err := engine.New(opts...)
 	if err != nil {
 		return fmt.Errorf("weave: create engine: %w", err)
 	}

@@ -1,6 +1,10 @@
 package extension
 
-import "time"
+import (
+	"time"
+
+	"github.com/xraph/weave"
+)
 
 // Config holds the Weave extension configuration.
 // Fields can be set programmatically via ExtOption functions or loaded from
@@ -58,4 +62,33 @@ func DefaultConfig() Config {
 		ShutdownTimeout:       30 * time.Second,
 		IngestConcurrency:     4,
 	}
+}
+
+// engineConfig is the part of the extension's configuration the engine
+// reads. Unset fields keep the engine's own defaults. Before this, the YAML
+// defaults never reached the engine.
+func (c Config) engineConfig() weave.Config {
+	cfg := weave.DefaultConfig()
+	if c.DefaultChunkSize > 0 {
+		cfg.DefaultChunkSize = c.DefaultChunkSize
+	}
+	if c.DefaultChunkOverlap > 0 {
+		cfg.DefaultChunkOverlap = c.DefaultChunkOverlap
+	}
+	if c.DefaultEmbeddingModel != "" {
+		cfg.DefaultEmbeddingModel = c.DefaultEmbeddingModel
+	}
+	if c.DefaultChunkStrategy != "" {
+		cfg.DefaultChunkStrategy = c.DefaultChunkStrategy
+	}
+	if c.DefaultTopK > 0 {
+		cfg.DefaultTopK = c.DefaultTopK
+	}
+	if c.ShutdownTimeout > 0 {
+		cfg.ShutdownTimeout = c.ShutdownTimeout
+	}
+	if c.IngestConcurrency > 0 {
+		cfg.IngestConcurrency = c.IngestConcurrency
+	}
+	return cfg
 }
