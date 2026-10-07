@@ -48,7 +48,7 @@ func collectionToModel(c *collection.Collection) *collectionModel {
 		ChunkStrategy:  c.ChunkStrategy,
 		ChunkSize:      c.ChunkSize,
 		ChunkOverlap:   c.ChunkOverlap,
-		Metadata:       c.Metadata,
+		Metadata:       orEmpty(c.Metadata),
 		DocumentCount:  c.DocumentCount,
 		ChunkCount:     c.ChunkCount,
 		CreatedAt:      c.CreatedAt,
@@ -110,7 +110,7 @@ func documentToModel(d *document.Document) *documentModel {
 		ContentHash:   d.ContentHash,
 		ContentLength: d.ContentLength,
 		ChunkCount:    d.ChunkCount,
-		Metadata:      d.Metadata,
+		Metadata:      orEmpty(d.Metadata),
 		State:         string(d.State),
 		Error:         d.Error,
 		CreatedAt:     d.CreatedAt,
@@ -170,7 +170,7 @@ func chunkToModel(c *chunk.Chunk) *chunkModel {
 		StartOffset:  c.StartOffset,
 		EndOffset:    c.EndOffset,
 		TokenCount:   c.TokenCount,
-		Metadata:     c.Metadata,
+		Metadata:     orEmpty(c.Metadata),
 		ParentID:     c.ParentID,
 		CreatedAt:    c.CreatedAt,
 	}
@@ -194,4 +194,13 @@ func chunkFromModel(m *chunkModel) *chunk.Chunk {
 		ParentID:     m.ParentID,
 		CreatedAt:    m.CreatedAt,
 	}
+}
+
+// orEmpty stores a missing metadata map as an empty one, because the
+// metadata column is required: a nil map would be written as null.
+func orEmpty(m map[string]string) map[string]string {
+	if m == nil {
+		return map[string]string{}
+	}
+	return m
 }

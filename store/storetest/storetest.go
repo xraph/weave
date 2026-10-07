@@ -24,4 +24,5 @@ func Run(t *testing.T, open Opener) {
 	t.Run("Tenancy", func(t *testing.T) { testTenancy(t, open(t)) })
 	t.Run("Stalled", func(t *testing.T) { testStalled(t, open(t)) })
 	t.Run("Chunks", func(t *testing.T) { testChunks(t, open(t)) })
+	t.Run("NilMetadata", func(t *testing.T) { testNilMetadata(t, open(t)) })
 }
