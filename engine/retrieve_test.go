@@ -144,7 +144,7 @@ func TestRetrieveOrphanKeepsItsPlace(t *testing.T) {
 	// Orphan the top hit, so keeping its place is not the same as sorting
 	// orphans last.
 	gone := before[0].Chunk.DocumentID
-	if err := r.Store.DeleteChunksByDocument(ctx, gone); err != nil {
+	if err = r.Store.DeleteChunksByDocument(ctx, gone); err != nil {
 		t.Fatalf("delete chunks: %v", err)
 	}
 
