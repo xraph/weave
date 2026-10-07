@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Schema creates a randomly named schema in the database dsn names, drops it
@@ -30,12 +31,16 @@ import (
 func Schema(t testing.TB, dsn string) string {
 	t.Helper()
 
-	if strings.Contains(dsn, ":5432/") || strings.HasSuffix(dsn, ":5432") {
+	refused, err := usesDefaultPort(dsn)
+	if err != nil {
+		t.Fatalf("parse WEAVE_TEST_POSTGRES_DSN: %v", err)
+	}
+	if refused {
 		t.Fatalf("WEAVE_TEST_POSTGRES_DSN points at the default port; refusing to write to what may be a live database")
 	}
 
 	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	if _, err = rand.Read(b[:]); err != nil {
 		t.Fatalf("random schema suffix: %v", err)
 	}
 	schema := "weave_test_" + hex.EncodeToString(b[:])
@@ -50,6 +55,27 @@ func Schema(t testing.TB, dsn string) string {
 	}
 	return scoped
 }
+
+// usesDefaultPort reports whether dsn resolves to port 5432 on any host it
+// would try. pgx does the resolving, so the URL form, the keyword form and a
+// DSN that names no port at all (which defaults to 5432) are all covered.
+func usesDefaultPort(dsn string) (bool, error) {
+	cfg, err := pgconn.ParseConfig(dsn)
+	if err != nil {
+		return false, err
+	}
+	if cfg.Port == defaultPort {
+		return true, nil
+	}
+	for _, fb := range cfg.Fallbacks {
+		if fb.Port == defaultPort {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+const defaultPort = 5432
 
 func exec(t testing.TB, dsn, stmt string) {
 	t.Helper()

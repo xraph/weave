@@ -15,12 +15,32 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
+// usesDefaultPort reports whether dsn would reach MongoDB's default port. A DSN
+// that names no port defaults to 27017, and a mongodb+srv scheme resolves its
+// hosts and ports through DNS where this check cannot see them, so both are
+// refused.
+func usesDefaultPort(dsn string) (bool, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return false, err
+	}
+	if strings.EqualFold(u.Scheme, "mongodb+srv") {
+		return true, nil
+	}
+	port := u.Port()
+	return port == "" || port == "27017", nil
+}
+
 // Database returns dsn with its database replaced by a random one, and
 // registers a cleanup that drops that database. It refuses the default port.
 func Database(t testing.TB, dsn string) string {
 	t.Helper()
 
-	if strings.Contains(dsn, ":27017") {
+	refused, err := usesDefaultPort(dsn)
+	if err != nil {
+		t.Fatalf("parse WEAVE_TEST_MONGO_DSN: %v", err)
+	}
+	if refused {
 		t.Fatalf("WEAVE_TEST_MONGO_DSN points at the default port; refusing to write to what may be a live database")
 	}
 
