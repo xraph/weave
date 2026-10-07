@@ -37,8 +37,10 @@ type CompareHit struct {
 // CompareResult is the configured ranking beside the raw vector ranking.
 type CompareResult struct {
 	Hits []CompareHit `json:"hits"`
-	// LeftOut are raw-window hits the configured retriever did not return, in
-	// vector order, at most TopK of them. Empty when nothing reorders.
+	// LeftOut are raw-window hits the final ranking skipped over: hits not in
+	// Hits whose vector rank is better than the worst vector rank in Hits (or
+	// every such hit when a final hit sits outside the raw window or has no
+	// chunk ID). In vector order, at most TopK of them.
 	LeftOut []CompareHit `json:"left_out"`
 	// Window is how many raw hits were asked for.
 	Window int `json:"window"`
@@ -46,9 +48,13 @@ type CompareResult struct {
 	VectorMatches int `json:"vector_matches"`
 	// BestVectorScore is the top raw score, or 0 with no matches.
 	BestVectorScore float64 `json:"best_vector_score"`
-	// Reordered is false when the final ranking is the raw ranking: no
-	// retriever, or a plain similarity retriever.
+	// Reordered is true when this query's final ranking differs from the raw
+	// ranking: some hit's Rank is not its VectorRank, or LeftOut is not empty.
+	// It says nothing about the retriever kind; read that from Components().
 	Reordered bool `json:"reordered"`
+	// SameSearch is true when no retriever is configured, so both sides are
+	// derived from one vector search and cannot disagree.
+	SameSearch bool `json:"same_search"`
 	// Score is what Hits[i].Score means.
 	Score           weave.ScoreKind `json:"score"`
 	RetrieverMillis float64         `json:"retriever_ms"`
@@ -59,6 +65,10 @@ type CompareResult struct {
 // a wider window, and reports where each final hit sat in the raw ranking.
 // With no retriever configured it embeds the query once and derives both
 // sides from the same search.
+//
+// It needs the engine's own embedder and vector store, so a retriever-only
+// engine is refused. The raw side searches the engine's vector store, so a
+// retriever wired to a different store will not line up with it.
 func (e *Engine) RetrieveCompare(ctx context.Context, query string, p CompareParams) (*CompareResult, error) {
 	if e.embedder == nil || e.vectorStore == nil {
 		return nil, fmt.Errorf("weave: compare needs an embedder and a vector store")
@@ -69,7 +79,7 @@ func (e *Engine) RetrieveCompare(ctx context.Context, query string, p ComparePar
 	}
 	window := max(3*topK, 50)
 	comps := e.Components()
-	res := &CompareResult{Window: window, Score: comps.Score}
+	res := &CompareResult{Window: window, Score: comps.Score, SameSearch: e.retriever == nil}
 
 	// Raw side.
 	vecStart := time.Now()
@@ -94,20 +104,24 @@ func (e *Engine) RetrieveCompare(ctx context.Context, query string, p ComparePar
 		res.BestVectorScore = raw[0].Score
 	}
 	rawRank := make(map[string]int, len(raw))
-	rawScore := make(map[string]float64, len(raw))
 	for i, sr := range raw {
-		rawRank[sr.ID] = i + 1
-		rawScore[sr.ID] = sr.Score
+		// The first occurrence of an ID wins, so a repeated ID cannot move a hit.
+		if _, ok := rawRank[sr.ID]; !ok {
+			rawRank[sr.ID] = i + 1
+		}
 	}
 
-	// Final side.
+	// Final side. rawIdx carries each final hit's 1-based place in the raw
+	// window, or 0 when it has none.
 	var final []ScoredChunk
+	var rawIdx []int
 	if e.retriever == nil {
-		for _, sr := range raw {
+		for i, sr := range raw {
 			if p.MinScore > 0 && sr.Score < p.MinScore {
 				continue
 			}
 			final = append(final, ScoredChunk{Chunk: retriever.ChunkFromSearchResult(sr), Score: sr.Score})
+			rawIdx = append(rawIdx, i+1)
 			if len(final) == topK {
 				break
 			}
@@ -121,32 +135,52 @@ func (e *Engine) RetrieveCompare(ctx context.Context, query string, p ComparePar
 			return nil, err
 		}
 		res.RetrieverMillis = float64(time.Since(retStart).Microseconds()) / 1000
+		for _, h := range final {
+			// A nil chunk or an empty ID is an unidentified hit: no raw place.
+			idx := 0
+			if h.Chunk != nil {
+				if key := h.Chunk.ID.String(); key != "" {
+					idx = rawRank[key]
+				}
+			}
+			rawIdx = append(rawIdx, idx)
+		}
 	}
 
-	inFinal := make(map[string]bool, len(final))
+	inFinal := make(map[int]bool, len(final))
+	worst := 0
+	outside := false
 	for i, h := range final {
-		key := h.Chunk.ID.String()
-		inFinal[key] = true
-		ch := CompareHit{ScoredChunk: h, Rank: i + 1, VectorRank: rawRank[key], VectorScore: rawScore[key]}
+		idx := rawIdx[i]
+		ch := CompareHit{ScoredChunk: h, Rank: i + 1, VectorRank: idx}
+		if idx > 0 {
+			inFinal[idx] = true
+			ch.VectorScore = raw[idx-1].Score
+			worst = max(worst, idx)
+		} else {
+			outside = true
+		}
 		if ch.VectorRank != ch.Rank {
 			res.Reordered = true
 		}
 		res.Hits = append(res.Hits, ch)
 	}
-	if e.retriever != nil && comps.Retriever.Kind != "similarity" {
-		res.Reordered = true
-	}
 
-	if res.Reordered {
-		for i, sr := range raw {
-			if inFinal[sr.ID] || len(res.LeftOut) == topK {
-				continue
-			}
-			res.LeftOut = append(res.LeftOut, CompareHit{
-				ScoredChunk: ScoredChunk{Chunk: retriever.ChunkFromSearchResult(sr), Score: sr.Score},
-				VectorRank:  i + 1, VectorScore: sr.Score,
-			})
+	// Left out: raw hits the final ranking skipped over.
+	for i, sr := range raw {
+		if len(res.LeftOut) == topK {
+			break
 		}
+		if inFinal[i+1] || (!outside && i+1 >= worst) {
+			continue
+		}
+		res.LeftOut = append(res.LeftOut, CompareHit{
+			ScoredChunk: ScoredChunk{Chunk: retriever.ChunkFromSearchResult(sr), Score: sr.Score},
+			VectorRank:  i + 1, VectorScore: sr.Score,
+		})
+	}
+	if len(res.LeftOut) > 0 {
+		res.Reordered = true
 	}
 
 	if err := e.hydrateCompare(ctx, res.Hits); err != nil {
