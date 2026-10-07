@@ -24,6 +24,9 @@ func TestSystemOverview(t *testing.T) {
 		first := mustIngest(t, ctx, deps, col.ID, "refunds", "refunds are issued within thirty days")
 		time.Sleep(5 * time.Millisecond)
 		second := mustIngest(t, ctx, deps, col.ID, "shipping", "shipping takes five working days")
+		// Keep stuck's created_at apart from second's, so newest first
+		// cannot tie on a coarse clock.
+		time.Sleep(5 * time.Millisecond)
 
 		// One document stuck in processing, last touched long ago as far
 		// as the overview's clock is concerned.
