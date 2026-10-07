@@ -57,6 +57,13 @@ func testChunks(t *testing.T, s store.Store) {
 	}
 	sameOrder(t, "page of two from offset two", chunkIDs(page), chunkIDs(all[2:4]))
 
+	// An offset with no limit means "the rest", on every backend.
+	rest, err := s.ListChunks(ctx, &chunk.ListFilter{CollectionID: a.ID, Offset: 2})
+	if err != nil {
+		t.Fatalf("list offset without limit: %v", err)
+	}
+	sameOrder(t, "offset two, no limit", chunkIDs(rest), chunkIDs(all[2:]))
+
 	none, err := s.ListChunks(ctx, &chunk.ListFilter{CollectionID: a.ID, Tenant: ptr("t2")})
 	if err != nil {
 		t.Fatalf("list other tenant: %v", err)

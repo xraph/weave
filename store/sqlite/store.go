@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/xraph/grove"
@@ -164,12 +165,7 @@ func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilt
 		if filter.Tenant != nil {
 			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
-		if filter.Limit > 0 {
-			q = q.Limit(filter.Limit)
-		}
-		if filter.Offset > 0 {
-			q = q.Offset(filter.Offset)
-		}
+		q = page(q, filter.Limit, filter.Offset)
 	}
 
 	if err := q.Scan(ctx); err != nil {
@@ -294,12 +290,7 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 		if filter.Tenant != nil {
 			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
-		if filter.Limit > 0 {
-			q = q.Limit(filter.Limit)
-		}
-		if filter.Offset > 0 {
-			q = q.Offset(filter.Offset)
-		}
+		q = page(q, filter.Limit, filter.Offset)
 	}
 
 	if err := q.Scan(ctx); err != nil {
@@ -424,12 +415,7 @@ func (s *Store) ListChunks(ctx context.Context, filter *chunk.ListFilter) ([]*ch
 		if filter.Tenant != nil {
 			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
-		if filter.Limit > 0 {
-			q = q.Limit(filter.Limit)
-		}
-		if filter.Offset > 0 {
-			q = q.Offset(filter.Offset)
-		}
+		q = page(q, filter.Limit, filter.Offset)
 	}
 	if err := q.Scan(ctx); err != nil {
 		return nil, fmt.Errorf("weave: list chunks: %w", err)
@@ -485,6 +471,23 @@ func (s *Store) CountChunks(ctx context.Context, filter *chunk.CountFilter) (int
 		return 0, fmt.Errorf("weave: count chunks: %w", err)
 	}
 	return count, nil
+}
+
+// page applies a limit and offset to a select. SQLite rejects OFFSET without
+// LIMIT, and grove drops a non-positive limit instead of passing it through,
+// so an offset with no limit gets the largest limit grove can emit, which no
+// table reaches.
+func page(q *sqlitedriver.SelectQuery, limit, offset int) *sqlitedriver.SelectQuery {
+	if limit <= 0 && offset > 0 {
+		limit = math.MaxInt32
+	}
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if offset > 0 {
+		q = q.Offset(offset)
+	}
+	return q
 }
 
 // isNoRows checks for the standard sql.ErrNoRows sentinel.
