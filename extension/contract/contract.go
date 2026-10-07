@@ -74,7 +74,10 @@ func command[I, O any](intent string, fn func(context.Context, I, contract.Princ
 
 // bindings lists every intent this package answers. Tasks 4 to 8 add to it.
 func bindings(deps Deps) []binding {
-	return []binding{}
+	return []binding{
+		query("system.overview", systemOverviewHandler(deps)),
+		query("system.components", systemComponentsHandler(deps)),
+	}
 }
 
 // Register loads and validates the embedded manifest, registers the
