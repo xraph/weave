@@ -28,9 +28,11 @@ func testTenancy(t *testing.T, s store.Store) {
 	d2 := mustDocument(t, s, c2, "t2 doc", document.StateReady)
 	d0 := mustDocument(t, s, c0, "untenanted doc", document.StateReady)
 	ch1 := mustChunks(t, s, d1, 2)
-	mustChunks(t, s, d2, 1)
+	ch2 := mustChunks(t, s, d2, 1)
 	ch0 := mustChunks(t, s, d0, 3)
 
+	// Chunk tenancy is asserted by count because no chunk listing exists yet
+	// (Task 6 adds ListChunks).
 	cases := []struct {
 		name   string
 		tenant *string
@@ -38,7 +40,7 @@ func testTenancy(t *testing.T, s store.Store) {
 		docs   []*document.Document
 		chunks int64
 	}{
-		{"nil sees everyone", nil, []*collection.Collection{c1, c2, c0}, []*document.Document{d1, d2, d0}, 6},
+		{"nil sees everyone", nil, []*collection.Collection{c1, c2, c0}, []*document.Document{d1, d2, d0}, int64(len(ch1) + len(ch2) + len(ch0))},
 		{"t1 sees t1", ptr("t1"), []*collection.Collection{c1}, []*document.Document{d1}, int64(len(ch1))},
 		{"empty sees only untenanted", ptr(""), []*collection.Collection{c0}, []*document.Document{d0}, int64(len(ch0))},
 		{"unknown sees nothing", ptr("t9"), nil, nil, 0},
@@ -83,22 +85,40 @@ func testTenancy(t *testing.T, s store.Store) {
 }
 
 // testStalled pins UpdatedBefore, which the Overview uses to count
-// documents stuck in processing.
+// documents stuck in processing. Three cutoffs fix the direction of the
+// comparison: an inverted filter would give 2, 1, 0 instead of 0, 1, 2.
 func testStalled(t *testing.T, s store.Store) {
 	ctx := context.Background()
 	col := mustCollection(t, s, "stalled", "t1")
+
+	before := time.Now().UTC()
+	time.Sleep(20 * time.Millisecond)
 	mustDocument(t, s, col, "old", document.StateProcessing)
 	time.Sleep(20 * time.Millisecond)
-	cutoff := time.Now().UTC()
+	middle := time.Now().UTC()
 	time.Sleep(20 * time.Millisecond)
 	mustDocument(t, s, col, "fresh", document.StateProcessing)
 	mustDocument(t, s, col, "done", document.StateReady)
+	time.Sleep(20 * time.Millisecond)
+	after := time.Now().UTC()
 
-	n, err := s.CountDocuments(ctx, &document.CountFilter{State: document.StateProcessing, UpdatedBefore: cutoff})
-	if err != nil {
-		t.Fatalf("count stalled: %v", err)
+	cases := []struct {
+		name   string
+		cutoff time.Time
+		want   int64
+	}{
+		{"before every write", before, 0},
+		{"between old and fresh", middle, 1},
+		{"after every write", after, 2},
+		{"zero means no filter", time.Time{}, 2},
 	}
-	if n != 1 {
-		t.Errorf("count stalled: got %d, want 1", n)
+	for _, tc := range cases {
+		n, err := s.CountDocuments(ctx, &document.CountFilter{State: document.StateProcessing, UpdatedBefore: tc.cutoff})
+		if err != nil {
+			t.Fatalf("%s: count stalled: %v", tc.name, err)
+		}
+		if n != tc.want {
+			t.Errorf("%s: count stalled: got %d, want %d", tc.name, n, tc.want)
+		}
 	}
 }
