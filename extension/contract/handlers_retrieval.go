@@ -2,13 +2,13 @@ package contract
 
 import (
 	"context"
-	"errors"
 	"strings"
 
 	"github.com/xraph/forge/extensions/dashboard/contract"
 
-	"github.com/xraph/weave"
+	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/engine"
+	"github.com/xraph/weave/id"
 )
 
 const (
@@ -17,6 +17,7 @@ const (
 	defaultMaxTokens = 4096
 	maxMaxTokens     = 32768
 	maxAssembleRefs  = 50
+	maxAssembleBytes = 1 << 20
 )
 
 type runInput struct {
@@ -35,9 +36,17 @@ type runOutput struct {
 	Context *engine.AssembledContext `json:"context"`
 }
 
+// assembleHit is one hit of an earlier run, echoed back exactly as the run
+// returned it. chunk_id is "" for a hit a custom retriever did not identify.
+type assembleHit struct {
+	ChunkID string  `json:"chunk_id"`
+	Content string  `json:"content"`
+	Score   float64 `json:"score"`
+}
+
 type assembleInput struct {
-	Hits      []engine.ChunkRef `json:"hits"`
-	MaxTokens int               `json:"max_tokens"`
+	Hits      []assembleHit `json:"hits"`
+	MaxTokens int           `json:"max_tokens"`
 }
 
 // resolveBudget turns the requested token budget into the one the
@@ -82,10 +91,10 @@ func retrievalRunHandler(deps Deps) func(context.Context, runInput, contract.Pri
 		}
 		comps := deps.Engine.Components()
 		if !comps.Embedder.Configured {
-			return runOutput{}, mapError(weave.ErrNoEmbedder)
+			return runOutput{}, unavailable("retrieval needs Weave's own embedder and vector store; this deployment has no embedder configured")
 		}
 		if !comps.VectorStore.Configured {
-			return runOutput{}, mapError(weave.ErrNoVectorStore)
+			return runOutput{}, unavailable("retrieval needs Weave's own embedder and vector store; this deployment has no vector store configured")
 		}
 
 		res, err := deps.Engine.RetrieveCompare(ctx, query, engine.CompareParams{CollectionID: colID, Tenant: in.Tenant, TopK: topK, MinScore: in.MinScore})
@@ -104,22 +113,35 @@ func retrievalRunHandler(deps Deps) func(context.Context, runInput, contract.Pri
 	}
 }
 
-// retrievalAssembleHandler re-assembles an earlier ranking with a new
-// budget. It reads each chunk back by ID and never embeds again. A chunk
-// that has gone means the ranking is stale.
+// retrievalAssembleHandler re-assembles exactly the hits it is sent, so the
+// same hits and budget always give the context retrieval.run gave. That
+// includes an orphaned hit (a vector whose chunk row is gone) and a hit with
+// no chunk ID. It never embeds and never reads the store.
 func retrievalAssembleHandler(deps Deps) func(context.Context, assembleInput, contract.Principal) (*engine.AssembledContext, error) {
 	return func(ctx context.Context, in assembleInput, _ contract.Principal) (*engine.AssembledContext, error) {
 		if len(in.Hits) > maxAssembleRefs {
 			return nil, badRequest("at most 50 hits can be assembled at once")
 		}
+		total := 0
+		for _, h := range in.Hits {
+			total += len(h.Content)
+		}
+		if total > maxAssembleBytes {
+			return nil, badRequest("the hits hold more than 1 MiB of text in total")
+		}
 		budget, err := resolveBudget(in.MaxTokens)
 		if err != nil {
 			return nil, err
 		}
-		ac, _, err := deps.Engine.AssembleRefs(ctx, in.Hits, engine.AssembleParams{MaxTokens: budget})
-		if errors.Is(err, weave.ErrChunkNotFound) {
-			return nil, notFound("a chunk in this ranking no longer exists; run the query again")
+		hits := make([]engine.ScoredChunk, len(in.Hits))
+		for i, h := range in.Hits {
+			cid, perr := id.ParseChunkID(h.ChunkID)
+			if perr != nil {
+				cid = id.Nil
+			}
+			hits[i] = engine.ScoredChunk{Chunk: &chunk.Chunk{ID: cid, Content: h.Content}, Score: h.Score}
 		}
+		ac, err := deps.Engine.Assemble(ctx, hits, engine.AssembleParams{MaxTokens: budget})
 		if err != nil {
 			return nil, deps.mapError("retrieval.assemble", err)
 		}
