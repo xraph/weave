@@ -83,6 +83,11 @@ func bindings(deps Deps) []binding {
 		command("collections.update", collectionsUpdateHandler(deps)),
 		command("collections.delete", collectionsDeleteHandler(deps)),
 		command("collections.reindex", collectionsReindexHandler(deps)),
+		query("documents.list", documentsListHandler(deps)),
+		query("documents.get", documentsGetHandler(deps)),
+		query("documents.spans", documentsSpansHandler(deps)),
+		command("documents.ingest", documentsIngestHandler(deps)),
+		command("documents.delete", documentsDeleteHandler(deps)),
 	}
 }
 
