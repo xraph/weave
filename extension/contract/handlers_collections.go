@@ -217,6 +217,11 @@ func collectionsDeleteHandler(deps Deps) func(context.Context, idInput, contract
 // collectionsReindexHandler re-embeds the collection's ready documents. It
 // checks the collection exists first: the engine's reindex would delete
 // nothing and report success for an ID that does not exist.
+//
+// The checks run on the request context. The reindex itself does not: it
+// deletes every vector in the collection before re-embedding, so a closed
+// tab or a proxy timeout partway would leave the collection partly indexed.
+// No server-side timeout either, for the same reason.
 func collectionsReindexHandler(deps Deps) func(context.Context, idInput, contract.Principal) (reindexOutput, error) {
 	return func(ctx context.Context, in idInput, _ contract.Principal) (reindexOutput, error) {
 		const intent = "collections.reindex"
@@ -232,7 +237,7 @@ func collectionsReindexHandler(deps Deps) func(context.Context, idInput, contrac
 			return reindexOutput{}, deps.mapError(intent, err)
 		}
 		start := time.Now()
-		if err := deps.Engine.ReindexCollection(ctx, colID); err != nil {
+		if err := deps.Engine.ReindexCollection(context.WithoutCancel(ctx), colID); err != nil {
 			return reindexOutput{}, deps.mapError(intent, err)
 		}
 		return reindexOutput{ID: colID.String(), ReindexedDocuments: ready, ElapsedMillis: float64(time.Since(start).Microseconds()) / 1000}, nil

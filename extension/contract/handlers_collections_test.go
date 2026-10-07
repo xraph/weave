@@ -8,8 +8,12 @@ import (
 	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
 
 	"github.com/xraph/weave"
+	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/collection"
+	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/id"
+	"github.com/xraph/weave/store"
+	vsmemory "github.com/xraph/weave/vectorstore/memory"
 )
 
 func TestCollectionsCreateListGet(t *testing.T) {
@@ -190,4 +194,43 @@ func TestCollectionsUpdateDeleteReindex(t *testing.T) {
 			t.Errorf("delete again: %v", err)
 		}
 	})
+}
+
+// Reindex deletes every vector in the collection before re-embedding, so
+// a request cancelled partway must not stop it there.
+func TestCollectionsReindex_SurvivesCancellation(t *testing.T) {
+	for _, b := range []struct {
+		name string
+		open func(*testing.T) store.Store
+	}{{"memory", openMemory}, {"sqlite", openSQLite}} {
+		t.Run(b.name, func(t *testing.T) {
+			bg := context.Background()
+			s, vs := b.open(t), vsmemory.New()
+			seed := newDeps(t, s, engine.WithVectorStore(vs))
+			col := mustCollection(t, seed, "kb")
+			mustIngest(t, bg, seed, col.ID, "refunds", "refunds are issued within thirty days")
+			mustIngest(t, bg, seed, col.ID, "shipping", "shipping takes five working days")
+			chunks, err := seed.Engine.CountChunks(bg, &chunk.CountFilter{CollectionID: col.ID})
+			if err != nil || chunks < 2 {
+				t.Fatalf("chunks: %d %v", chunks, err)
+			}
+
+			ctx, cancel := context.WithCancel(bg)
+			defer cancel()
+			deps := newDeps(t, s, engine.WithVectorStore(vs), engine.WithEmbedder(cancellingEmbedder{hashEmbedder: hashEmbedder{dims: 256}, cancel: cancel}))
+			re, err := collectionsReindexHandler(deps)(ctx, idInput{ID: col.ID.String()}, principal())
+			if ctx.Err() == nil {
+				t.Fatal("the request was never cancelled; the test proves nothing")
+			}
+			if err != nil || re.ReindexedDocuments != 2 {
+				t.Fatalf("reindex: %+v %v", re, err)
+			}
+
+			// Every chunk has its vector back.
+			run, err := retrievalRunHandler(seed)(bg, runInput{Query: "refunds shipping", CollectionID: col.ID.String()}, principal())
+			if err != nil || int64(run.Result.VectorMatches) != chunks {
+				t.Errorf("vectors after reindex: %d of %d chunks (%v)", run.Result.VectorMatches, chunks, err)
+			}
+		})
+	}
 }

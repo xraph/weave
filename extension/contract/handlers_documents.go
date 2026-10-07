@@ -4,8 +4,10 @@ import (
 	"context"
 	"strings"
 
+	"github.com/xraph/forge"
 	"github.com/xraph/forge/extensions/dashboard/contract"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/engine"
@@ -158,6 +160,17 @@ func documentsSpansHandler(deps Deps) func(context.Context, idInput, contract.Pr
 	}
 }
 
+// documentsIngestHandler ingests synchronously. Two things differ from a
+// call to Engine.Ingest on the request context:
+//
+//   - The dashboard's request carries no tenant or app, and Ingest stamps
+//     the document, its chunks and its vectors with whatever the context
+//     holds. So the handler reads the collection and ingests under the
+//     collection's own tenant and app.
+//   - The engine call runs on a context that the request's cancellation
+//     does not reach. A closed tab or a proxy timeout would otherwise stop
+//     ingest between writes and leave a document in processing for good.
+//     There is no server-side timeout either, for the same reason.
 func documentsIngestHandler(deps Deps) func(context.Context, ingestInput, contract.Principal) (ingestOutput, error) {
 	return func(ctx context.Context, in ingestInput, _ contract.Principal) (ingestOutput, error) {
 		const intent = "documents.ingest"
@@ -171,13 +184,30 @@ func documentsIngestHandler(deps Deps) func(context.Context, ingestInput, contra
 		if len(in.Content) > maxIngestBytes {
 			return ingestOutput{}, badRequest("content is larger than 1 MiB; the dashboard ingests up to 1 MiB")
 		}
-		res, err := deps.Engine.Ingest(ctx, &engine.IngestInput{
+		col, err := deps.Engine.GetCollection(ctx, colID)
+		if err != nil {
+			return ingestOutput{}, deps.mapError(intent, err)
+		}
+		work := weave.WithApp(weave.WithTenant(context.WithoutCancel(ctx), col.TenantID), col.AppID)
+		res, err := deps.Engine.Ingest(work, &engine.IngestInput{
 			CollectionID: colID, Title: in.Title, Source: in.Source, SourceType: in.SourceType,
 			Content: in.Content, Metadata: in.Metadata,
 		})
 		if err != nil && res != nil && res.State == document.StateFailed {
 			out := ingestOutput{DocumentID: res.DocumentID.String(), State: string(res.State), Error: err.Error()}
-			if doc, getErr := deps.Engine.GetDocument(ctx, res.DocumentID); getErr == nil && doc.Error != "" {
+			doc, getErr := deps.Engine.GetDocument(work, res.DocumentID)
+			switch {
+			case getErr != nil:
+				// The answer still stands on the error Ingest returned;
+				// the operator should know the stored reason was unreadable.
+				if deps.Logger != nil {
+					deps.Logger.Warn("weave/contract: could not read back a failed document",
+						forge.F("intent", intent),
+						forge.F("document_id", res.DocumentID.String()),
+						forge.F("error", getErr),
+					)
+				}
+			case doc.Error != "":
 				out.Error = doc.Error
 			}
 			return out, nil
