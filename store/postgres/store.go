@@ -17,6 +17,7 @@ import (
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/id"
+	"github.com/xraph/weave/internal/sqllike"
 	"github.com/xraph/weave/store"
 )
 
@@ -145,7 +146,7 @@ func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilt
 
 	if filter != nil {
 		if filter.Search != "" {
-			q = q.Where("name ILIKE '%' || ? || '%'", filter.Search)
+			q = q.Where("name ILIKE '%' || ? || '%' ESCAPE '\\'", sqllike.Escape(filter.Search))
 		}
 		if filter.Limit > 0 {
 			q = q.Limit(filter.Limit)
@@ -171,7 +172,7 @@ func (s *Store) CountCollections(ctx context.Context, filter *collection.CountFi
 
 	if filter != nil {
 		if filter.Search != "" {
-			q = q.Where("name ILIKE '%' || ? || '%'", filter.Search)
+			q = q.Where("name ILIKE '%' || ? || '%' ESCAPE '\\'", sqllike.Escape(filter.Search))
 		}
 	}
 
@@ -258,7 +259,7 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 			q = q.Where("state = ?", string(filter.State))
 		}
 		if filter.Search != "" {
-			q = q.Where("title ILIKE '%' || ? || '%'", filter.Search)
+			q = q.Where("title ILIKE '%' || ? || '%' ESCAPE '\\'", sqllike.Escape(filter.Search))
 		}
 		if filter.Limit > 0 {
 			q = q.Limit(filter.Limit)
@@ -290,7 +291,7 @@ func (s *Store) CountDocuments(ctx context.Context, filter *document.CountFilter
 			q = q.Where("state = ?", string(filter.State))
 		}
 		if filter.Search != "" {
-			q = q.Where("title ILIKE '%' || ? || '%'", filter.Search)
+			q = q.Where("title ILIKE '%' || ? || '%' ESCAPE '\\'", sqllike.Escape(filter.Search))
 		}
 	}
 
