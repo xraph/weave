@@ -33,7 +33,7 @@ func TestManifest_Loads(t *testing.T) {
 func TestManifest_CommandInvalidates(t *testing.T) {
 	want := map[string][]string{
 		"collections.create":  {"collections.list", "system.overview"},
-		"collections.update":  {"collections.list", "collections.get"},
+		"collections.update":  {"collections.list", "collections.get", "documents.list", "documents.get", "system.overview"},
 		"collections.delete":  {"collections.list", "collections.get", "documents.list", "chunks.list", "system.overview"},
 		"collections.reindex": {"collections.get", "system.overview"},
 		"documents.ingest":    {"documents.list", "chunks.list", "collections.list", "collections.get", "system.overview"},

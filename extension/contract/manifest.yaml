@@ -25,7 +25,7 @@ intents:
   - { name: chunks.list,        kind: query, version: 1, capability: read }
   - { name: chunks.get,         kind: query, version: 1, capability: read }
   - { name: collections.create,  kind: command, version: 1, capability: write, invalidates: [collections.list, system.overview] }
-  - { name: collections.update,  kind: command, version: 1, capability: write, invalidates: [collections.list, collections.get] }
+  - { name: collections.update,  kind: command, version: 1, capability: write, invalidates: [collections.list, collections.get, documents.list, documents.get, system.overview] }
   - { name: collections.delete,  kind: command, version: 1, capability: write, invalidates: [collections.list, collections.get, documents.list, chunks.list, system.overview] }
   - { name: collections.reindex, kind: command, version: 1, capability: write, invalidates: [collections.get, system.overview] }
   - { name: documents.ingest,    kind: command, version: 1, capability: write, invalidates: [documents.list, chunks.list, collections.list, collections.get, system.overview] }
