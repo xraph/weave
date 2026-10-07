@@ -20,8 +20,9 @@ var (
 	ErrDuplicateDocument       = errors.New("weave: duplicate document (same content hash)")
 
 	// State errors.
-	ErrInvalidState = errors.New("weave: invalid state transition")
-	ErrEmptyContent = errors.New("weave: empty content")
+	ErrInvalidState    = errors.New("weave: invalid state transition")
+	ErrEmptyContent    = errors.New("weave: empty content")
+	ErrInvalidArgument = errors.New("weave: invalid argument")
 
 	// Pipeline errors.
 	ErrNoEmbedder    = errors.New("weave: no embedder configured")

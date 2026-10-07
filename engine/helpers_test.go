@@ -73,7 +73,6 @@ func newRig(t *testing.T, extra ...rigOption) *testRig {
 	return r
 }
 
-//nolint:unused // used by the engine tests that follow
 func newTestEngine(t *testing.T, opts ...engine.Option) *engine.Engine {
 	t.Helper()
 	extra := make([]rigOption, len(opts))

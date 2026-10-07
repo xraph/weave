@@ -460,6 +460,10 @@ type RetrieveParams struct {
 	TopK         int     `json:"top_k"`
 	MinScore     float64 `json:"min_score"`
 	Strategy     string  `json:"strategy,omitempty"`
+	// TenantFilter, when set, restricts retrieval to exactly this tenant,
+	// "" included, and wins over the context tenant. It is sent as a
+	// metadata filter because every vector store ignores an empty TenantKey.
+	TenantFilter *string `json:"-"`
 }
 
 // WithCollection restricts retrieval to a specific collection.
@@ -485,6 +489,12 @@ func WithStrategy(strategy string) RetrieveOption {
 // WithTenantID explicitly sets the tenant for retrieval.
 func WithTenantID(tenantID string) RetrieveOption {
 	return func(p *RetrieveParams) { p.TenantID = tenantID }
+}
+
+// WithTenantFilter restricts retrieval to exactly one tenant. Unlike
+// WithTenantID, an empty string means "rows with no tenant", not "everyone".
+func WithTenantFilter(tenant string) RetrieveOption {
+	return func(p *RetrieveParams) { p.TenantFilter = &tenant }
 }
 
 // ScoredChunk is a chunk with its relevance score.
@@ -528,16 +538,23 @@ func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOpt
 }
 
 // searchScope builds the metadata filter and tenant key both search paths
-// send to the vector side.
-func searchScope(params *RetrieveParams) (filter map[string]string, tenantKey string) {
-	filter = map[string]string{}
+// send to the vector side. An explicit TenantFilter wins over the context
+// tenant and is always applied as an exact metadata match, because every
+// vector store treats an empty TenantKey as "no filter".
+func searchScope(params *RetrieveParams) (map[string]string, string) {
+	filter := map[string]string{}
 	if params.CollectionID != "" {
 		filter["collection_id"] = params.CollectionID
 	}
-	if params.TenantID != "" {
+	tenantKey := params.TenantID
+	switch {
+	case params.TenantFilter != nil:
+		filter["tenant_id"] = *params.TenantFilter
+		tenantKey = *params.TenantFilter
+	case params.TenantID != "":
 		filter["tenant_id"] = params.TenantID
 	}
-	return filter, params.TenantID
+	return filter, tenantKey
 }
 
 // retrieveRaw runs the configured retriever, or a plain vector search when
