@@ -159,6 +159,9 @@ func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilt
 		if filter.Search != "" {
 			q = q.Filter(bson.M{"name": containsCI(filter.Search)})
 		}
+		if filter.Tenant != nil {
+			q = q.Filter(bson.M{"tenant_id": *filter.Tenant})
+		}
 		if filter.Limit > 0 {
 			q = q.Limit(int64(filter.Limit))
 		}
@@ -188,6 +191,9 @@ func (s *Store) CountCollections(ctx context.Context, filter *collection.CountFi
 	if filter != nil {
 		if filter.Search != "" {
 			q = q.Filter(bson.M{"name": containsCI(filter.Search)})
+		}
+		if filter.Tenant != nil {
+			q = q.Filter(bson.M{"tenant_id": *filter.Tenant})
 		}
 	}
 
@@ -275,6 +281,9 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 		if filter.Search != "" {
 			q = q.Filter(bson.M{"title": containsCI(filter.Search)})
 		}
+		if filter.Tenant != nil {
+			q = q.Filter(bson.M{"tenant_id": *filter.Tenant})
+		}
 		if filter.Limit > 0 {
 			q = q.Limit(int64(filter.Limit))
 		}
@@ -310,6 +319,12 @@ func (s *Store) CountDocuments(ctx context.Context, filter *document.CountFilter
 		}
 		if filter.Search != "" {
 			q = q.Filter(bson.M{"title": containsCI(filter.Search)})
+		}
+		if filter.Tenant != nil {
+			q = q.Filter(bson.M{"tenant_id": *filter.Tenant})
+		}
+		if !filter.UpdatedBefore.IsZero() {
+			q = q.Filter(bson.M{"updated_at": bson.M{"$lt": filter.UpdatedBefore.UTC()}})
 		}
 	}
 
@@ -418,6 +433,9 @@ func (s *Store) CountChunks(ctx context.Context, filter *chunk.CountFilter) (int
 		}
 		if filter.DocumentID.String() != "" {
 			q = q.Filter(bson.M{"document_id": filter.DocumentID.String()})
+		}
+		if filter.Tenant != nil {
+			q = q.Filter(bson.M{"tenant_id": *filter.Tenant})
 		}
 	}
 

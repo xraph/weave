@@ -155,8 +155,11 @@ func (s *Store) ListCollections(_ context.Context, filter *collection.ListFilter
 
 	result := make([]*collection.Collection, 0, len(s.collections))
 	for _, col := range s.collections {
-		if filter != nil && filter.Search != "" {
-			if !strings.Contains(strings.ToLower(col.Name), strings.ToLower(filter.Search)) {
+		if filter != nil {
+			if filter.Search != "" && !strings.Contains(strings.ToLower(col.Name), strings.ToLower(filter.Search)) {
+				continue
+			}
+			if filter.Tenant != nil && col.TenantID != *filter.Tenant {
 				continue
 			}
 		}
@@ -200,6 +203,9 @@ func (s *Store) CountCollections(_ context.Context, filter *collection.CountFilt
 	for _, col := range s.collections {
 		if filter != nil {
 			if filter.Search != "" && !strings.Contains(strings.ToLower(col.Name), strings.ToLower(filter.Search)) {
+				continue
+			}
+			if filter.Tenant != nil && col.TenantID != *filter.Tenant {
 				continue
 			}
 		}
@@ -300,6 +306,9 @@ func (s *Store) ListDocuments(_ context.Context, filter *document.ListFilter) ([
 			if filter.Search != "" && !strings.Contains(strings.ToLower(doc.Title), strings.ToLower(filter.Search)) {
 				continue
 			}
+			if filter.Tenant != nil && doc.TenantID != *filter.Tenant {
+				continue
+			}
 		}
 		result = append(result, doc)
 	}
@@ -347,6 +356,12 @@ func (s *Store) CountDocuments(_ context.Context, filter *document.CountFilter) 
 				continue
 			}
 			if filter.Search != "" && !strings.Contains(strings.ToLower(doc.Title), strings.ToLower(filter.Search)) {
+				continue
+			}
+			if filter.Tenant != nil && doc.TenantID != *filter.Tenant {
+				continue
+			}
+			if !filter.UpdatedBefore.IsZero() && !doc.UpdatedAt.Before(filter.UpdatedBefore) {
 				continue
 			}
 		}
@@ -462,6 +477,9 @@ func (s *Store) CountChunks(_ context.Context, filter *chunk.CountFilter) (int64
 				continue
 			}
 			if filter.DocumentID.String() != "" && ch.DocumentID.String() != filter.DocumentID.String() {
+				continue
+			}
+			if filter.Tenant != nil && ch.TenantID != *filter.Tenant {
 				continue
 			}
 		}

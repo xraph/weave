@@ -2,6 +2,7 @@ package document
 
 import (
 	"context"
+	"time"
 
 	"github.com/xraph/weave/id"
 )
@@ -21,6 +22,9 @@ type ListFilter struct {
 	// SortDesc lists newest first. The default is oldest first, which API
 	// clients paging by offset already depend on.
 	SortDesc bool
+	// Tenant filters by tenant. Nil means every tenant. A non-nil value is
+	// an exact match, so a pointer to "" means rows written with no tenant.
+	Tenant *string
 }
 
 // CountFilter controls filtering for document count queries.
@@ -31,6 +35,12 @@ type CountFilter struct {
 	State State
 	// Search filters by title, matched exactly as ListFilter.Search.
 	Search string
+	// Tenant filters by tenant. Nil means every tenant. A non-nil value is
+	// an exact match, so a pointer to "" means rows written with no tenant.
+	Tenant *string
+	// UpdatedBefore counts only documents last updated before this instant.
+	// Zero means no filter.
+	UpdatedBefore time.Time
 }
 
 // Store defines the persistence contract for documents.

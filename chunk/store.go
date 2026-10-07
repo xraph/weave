@@ -12,6 +12,9 @@ type CountFilter struct {
 	CollectionID id.CollectionID
 	// DocumentID filters by document. Empty means all documents.
 	DocumentID id.DocumentID
+	// Tenant filters by tenant. Nil means every tenant. A non-nil value is
+	// an exact match, so a pointer to "" means rows written with no tenant.
+	Tenant *string
 }
 
 // Store defines the persistence contract for chunks.

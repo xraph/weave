@@ -21,4 +21,6 @@ func Run(t *testing.T, open Opener) {
 	t.Run("Filters", func(t *testing.T) { testFilters(t, open(t)) })
 	t.Run("Ordering", func(t *testing.T) { testOrdering(t, open(t)) })
 	t.Run("Duplicates", func(t *testing.T) { testDuplicates(t, open(t)) })
+	t.Run("Tenancy", func(t *testing.T) { testTenancy(t, open(t)) })
+	t.Run("Stalled", func(t *testing.T) { testStalled(t, open(t)) })
 }

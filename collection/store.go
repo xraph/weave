@@ -17,12 +17,18 @@ type ListFilter struct {
 	// SortDesc lists newest first. The default is oldest first, which API
 	// clients paging by offset already depend on.
 	SortDesc bool
+	// Tenant filters by tenant. Nil means every tenant. A non-nil value is
+	// an exact match, so a pointer to "" means rows written with no tenant.
+	Tenant *string
 }
 
 // CountFilter controls filtering for collection count queries.
 type CountFilter struct {
 	// Search filters collections by name (case-insensitive substring match).
 	Search string
+	// Tenant filters by tenant. Nil means every tenant. A non-nil value is
+	// an exact match, so a pointer to "" means rows written with no tenant.
+	Tenant *string
 }
 
 // Store defines the persistence contract for collections.
