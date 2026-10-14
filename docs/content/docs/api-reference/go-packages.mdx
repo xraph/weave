@@ -3,52 +3,42 @@ title: Go Packages
 description: Quick reference for all Weave Go packages and their public APIs.
 ---
 
-All Weave packages are importable from `github.com/xraph/weave`.
+Everything lives in the one module, `github.com/xraph/weave`. The full API is on [pkg.go.dev](https://pkg.go.dev/github.com/xraph/weave).
 
 ## Core packages
 
 ### `github.com/xraph/weave`
 
-Root package. Exports context helpers, error constants, and shared types.
-
 | Export | Description |
 |--------|-------------|
-| `WithTenant(ctx, id)` | Inject tenant ID into context |
-| `WithApp(ctx, id)` | Inject app ID into context |
-| `TenantFromContext(ctx)` | Read tenant ID from context |
-| `AppFromContext(ctx)` | Read app ID from context |
-| `Config` | Engine configuration struct |
-| `DefaultConfig()` | Returns default Config values |
-| `ErrNoStore`, `ErrNoEmbedder`, `ErrNoVectorStore`, `ErrNoChunker` | Missing-component errors |
-| `ErrEmptyContent`, `ErrInvalidInput` | Input validation errors |
+| `WithTenant(ctx, t)`, `WithApp(ctx, a)` | Put the tenant or app on a context |
+| `TenantFromContext(ctx)`, `AppFromContext(ctx)` | Read them back (empty when unset) |
+| `Config`, `DefaultConfig()` | Engine defaults |
+| `ErrNoStore`, `ErrNoVectorStore`, `ErrNoEmbedder`, `ErrNoChunker` | A required component isn't configured |
+| `ErrCollectionNotFound`, `ErrDocumentNotFound`, `ErrChunkNotFound` | Lookups that found nothing |
+| `ErrCollectionAlreadyExists`, `ErrDuplicateDocument` | Name or content conflicts |
+| `ErrEmptyContent`, `ErrMigrationFailed` | Ingest with no content, a failed store migration |
+| `ScoreKind`, `ComponentInfo`, `Describer` | How components describe themselves and their scores |
+
+[Error handling](/docs/concepts/errors) lists every sentinel.
 
 ### `github.com/xraph/weave/engine`
-
-The central Engine and all ingestion/retrieval operations.
 
 | Export | Description |
 |--------|-------------|
 | `New(...Option) (*Engine, error)` | Create an engine |
-| `Engine.CreateCollection` | Create a collection |
-| `Engine.GetCollection` | Get collection by ID |
-| `Engine.GetCollectionByName` | Get collection by name |
-| `Engine.ListCollections` | List collections |
-| `Engine.DeleteCollection` | Delete collection and all contents |
-| `Engine.CollectionStats` | Aggregate stats for a collection |
-| `Engine.Ingest` | Ingest a single document |
-| `Engine.IngestBatch` | Ingest multiple documents |
-| `Engine.GetDocument` | Get document by ID |
-| `Engine.ListDocuments` | List documents |
-| `Engine.DeleteDocument` | Delete document and chunks |
-| `Engine.Retrieve` | Semantic retrieval |
-| `Engine.HybridSearch` | Cross-collection search |
-| `Engine.ReindexCollection` | Re-embed all chunks |
-| `Engine.Stop` | Graceful shutdown |
-| `IngestInput` | Input struct for Ingest |
-| `IngestResult` | Output struct from Ingest |
-| `ScoredChunk` | Retrieved chunk with score |
-| `RetrieveOption` | Functional option for Retrieve |
-| `WithCollection`, `WithTopK`, `WithMinScore`, `WithStrategy`, `WithTenantID` | Retrieve options |
+| `WithStore`, `WithVectorStore`, `WithEmbedder`, `WithChunker`, `WithLoader`, `WithRetriever`, `WithExtension`, `WithLogger`, `WithConfig` | Engine options |
+| `Engine.CreateCollection`, `GetCollection`, `GetCollectionByName`, `ListCollections`, `CountCollections`, `UpdateCollection`, `DeleteCollection`, `CollectionStats` | Collections |
+| `Engine.Ingest`, `IngestBatch` | Ingestion |
+| `Engine.GetDocument`, `ListDocuments`, `CountDocuments`, `DeleteDocument` | Documents |
+| `Engine.GetChunk`, `ListChunks`, `CountChunks` | Chunks (`ListChunks` needs a document or collection ID) |
+| `Engine.Retrieve`, `HybridSearch`, `RetrieveCompare` | Retrieval |
+| `Engine.Assemble`, `AssembleRefs` | Context assembly |
+| `Engine.ReindexCollection` | Re-embed a collection |
+| `Engine.Components`, `DescribeExtensions`, `Config`, `Store`, `Logger`, `Extensions` | Introspection |
+| `Engine.Start`, `Stop`, `Health` | Lifecycle. `Start` does nothing yet; `Stop` fires `OnShutdown` and closes the store. |
+| `WithCollection`, `WithTopK`, `WithMinScore`, `WithTenantID`, `WithTenantFilter`, `WithStrategy` | Retrieve options (`WithStrategy` is ignored) |
+| `IngestInput`, `IngestResult`, `ScoredChunk`, `HybridSearchParams`, `AssembleParams`, `AssembledContext`, `CollectionUpdate`, `CompareParams`, `CompareResult` | Parameter and result types |
 
 ## Interface packages
 
@@ -84,14 +74,18 @@ type Loader interface {
 type Retriever interface {
     Retrieve(ctx context.Context, query string, opts *Options) ([]Result, error)
 }
+
+type Reranker interface {
+    Rerank(ctx context.Context, query string, documents []string) ([]float64, error)
+}
 ```
 
 ### `github.com/xraph/weave/store`
 
 ```go
 type Store interface {
-    collection.Store
     document.Store
+    collection.Store
     chunk.Store
     Migrate(ctx context.Context) error
     Ping(ctx context.Context) error
@@ -112,9 +106,9 @@ type VectorStore interface {
 
 ## Extension packages
 
-### `github.com/xraph/weave/ext`
+### `github.com/xraph/weave/ext` and `github.com/xraph/weave/plugins`
 
-All lifecycle hook interfaces: `CollectionCreated`, `CollectionDeleted`, `IngestStarted`, `IngestChunked`, `IngestEmbedded`, `IngestCompleted`, `IngestFailed`, `RetrievalStarted`, `RetrievalCompleted`, `RetrievalFailed`, `DocumentDeleted`, `ReindexStarted`, `ReindexCompleted`, `Shutdown`.
+The same lifecycle hook interfaces in both: `Extension`, `CollectionCreated`, `CollectionDeleted`, `IngestStarted`, `IngestChunked`, `IngestEmbedded`, `IngestCompleted`, `IngestFailed`, `RetrievalStarted`, `RetrievalCompleted`, `RetrievalFailed`, `DocumentDeleted`, `ReindexStarted`, `ReindexCompleted`, `Shutdown`. Each also has a `Registry`.
 
 ### `github.com/xraph/weave/observability`
 
@@ -123,57 +117,86 @@ func NewMetricsExtension() *MetricsExtension
 func NewMetricsExtensionWithFactory(factory gu.MetricFactory) *MetricsExtension
 ```
 
+### `github.com/xraph/weave/audit_hook` (package `audithook`)
+
+```go
+func New(r Recorder, opts ...Option) *Extension
+func WithActions(actions ...string) Option
+func WithLogger(l log.Logger) Option
+```
+
+### `github.com/xraph/weave/extension`
+
+```go
+func New(opts ...ExtOption) *Extension
+func (e *Extension) Engine() *engine.Engine
+func (e *Extension) API() *api.API
+func (e *Extension) Handler() http.Handler
+```
+
+Options: `WithStore`, `WithVectorStore`, `WithEngineOption`, `WithExtension`, `WithConfig`, `WithBasePath`, `WithDisableRoutes`, `WithDisableMigrate`, `WithGroveDatabase`, `WithRequireConfig`.
+
+### `github.com/xraph/weave/api`
+
+```go
+func New(eng *engine.Engine, router forge.Router) *API
+func (a *API) RegisterRoutes(router forge.Router)
+func (a *API) Handler() http.Handler
+```
+
 ## Assembler
 
 ### `github.com/xraph/weave/assembler`
 
 ```go
-func New(...Option) *Assembler
-func (a *Assembler) Assemble(ctx, []retriever.Result) (*AssembleResult, error)
+func New(opts ...Option) *Assembler
+func (a *Assembler) Assemble(ctx context.Context, results []retriever.Result) (*AssembleResult, error)
 func AssembleSimple(results []retriever.Result) string
+func WithMaxTokens(limit int) Option
+func WithTemplate(t *Template) Option
+func WithTokenCounter(tc TokenCounter) Option
+func DefaultTemplate() *Template
 ```
 
 ## Implementations
 
-| Package | Implements | Notes |
-|---------|-----------|-------|
-| `store/memory` | `store.Store` | In-memory, for tests |
-| `store/postgres` | `store.Store` | PostgreSQL via bun |
-| `store/sqlite` | `store.Store` | SQLite via bun |
-| `vectorstore/memory` | `vectorstore.VectorStore` | Brute-force cosine similarity |
-| `vectorstore/pgvector` | `vectorstore.VectorStore` | PostgreSQL + pgvector |
-| `chunker/recursive` | `chunker.Chunker` | Default — splits on paragraph/sentence/word |
-| `chunker/fixed` | `chunker.Chunker` | Fixed token-size chunks |
-| `chunker/sliding` | `chunker.Chunker` | Sliding window |
-| `chunker/semantic` | `chunker.Chunker` | Topic-coherent groups |
-| `chunker/code` | `chunker.Chunker` | Function/class boundary splits |
-| `embedder/openai` | `embedder.Embedder` | OpenAI text-embedding-* models |
-| `embedder/local` | `embedder.Embedder` | Local model wrapper |
-| `retriever/similarity` | `retriever.Retriever` | Cosine similarity |
-| `retriever/mmr` | `retriever.Retriever` | Maximal Marginal Relevance |
-| `retriever/hybrid` | `retriever.Retriever` | Dense + keyword |
-| `retriever/reranker` | `retriever.Retriever` | Two-stage cross-encoder |
-| `loader/text` | `loader.Loader` | Plain text |
-| `loader/markdown` | `loader.Loader` | Markdown |
-| `loader/html` | `loader.Loader` | HTML |
-| `loader/csv` | `loader.Loader` | CSV |
-| `loader/json` | `loader.Loader` | JSON |
-| `loader/url` | `loader.Loader` | Fetches URL |
-| `loader/directory` | `loader.Loader` | Recursive directory |
-| `extension` | `forge.Extension` | Forge integration |
+| Constructor | Implements | Notes |
+|-------------|-----------|-------|
+| `store/memory.New()` | `store.Store` | In memory |
+| `store/postgres.New(db *grove.DB)` | `store.Store` | PostgreSQL on Grove |
+| `store/sqlite.New(db *grove.DB)` | `store.Store` | SQLite on Grove |
+| `store/mongo.New(db *grove.DB)` | `store.Store` | MongoDB on Grove |
+| `vectorstore/memory.New()` | `vectorstore.VectorStore` | Brute-force cosine similarity |
+| `vectorstore/pgvector.New(db, opts...)` | `vectorstore.VectorStore` | PostgreSQL with pgvector; you create the table |
+| `vectorstore/fabriq.New(vq, opts...)` | `vectorstore.VectorStore` | Fabriq vector plane (package `fabriqvec`) |
+| `chunker.NewRecursiveChunker()` | `chunker.Chunker` | Separator-based |
+| `chunker.NewFixedChunker()` | `chunker.Chunker` | Fixed character windows |
+| `chunker.NewSlidingChunker()` | `chunker.Chunker` | Sliding window |
+| `chunker.NewSemanticChunker()` | `chunker.Chunker` | Sentence groups |
+| `chunker.NewCodeChunker()` | `chunker.Chunker` | Code block boundaries |
+| `embedder.NewOpenAIEmbedder(apiKey, opts...)` | `embedder.Embedder` | OpenAI or any compatible endpoint |
+| `embedder.NewLocalEmbedder(dims)` | `embedder.Embedder` | Placeholder, returns `ErrNotImplemented` |
+| `retriever.NewSimilarityRetriever(vs, emb, store)` | `retriever.Retriever` | Plain vector search |
+| `retriever.NewMMRRetriever(vs, emb, lambda)` | `retriever.Retriever` | Maximal Marginal Relevance |
+| `retriever.NewHybridRetriever(retrievers...)` | `retriever.Retriever` | Reciprocal Rank Fusion of other retrievers |
+| `retriever.NewRerankerRetriever(base, reranker)` | `retriever.Retriever` | Reorders with your `Reranker` |
+| `loader.NewTextLoader()`, `NewMarkdownLoader()`, `NewHTMLLoader()`, `NewCSVLoader()`, `NewJSONLoader(fields...)` | `loader.Loader` | Format loaders |
+| `loader.NewURLLoader(delegate)` | none | Call `LoadURL`; not a `loader.Loader` |
+| `loader.NewDirectoryLoader(loaders...)` | `loader.Loader` | Call `LoadDir`; `Supports` is always false |
+| `extension.New(opts...)` | `forge.Extension` | Forge integration |
 
 ## ID package
 
 ### `github.com/xraph/weave/id`
 
 ```go
-func NewCollectionID() CollectionID
-func NewDocumentID() DocumentID
-func NewChunkID() ChunkID
+func NewCollectionID() ID
+func NewDocumentID() ID
+func NewChunkID() ID
 
-func ParseCollectionID(s string) (CollectionID, error)
-func ParseDocumentID(s string) (DocumentID, error)
-func ParseChunkID(s string) (ChunkID, error)
+func ParseCollectionID(s string) (ID, error)
+func ParseDocumentID(s string) (ID, error)
+func ParseChunkID(s string) (ID, error)
 ```
 
-All IDs implement `String() string` and are based on TypeID (UUIDv7, K-sortable).
+`CollectionID`, `DocumentID` and `ChunkID` are aliases for `ID`, so the compiler won't stop you mixing them up; the `Parse*ID` functions check the prefix. See [identity](/docs/concepts/identity).

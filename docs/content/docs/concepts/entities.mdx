@@ -1,112 +1,129 @@
 ---
 title: Entities
-description: The core data types in Weave — Collection, Document, and Chunk.
+description: The core data types in Weave, Collection, Document and Chunk.
 ---
 
-Weave operates on three primary entities. All entities embed a `BaseEntity` with `CreatedAt` and `UpdatedAt` timestamps.
+Weave works with three entities. Collections and documents embed `weave.Entity`, which holds `CreatedAt` and `UpdatedAt`. Chunks have only `CreatedAt`.
 
 ## Collection
 
-A collection is a named container for documents with shared embedding and chunking configuration.
+A collection is a named group of documents that share chunk settings.
 
 ```go
+// package collection
 type Collection struct {
-    ID             string            // TypeID prefix: col_
-    TenantID       string
-    AppID          string
+    weave.Entity
+
+    ID             id.CollectionID   // col_...
     Name           string
     Description    string
-    EmbeddingModel string            // e.g. "text-embedding-3-small"
-    EmbeddingDims  int               // e.g. 1536
-    ChunkStrategy  string            // "recursive" or "fixed"
-    ChunkSize      int               // tokens
-    ChunkOverlap   int               // tokens
-    Metadata       map[string]string // custom key-value pairs
-    DocumentCount  int               // denormalized counter
-    ChunkCount     int               // denormalized counter
-    CreatedAt      time.Time
-    UpdatedAt      time.Time
+    TenantID       string
+    AppID          string
+    EmbeddingModel string            // recorded, e.g. "text-embedding-3-small"
+    EmbeddingDims  int               // recorded, e.g. 1536
+    ChunkStrategy  string            // recorded, e.g. "recursive"
+    ChunkSize      int               // tokens, used by ingest
+    ChunkOverlap   int               // tokens, used by ingest
+    Metadata       map[string]string
+    DocumentCount  int64             // never updated, see below
+    ChunkCount     int64             // never updated, see below
 }
 ```
 
-Collections are scoped to a tenant — a collection ID from one tenant cannot be accessed by another tenant even if the caller knows the ID.
+`CreateCollection` sets the ID, takes `TenantID` and `AppID` from the context when they're empty, and fills zero chunk settings and an empty model or strategy from the engine config. It doesn't set `EmbeddingDims`.
+
+Names are unique per tenant. A second collection with the same name under the same tenant fails with `weave.ErrCollectionAlreadyExists`.
+
+Only `ChunkSize` and `ChunkOverlap` change how documents are processed. The model, dimensions and strategy are stored for your reference; the engine's embedder and chunker run regardless.
+
+`DocumentCount` and `ChunkCount` exist on the struct and in the tables but nothing updates them, so they stay at zero. Call `eng.CollectionStats(ctx, colID)` for live counts.
+
+`eng.UpdateCollection(ctx, colID, engine.CollectionUpdate{...})` changes `Name`, `Description` and `Metadata`. The chunk and embedding settings can't be changed after creation.
 
 ## Document
 
-A document represents a piece of content ingested into a collection. It tracks the ingestion lifecycle through a state machine.
+A document is one piece of content ingested into a collection. Its `State` follows the ingest.
 
 ```go
+// package document
 type Document struct {
-    ID            string            // TypeID prefix: doc_
-    CollectionID  string
+    weave.Entity
+
+    ID            id.DocumentID     // doc_...
+    CollectionID  id.CollectionID
     TenantID      string
-    AppID         string
     Title         string
-    Source        string            // filename, URL, or identifier
-    SourceType    string            // MIME type hint
-    ContentHash   string            // SHA-256 of raw content
-    ContentLength int64             // bytes
-    ChunkCount    int               // number of chunks created
-    State         string            // pending | processing | ready | failed
-    Error         string            // set on State=failed
+    Source        string            // file name, URL or identifier
+    SourceType    string            // MIME type
+    ContentHash   string            // hex SHA-256 of the raw content
+    ContentLength int               // bytes
+    ChunkCount    int
     Metadata      map[string]string
-    CreatedAt     time.Time
-    UpdatedAt     time.Time
+    State         document.State    // pending | processing | ready | failed
+    Error         string            // set when State is failed
 }
 ```
 
+Documents carry a tenant but no app ID. The document doesn't keep the content itself; the chunks do.
+
 ### Document states
 
-| State | Description |
-|-------|-------------|
-| `pending` | Document created, awaiting processing |
-| `processing` | Currently being chunked and embedded |
+| State | Meaning |
+|-------|---------|
+| `pending` | Created, not yet processed |
+| `processing` | Being loaded, chunked and embedded |
 | `ready` | Fully processed and searchable |
-| `failed` | Ingestion failed; `Error` field contains reason |
+| `failed` | Ingestion failed; `Error` says why |
 
-Documents transition `pending → processing → ready` on success, or `pending → processing → failed` on error. The `ContentHash` (SHA-256 of the raw content) enables deduplication detection — Weave does not automatically deduplicate, but you can check hashes.
+On success a document goes `pending`, `processing`, `ready`. On a failure after it was created, it ends up `failed` and stays in the store until you delete it.
+
+`ContentHash` is unique per collection. Ingesting the same content into the same collection again fails with `weave.ErrDuplicateDocument`, and that includes content whose earlier ingest failed.
 
 ## Chunk
 
-A chunk is a text fragment created from a document during ingestion. Chunks are the unit of vector storage and semantic retrieval.
+A chunk is a piece of a document's text. Chunks are what gets embedded, stored as vectors and retrieved.
 
 ```go
+// package chunk
 type Chunk struct {
-    ID           string            // TypeID prefix: chunk_
-    DocumentID   string
-    CollectionID string
+    ID           id.ChunkID        // chk_...
+    DocumentID   id.DocumentID
+    CollectionID id.CollectionID
     TenantID     string
-    AppID        string
-    Content      string            // the chunk text
+    Content      string
     Index        int               // position within the document
-    StartOffset  int               // byte offset in original content
-    EndOffset    int               // byte offset in original content
-    TokenCount   int               // number of tokens in chunk
-    ParentID     string            // parent chunk ID (hierarchical chunking)
-    Metadata     map[string]string
+    StartOffset  int               // byte offset in the loaded text
+    EndOffset    int
+    TokenCount   int               // estimate
+    Metadata     map[string]string // from the chunker
+    ParentID     string            // not set by the built-in chunkers
     CreatedAt    time.Time
 }
 ```
 
-Chunks are immutable after creation. To update a document's chunks, delete the document and re-ingest. To change the embedding model, use `engine.Reindex(ctx, collectionID)`.
+Each chunk's vector has the same ID as the chunk, which is how retrieval maps a vector hit back to its row. Chunks aren't edited after creation. To change a document's chunks, delete the document and ingest it again. To change only the vectors, call `eng.ReindexCollection(ctx, colID)`.
 
 ## ScoredChunk
 
-`engine.Retrieve` returns `[]weave.ScoredChunk`, which wraps a `Chunk` with a relevance score:
+`Retrieve` and `HybridSearch` return `[]engine.ScoredChunk`:
 
 ```go
 type ScoredChunk struct {
-    Chunk
-    Score float32 // cosine similarity score, range 0–1
+    Chunk    *chunk.Chunk
+    Score    float64
+    Hydrated bool // Chunk was read back from the metadata store
+    Orphaned bool // the vector exists, the chunk row doesn't
 }
 ```
 
-Results are sorted by `Score` descending. Use `RetrieveInput.MinScore` to filter out low-confidence results:
+Hits are sorted best first. Filter weak ones with `engine.WithMinScore`:
 
 ```go
-results, _ := engine.Retrieve(ctx, col.ID, &weave.RetrieveInput{
-    Query:    "refund timeline",
-    TopK:     10,
-    MinScore: 0.75, // only return chunks with score >= 0.75
-})
+hits, err := eng.Retrieve(ctx, "refund timeline",
+    engine.WithCollection(colID),
+    engine.WithTopK(10),
+    engine.WithMinScore(0.3),
+)
 ```
+
+With the in-memory and pgvector stores the score is cosine similarity. Other retrievers produce other scores, see [semantic retrieval](/docs/subsystems/retrieval#scoredchunk).

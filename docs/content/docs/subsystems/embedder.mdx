@@ -1,0 +1,102 @@
+---
+title: Embedder
+description: The Embedder interface and built-in implementations for generating vector embeddings.
+---
+
+The embedder turns text into vectors. The engine calls it during ingestion (once per document, with every chunk's text) and during retrieval (with the query), plus once per document on a reindex.
+
+## Embedder interface
+
+```go
+// package embedder
+type Embedder interface {
+    // Embed generates embeddings for a batch of texts.
+    Embed(ctx context.Context, texts []string) ([]EmbedResult, error)
+
+    // Dimensions returns the vector dimensionality.
+    Dimensions() int
+}
+
+type EmbedResult struct {
+    Vector     []float32 `json:"vector"`
+    TokenCount int       `json:"token_count"`
+}
+```
+
+Set it with `engine.WithEmbedder(e)`. Without one, `Ingest` and `ReindexCollection` return `weave.ErrNoEmbedder`, and `Retrieve` fails unless you configured a retriever.
+
+## OpenAI embedder
+
+```go
+import "github.com/xraph/weave/embedder"
+
+emb := embedder.NewOpenAIEmbedder(os.Getenv("OPENAI_API_KEY"))
+// model text-embedding-3-small, emb.Dimensions() == 1536
+```
+
+`NewOpenAIEmbedder(apiKey string, opts ...OpenAIOption)` posts to `{baseURL}/v1/embeddings`. Its options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `WithOpenAIModel(model)` | `text-embedding-3-small` | Model name sent with each request |
+| `WithOpenAIDimensions(n)` | `1536` | What `Dimensions()` reports |
+| `WithOpenAIBaseURL(url)` | `https://api.openai.com` | Base URL, without `/v1` |
+| `WithOpenAIClient(c)` | `http.DefaultClient` | HTTP client |
+
+`WithOpenAIDimensions` isn't sent to the API. It only sets what `Dimensions()` returns, so when you change the model, set it to that model's real output size:
+
+```go
+emb := embedder.NewOpenAIEmbedder(
+    apiKey,
+    embedder.WithOpenAIModel("text-embedding-3-large"),
+    embedder.WithOpenAIDimensions(3072),
+)
+```
+
+Any server that speaks the OpenAI embeddings API works through the base URL, for example a local Ollama:
+
+```go
+emb := embedder.NewOpenAIEmbedder(
+    "unused",
+    embedder.WithOpenAIBaseURL("http://localhost:11434"),
+    embedder.WithOpenAIModel("nomic-embed-text"),
+    embedder.WithOpenAIDimensions(768),
+)
+```
+
+The whole batch goes out in one request, so very large documents can hit the provider's input limits. `TokenCount` on each result is the response's total token usage split evenly across the inputs.
+
+## Local embedder
+
+`embedder.NewLocalEmbedder(dimensions int)` exists, but it's a placeholder. Every `Embed` call returns `embedder.ErrNotImplemented`. Until a local model lands, run an OpenAI-compatible server and use the OpenAI embedder against it, or write your own `Embedder`.
+
+## Matching the embedder to the collection
+
+A collection's `EmbeddingModel` and `EmbeddingDims` are stored for your reference. They don't pick or configure the embedder: every collection on an engine is embedded by that engine's one embedder. Keep the embedder, the recorded model and your vector column's dimension in step yourself.
+
+If you switch models, call `eng.ReindexCollection(ctx, colID)` to re-embed every chunk of the collection's `ready` documents with the engine's current embedder.
+
+## Custom embedder
+
+```go
+type MyEmbedder struct {
+    client myMLClient
+    dims   int
+}
+
+func (e *MyEmbedder) Embed(ctx context.Context, texts []string) ([]embedder.EmbedResult, error) {
+    vecs, err := e.client.Embed(ctx, texts)
+    if err != nil {
+        return nil, err
+    }
+    results := make([]embedder.EmbedResult, len(vecs))
+    for i, v := range vecs {
+        results[i] = embedder.EmbedResult{Vector: v}
+    }
+    return results, nil
+}
+
+func (e *MyEmbedder) Dimensions() int { return e.dims }
+```
+
+Return exactly one result per input, in input order. The engine pairs `results[i]` with chunk `i`, and a short slice makes ingest panic on the index.

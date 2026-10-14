@@ -5,164 +5,199 @@ description: Install Weave and ingest your first document in under five minutes.
 
 ## Prerequisites
 
-- Go 1.24 or later
+- Go 1.26 or later
 - A Go module (`go mod init`)
+- An OpenAI API key, or any OpenAI-compatible embeddings endpoint
 
 ## Install
 
 ```bash
-go get github.com/xraph/weave
+go get github.com/xraph/weave@latest
 ```
 
 ## Step 1: Create the engine
 
-Every Weave instance requires a metadata store, a vector store, and an embedder. For development, use the built-in in-memory implementations:
+The engine needs four things before it can ingest: a metadata store, a vector store, an embedder and a chunker. Nothing is filled in for you. If one is missing, `Ingest` returns `weave.ErrNoStore`, `ErrNoVectorStore`, `ErrNoEmbedder` or `ErrNoChunker`.
+
+For development, use the in-memory stores:
 
 ```go
 package main
 
 import (
     "context"
+    "fmt"
     "log"
+    "os"
 
     "github.com/xraph/weave"
-    memstore "github.com/xraph/weave/store/memory"
-    memvec "github.com/xraph/weave/vectorstore/memory"
+    "github.com/xraph/weave/chunker"
+    "github.com/xraph/weave/collection"
+    "github.com/xraph/weave/embedder"
+    "github.com/xraph/weave/engine"
+    "github.com/xraph/weave/store/memory"
+    vsmemory "github.com/xraph/weave/vectorstore/memory"
 )
 
 func main() {
     ctx := context.Background()
 
-    engine, err := weave.NewEngine(
-        weave.WithStore(memstore.New()),
-        weave.WithVectorStore(memvec.New()),
-        weave.WithEmbedder(myEmbedder), // implement weave.Embedder
+    eng, err := engine.New(
+        engine.WithStore(memory.New()),
+        engine.WithVectorStore(vsmemory.New()),
+        engine.WithEmbedder(embedder.NewOpenAIEmbedder(os.Getenv("OPENAI_API_KEY"))),
+        engine.WithChunker(chunker.NewRecursiveChunker()),
     )
     if err != nil {
         log.Fatal(err)
     }
-    _ = engine
+    defer eng.Stop(ctx)
+
+    // Steps 2 to 6 go here.
 }
 ```
 
-## Step 2: Set up a scoped context
+`NewOpenAIEmbedder` uses `text-embedding-3-small` unless you pass `embedder.WithOpenAIModel`. Point it at another OpenAI-compatible server with `embedder.WithOpenAIBaseURL`.
 
-Weave extracts the tenant ID and app ID from the context and stamps them onto every collection, document, and chunk:
+## Step 2: Put a tenant on the context
 
 ```go
-ctx = weave.WithTenant(ctx, "tenant-1")
-ctx = weave.WithApp(ctx, "myapp")
+ctx = weave.WithTenant(ctx, "acme")
+ctx = weave.WithApp(ctx, "support-bot")
 ```
 
-`WithTenant` is required for multi-tenant isolation. All ingestion and retrieval operations are automatically scoped — cross-tenant access is structurally impossible.
+This is optional. When it's there, `CreateCollection` records the tenant and app on the collection, `Ingest` stamps the tenant on the document and its chunks, and `Retrieve` only searches vectors with that tenant. Reads by ID and list calls don't check it, so read [multi-tenancy](/docs/concepts/multi-tenancy) before you rely on it for isolation.
 
 ## Step 3: Create a collection
 
-A collection holds documents with shared chunking and embedding configuration:
+A collection holds documents that share chunk settings:
 
 ```go
-col, err := engine.CreateCollection(ctx, weave.CreateCollectionInput{
-    Name:          "product-docs",
-    EmbeddingModel: "text-embedding-3-small",
-    ChunkStrategy: "recursive",
-    ChunkSize:     512,
-    ChunkOverlap:  50,
-})
-if err != nil {
+col := &collection.Collection{
+    Name:         "handbook",
+    ChunkSize:    256,
+    ChunkOverlap: 32,
+}
+if err := eng.CreateCollection(ctx, col); err != nil {
     log.Fatal(err)
 }
-fmt.Println("created collection:", col.ID)
+fmt.Println("created collection", col.ID)
 ```
+
+`CreateCollection` fills in the ID (`col_...`) and, for any field you leave at zero, the engine defaults: chunk size 512, overlap 50, strategy `recursive` and embedding model `text-embedding-3-small`. The model and strategy are only recorded. The embedder and chunker you passed to `engine.New` are what actually run. A second collection with the same name under the same tenant fails with `weave.ErrCollectionAlreadyExists`.
 
 ## Step 4: Ingest a document
 
 ```go
-doc, err := engine.Ingest(ctx, col.ID, weave.IngestInput{
-    Title:   "Return Policy",
-    Content: "Our return policy allows returns within 30 days of purchase...",
-    Source:  "faq.md",
+res, err := eng.Ingest(ctx, &engine.IngestInput{
+    CollectionID: col.ID,
+    Title:        "Leave policy",
+    Source:       "handbook/leave.md",
+    Content: "Full-time staff get 25 days of paid leave a year. " +
+        "Unused days carry over until the end of March. " +
+        "Requests longer than two weeks need approval from your manager.",
 })
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("state=%s chunks=%d\n", doc.State, doc.ChunkCount)
-// state=ready chunks=4
+fmt.Printf("ingested %s: state=%s chunks=%d\n", res.DocumentID, res.State, res.ChunkCount)
 ```
 
-Ingest runs the full pipeline: chunk the content, generate embeddings, persist metadata, and upsert vectors. When it returns, `doc.State` is `"ready"`.
+`Ingest` is synchronous. It chunks the content with the collection's size and overlap, embeds every chunk in one call, writes the chunks to the metadata store and the vectors to the vector store, then marks the document `ready`. Ingesting the same content into the same collection a second time fails with `weave.ErrDuplicateDocument`.
 
 ## Step 5: Retrieve relevant chunks
 
 ```go
-import "github.com/xraph/weave"
-
-results, err := engine.Retrieve(ctx, col.ID, &weave.RetrieveInput{
-    Query:    "How long can I return items?",
-    TopK:     3,
-    MinScore: 0.7,
-})
+hits, err := eng.Retrieve(ctx, "How many vacation days do I get?",
+    engine.WithCollection(col.ID),
+    engine.WithTopK(3),
+)
 if err != nil {
     log.Fatal(err)
 }
-for _, r := range results {
-    fmt.Printf("[%.2f] %s\n", r.Score, r.Content[:80])
+for _, h := range hits {
+    fmt.Printf("[%.2f] %s\n", h.Score, h.Chunk.Content)
 }
 ```
 
-Results are `[]weave.ScoredChunk` sorted by relevance score descending. Available fields:
+You get `[]engine.ScoredChunk`, best first. Each hit has:
 
-| Field | Description |
-|-------|-------------|
-| `r.Score` | Relevance score (0–1) |
-| `r.Content` | Chunk text content |
-| `r.DocumentID` | Source document TypeID |
-| `r.Metadata` | Custom metadata map |
-| `r.Index` | Chunk position in document |
+| Field | What it holds |
+|-------|---------------|
+| `Chunk` | The `*chunk.Chunk`, read back from the metadata store: `Content`, `DocumentID`, `CollectionID`, `Index`, offsets, `Metadata` |
+| `Score` | Cosine similarity with the in-memory and pgvector stores |
+| `Hydrated` | `true` when `Chunk` was read back from the metadata store |
+| `Orphaned` | `true` when the vector store returned a chunk the metadata store no longer has |
 
-## Step 6: Batch ingest (optional)
+With no `WithTopK`, you get the engine's `DefaultTopK` (10).
+
+## Step 6: Build prompt context
 
 ```go
-docs, err := engine.IngestBatch(ctx, col.ID, []weave.IngestInput{
-    {Title: "FAQ", Content: "..."},
-    {Title: "Terms", Content: "..."},
-    {Title: "Privacy", Content: "..."},
+prompt, err := eng.Assemble(ctx, hits, engine.AssembleParams{MaxTokens: 1024})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(prompt.Context)
+```
+
+`Context` starts with `Relevant context:` and puts a `[1]`, `[2]` marker in front of each chunk, in rank order, until the token budget runs out (4096 when you pass zero). `prompt.Included[n-1]` is the position in `hits` that marker `[n]` came from, so you can show citations next to the answer. Tokens are estimated at four characters each.
+
+## Batch ingest
+
+```go
+results, err := eng.IngestBatch(ctx, []*engine.IngestInput{
+    {CollectionID: col.ID, Title: "Expenses", Content: "Submit receipts within 30 days."},
+    {CollectionID: col.ID, Title: "Remote work", Content: "You can work remotely two days a week."},
 })
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("ingested %d documents\n", len(docs))
+fmt.Printf("ingested %d documents\n", len(results))
 ```
 
-Batch ingestion processes documents concurrently up to `IngestConcurrency` (default: 4).
+`IngestBatch` calls `Ingest` for each input in order and stops at the first error, returning the results it already has. It doesn't run documents in parallel: the `IngestConcurrency` setting exists in the config but nothing reads it yet.
 
-## Step 7: Switch to PostgreSQL for production
+## Switch to PostgreSQL
+
+Open one `*grove.DB` and share it between the metadata store and pgvector:
 
 ```go
 import (
+    "github.com/xraph/grove"
+    "github.com/xraph/grove/drivers/pgdriver"
+
     "github.com/xraph/weave/store/postgres"
     "github.com/xraph/weave/vectorstore/pgvector"
 )
 
-pgStore := postgres.New(pool)
-if err := pgStore.Migrate(ctx); err != nil {
+pgdb := pgdriver.New()
+if err := pgdb.Open(ctx, os.Getenv("DATABASE_URL")); err != nil {
+    log.Fatal(err)
+}
+db, err := grove.Open(pgdb)
+if err != nil {
     log.Fatal(err)
 }
 
-pgVec := pgvector.New(pool)
-if err := pgVec.Migrate(ctx); err != nil {
+st := postgres.New(db)
+if err := st.Migrate(ctx); err != nil {
     log.Fatal(err)
 }
 
-engine, err := weave.NewEngine(
-    weave.WithStore(pgStore),
-    weave.WithVectorStore(pgVec),
-    weave.WithEmbedder(myEmbedder),
+eng, err := engine.New(
+    engine.WithStore(st),
+    engine.WithVectorStore(pgvector.New(db)),
+    engine.WithEmbedder(embedder.NewOpenAIEmbedder(os.Getenv("OPENAI_API_KEY"))),
+    engine.WithChunker(chunker.NewRecursiveChunker()),
 )
 ```
 
+`Migrate` creates the metadata tables. Nothing creates the pgvector side: you have to create the `vector` extension and the `weave_vectors` table yourself before the first ingest. The [PostgreSQL store](/docs/stores/postgres#pgvector) page has the table definition.
+
 ## Next steps
 
-- [Architecture](/docs/architecture) — Understand how the packages fit together
-- [Document Ingestion](/docs/subsystems/recording) — Full ingestion API reference
-- [Semantic Retrieval](/docs/subsystems/verification) — Retrieval strategies and options
-- [Stores](/docs/stores/postgres) — Connect to PostgreSQL for production
+- [Architecture](/docs/architecture): how the packages fit together
+- [Document ingestion](/docs/subsystems/ingestion): every step of `Ingest`
+- [Semantic retrieval](/docs/subsystems/retrieval): retrievers and options
+- [PostgreSQL store](/docs/stores/postgres): production storage

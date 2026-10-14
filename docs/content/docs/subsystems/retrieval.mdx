@@ -1,0 +1,143 @@
+---
+title: Semantic Retrieval
+description: How Weave retrieves relevant chunks with similarity, MMR, hybrid and cross-collection search.
+---
+
+`engine.Retrieve` takes a query and returns the closest chunks, best first. With no retriever configured it embeds the query and searches the vector store itself. With one, it hands the search to the retriever.
+
+## Basic retrieval
+
+```go
+ctx = weave.WithTenant(ctx, "tenant-1")
+
+hits, err := eng.Retrieve(ctx, "What is the return policy?",
+    engine.WithCollection(colID),
+    engine.WithTopK(5),
+    engine.WithMinScore(0.3),
+)
+if err != nil {
+    return err
+}
+for _, h := range hits {
+    fmt.Printf("[%.2f] %s\n", h.Score, h.Chunk.Content)
+}
+```
+
+## Retrieve options
+
+| Option | Description |
+|--------|-------------|
+| `engine.WithCollection(colID)` | Only chunks from this collection |
+| `engine.WithTopK(k)` | Maximum results. Defaults to `Config.DefaultTopK` (10). |
+| `engine.WithMinScore(score)` | Drop hits scoring below this |
+| `engine.WithTenantID(t)` | Search tenant `t` instead of the context tenant. An empty string falls back to the context. |
+| `engine.WithTenantFilter(t)` | Search exactly tenant `t`, and `""` here means rows with no tenant |
+| `engine.WithStrategy(name)` | Accepted and ignored, see below |
+
+`WithStrategy` doesn't do anything. `Retrieve` never reads the strategy, so it can't switch between similarity, MMR and hybrid per call; the retriever you passed to `engine.New` is always the one that runs. The same goes for `HybridSearchParams.Strategy` and the `strategy` field on the HTTP routes.
+
+## ScoredChunk
+
+```go
+type ScoredChunk struct {
+    Chunk    *chunk.Chunk `json:"chunk"`
+    Score    float64      `json:"score"`
+    Hydrated bool         `json:"hydrated"`
+    Orphaned bool         `json:"orphaned,omitempty"`
+}
+```
+
+After the search, the engine reads every hit's chunk back from the metadata store by ID, so `Chunk` carries the real `DocumentID`, `Index`, offsets and metadata, and `Hydrated` is `true`. If the vector store returns a chunk ID the metadata store doesn't have, the hit keeps its place and its text, and `Orphaned` is `true`. A custom retriever that returns chunks without IDs gets them back unhydrated.
+
+What `Score` means depends on the setup. The in-memory and pgvector stores return cosine similarity, MMR keeps that score but reorders, hybrid returns an RRF sum, and the reranker returns the reranker's score. `eng.Components().Score` tells you which one an engine produces.
+
+## Retrieval pipeline
+
+1. Fire `OnRetrievalStarted`.
+2. Build a metadata filter with `collection_id` (from `WithCollection`) and `tenant_id` (from `WithTenantFilter`, else `WithTenantID`, else the context tenant). With no tenant anywhere, there's no tenant filter and every tenant's vectors are searched.
+3. If a retriever is configured, call it with that filter. Otherwise embed the query and call `VectorStore.Search`.
+4. Read each hit's chunk back from the metadata store.
+5. Fire `OnRetrievalCompleted` with the count and elapsed time, or `OnRetrievalFailed` with the error.
+
+Without a retriever, `Retrieve` needs both an embedder and a vector store.
+
+## Retrievers
+
+Set one with `engine.WithRetriever(r)`. All of them are in the `retriever` package.
+
+| Constructor | What it does |
+|-------------|--------------|
+| `NewSimilarityRetriever(vs, emb, store)` | Embeds the query and searches `vs`. The same as no retriever. The `store` argument isn't used. |
+| `NewMMRRetriever(vs, emb, lambda)` | Fetches `3 * TopK` candidates (at least 20) and reorders them by Maximal Marginal Relevance. `lambda` 1.0 is pure relevance, 0.0 pure diversity. |
+| `NewHybridRetriever(retrievers...)` | Runs every sub-retriever and fuses the rankings with Reciprocal Rank Fusion (k = 60) |
+| `NewRerankerRetriever(base, reranker)` | Fetches `3 * TopK` from `base` and reorders by your `Reranker`'s scores |
+
+```go
+st := postgres.New(db)
+vs := pgvector.New(db)
+emb := embedder.NewOpenAIEmbedder(apiKey)
+
+eng, err := engine.New(
+    engine.WithStore(st),
+    engine.WithVectorStore(vs),
+    engine.WithEmbedder(emb),
+    engine.WithChunker(chunker.NewRecursiveChunker()),
+    engine.WithRetriever(retriever.NewHybridRetriever(
+        retriever.NewSimilarityRetriever(vs, emb, st),
+        retriever.NewMMRRetriever(vs, emb, 0.5),
+    )),
+)
+```
+
+The hybrid retriever fuses dense retrievers. There's no keyword retriever built in, so for real hybrid search you write one that queries your full-text index and add it to the list.
+
+MMR needs the stored vectors back from the vector store. The Fabriq store doesn't return them, so over Fabriq MMR has no diversity signal and falls back to relevance order. MMR also ignores `MinScore`, and returns nothing when `TopK` is zero.
+
+A reranker is anything with this method:
+
+```go
+type Reranker interface {
+    Rerank(ctx context.Context, query string, documents []string) ([]float64, error)
+}
+```
+
+## Cross-collection search
+
+`HybridSearch` searches several collections:
+
+```go
+hits, err := eng.HybridSearch(ctx, "return policy", &engine.HybridSearchParams{
+    Collections: []id.CollectionID{col1, col2},
+    TopK:        10,
+    MinScore:    0.3,
+})
+```
+
+With `Collections` set, it calls `Retrieve` once per collection, merges the hits, sorts by score and keeps the top `TopK`. With `Collections` empty, it's one `Retrieve` without a collection filter, scoped to the context tenant if there is one. Despite the name, it doesn't fuse rankings: hybrid ranking comes from `NewHybridRetriever`.
+
+## Comparing rankings
+
+`eng.RetrieveCompare(ctx, query, engine.CompareParams{...})` runs your configured retriever next to a raw vector search over a wider window and reports where each final hit sat in the raw ranking. Use it to see what MMR or a reranker actually moved. It needs the engine's own embedder and vector store.
+
+## Retriever interface
+
+```go
+type Retriever interface {
+    Retrieve(ctx context.Context, query string, opts *Options) ([]Result, error)
+}
+
+type Options struct {
+    CollectionID string
+    TenantKey    string
+    TopK         int
+    MinScore     float64
+    Filter       map[string]string // collection_id and tenant_id as built above
+}
+
+type Result struct {
+    Chunk *chunk.Chunk
+    Score float64
+}
+```
+
+Set the chunk's `ID` on each result (use `retriever.ChunkFromSearchResult` when you start from a `vectorstore.SearchResult`) so the engine can hydrate it.

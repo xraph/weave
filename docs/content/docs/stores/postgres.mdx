@@ -1,15 +1,9 @@
 ---
 title: PostgreSQL Store
-description: Production MetadataStore backed by PostgreSQL using Grove ORM.
+description: Production metadata store backed by PostgreSQL using Grove, plus the pgvector vector store.
 ---
 
-The `store/postgres` package provides a production-ready MetadataStore for collections, documents, and chunks using PostgreSQL and the Grove ORM.
-
-## Installation
-
-```bash
-go get github.com/xraph/weave/store/postgres
-```
+The `store/postgres` package keeps collections, documents and chunks in PostgreSQL through [Grove](https://github.com/xraph/grove). The `vectorstore/pgvector` package keeps the embeddings in the same database. Both take a `*grove.DB`, so you open one connection and share it.
 
 ## Setup
 
@@ -17,86 +11,110 @@ go get github.com/xraph/weave/store/postgres
 import (
     "github.com/xraph/grove"
     "github.com/xraph/grove/drivers/pgdriver"
-    pgstore "github.com/xraph/weave/store/postgres"
+
+    "github.com/xraph/weave/chunker"
+    "github.com/xraph/weave/engine"
+    "github.com/xraph/weave/store/postgres"
+    "github.com/xraph/weave/vectorstore/pgvector"
 )
 
-db, err := grove.Open(pgdriver.Open("postgres://user:pass@localhost:5432/mydb?sslmode=disable"))
+pgdb := pgdriver.New()
+if err := pgdb.Open(ctx, os.Getenv("DATABASE_URL")); err != nil {
+    log.Fatal(err)
+}
+db, err := grove.Open(pgdb)
 if err != nil {
     log.Fatal(err)
 }
 
-store := pgstore.New(db)
+st := postgres.New(db)
+if err := st.Migrate(ctx); err != nil {
+    log.Fatal(err)
+}
+
+eng, err := engine.New(
+    engine.WithStore(st),
+    engine.WithVectorStore(pgvector.New(db)),
+    engine.WithEmbedder(emb),
+    engine.WithChunker(chunker.NewRecursiveChunker()),
+)
 ```
 
-Pass the store to the engine:
+Pool settings go on the driver's `Open`, with the options in `github.com/xraph/grove/driver`:
 
 ```go
-eng, err := engine.New(
-    engine.WithStore(store),
-    engine.WithVectorStore(pgvec.New(pool)), // see pgvector doc
-    engine.WithEmbedder(emb),
-)
+pgdb := pgdriver.New()
+if err := pgdb.Open(ctx, dsn, driver.WithPoolSize(25)); err != nil {
+    log.Fatal(err)
+}
 ```
 
 ## Migrations
 
-Call `store.Migrate(ctx)` before starting the engine to create the required tables:
+`st.Migrate(ctx)` creates the tables and indexes with `CREATE TABLE IF NOT EXISTS`, so running it again is safe. It runs each migration's `Up` directly, without a tracking table. The same migrations are exported as `postgres.Migrations`, a Grove migration group, if you'd rather run them through Grove's orchestrator.
 
-```go
-if err := store.Migrate(ctx); err != nil {
-    log.Fatal("migrate:", err)
-}
-```
-
-This is idempotent — running it on an already-migrated database is safe. Migrations use Grove's `pgmigrate` driver internally.
+The Forge extension calls `Migrate` on `Start` unless you set `disable_migrate`.
 
 ## Schema
 
-The PostgreSQL store creates three tables:
+| Table | Holds |
+|-------|-------|
+| `weave_collections` | Collections. `UNIQUE (tenant_id, name)`. |
+| `weave_documents` | Documents. `UNIQUE (collection_id, content_hash)`, and a foreign key to the collection with `ON DELETE CASCADE`. |
+| `weave_chunks` | Chunk text, offsets and metadata, with foreign keys to the document and collection |
 
-| Table | Description |
-|-------|-------------|
-| `weave_collections` | Collection metadata — name, model, chunk config, counters |
-| `weave_documents` | Document records — state, hashes, source info |
-| `weave_chunks` | Chunk text and byte offsets |
+All three have a `tenant_id` column and an index on it. Only `weave_collections` has `app_id`. Metadata maps are stored as `JSONB`.
 
-All tables include `tenant_id` and `app_id` columns for multi-tenant isolation.
-
-## Connection pool configuration
-
-The PostgreSQL store accepts any `*grove.DB` opened with the `pgdriver`. Configure the underlying connection pool via Grove's driver options:
-
-```go
-db, err := grove.Open(pgdriver.Open(dsn,
-    pgdriver.WithMaxOpenConns(25),
-    pgdriver.WithMaxIdleConns(5),
-    pgdriver.WithConnMaxLifetime(5 * time.Minute),
-))
-```
+The unique constraints are where `weave.ErrCollectionAlreadyExists` and `weave.ErrDuplicateDocument` come from.
 
 ## Lifecycle
 
 | Method | Behaviour |
 |--------|-----------|
-| `Migrate(ctx)` | Creates tables and indexes if they don't exist |
-| `Ping(ctx)` | Verifies database connectivity |
-| `Close()` | Closes the underlying `*grove.DB` |
+| `Migrate(ctx)` | Creates the tables and indexes if they don't exist |
+| `Ping(ctx)` | Pings the database |
+| `Close()` | Closes the `*grove.DB` |
+
+`engine.Stop` calls `Close`, so stopping the engine closes the database for everything else that shares it, pgvector included.
+
+## pgvector
+
+`vectorstore/pgvector` stores one row per chunk and searches with pgvector's cosine distance operator (`<=>`), returning `1 - distance` as the score.
+
+Nothing in Weave creates its table or the extension. Create them yourself, in your own migrations, before the first ingest:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS weave_vectors (
+    id        TEXT PRIMARY KEY,
+    embedding vector(1536),
+    content   TEXT,
+    metadata  JSONB
+);
+```
+
+The column names and types come from the store's queries: `id` is the chunk ID and the upsert conflict target, `embedding` is the vector, `content` is the chunk text and `metadata` holds `collection_id`, `document_id`, `tenant_id`, `chunk_index` and the chunk's own metadata, filtered with `metadata->>'key'`. The `1536` is the output size of `text-embedding-3-small`; use your embedder's `Dimensions()`.
+
+Weave doesn't create a vector index either. For a large table, add one for cosine distance, for example `CREATE INDEX ON weave_vectors USING hnsw (embedding vector_cosine_ops);`.
+
+```go
+vs := pgvector.New(db)
+```
+
+`pgvector.WithTableName(name)` exists, but only `Search` reads the custom name. `Upsert`, `Delete` and `DeleteByMetadata` always write `weave_vectors`, so leave the table name at its default for now.
 
 ## Forge extension
 
-When using Weave as a Forge extension with Grove integration, you can let the extension auto-construct the store from a shared `grove.DB`:
+With Weave as a Forge extension, the metadata store can come from a `*grove.DB` in the container: the extension sees the `pg` driver and builds `store/postgres` for you. The vector store doesn't, so pass pgvector yourself:
 
 ```go
-ext := extension.New(
-    extension.WithGroveDatabase(""),  // use default grove.DB from DI
+weaveext.New(
+    weaveext.WithGroveDatabase(""), // the default grove.DB
+    weaveext.WithVectorStore(pgvector.New(db)),
+    weaveext.WithEngineOption(engine.WithEmbedder(emb)),
+    weaveext.WithEngineOption(engine.WithChunker(chunker.NewRecursiveChunker())),
 )
 ```
 
-Or provide an explicit store:
-
-```go
-ext := extension.New(
-    extension.WithStore(store),
-    extension.WithDisableMigrate(), // disable auto-migration if needed
-)
-```
+See [Forge extension](/docs/guides/forge-extension#using-a-grove-database).

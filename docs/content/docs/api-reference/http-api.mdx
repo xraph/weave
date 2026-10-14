@@ -1,13 +1,15 @@
 ---
 title: HTTP API Reference
-description: Complete reference for all 12 Weave REST endpoints — collections, documents, retrieval, and search.
+description: Complete reference for all 13 Weave REST endpoints for collections, documents, retrieval and search.
 ---
 
-All endpoints are under `/v1` and return JSON. Authentication and tenant resolution depend on your Forge middleware configuration.
+The Forge extension mounts these routes under its base path, `/weave` by default, so every path below starts with `/weave/v1`. Change the prefix with `base_path` or `extension.WithBasePath`. All bodies are JSON.
+
+The routes take the tenant from the request context, where your middleware has to put it with `weave.WithTenant`. Only the create, ingest, retrieve and search routes use it. The list route returns every tenant's collections, and the get, delete, stats and reindex routes don't check who owns the ID. See [HTTP API](/docs/subsystems/http-api#tenants).
 
 ## Collections
 
-### `POST /v1/collections`
+### `POST /weave/v1/collections`
 
 Create a collection.
 
@@ -15,81 +17,81 @@ Create a collection.
 
 ```json
 {
-  "name": "string (required)",
-  "description": "string",
-  "embedding_model": "string (default: text-embedding-3-small)",
-  "embedding_dims": 1536,
-  "chunk_strategy": "recursive | fixed | sliding | semantic | code",
-  "chunk_size": 512,
-  "chunk_overlap": 50,
-  "metadata": { "key": "value" }
-}
-```
-
-**Response** `201 Created`
-
-```json
-{
-  "id": "col_01h455vbjdx6ycf56rnatbxqkh",
-  "tenant_id": "tenant-1",
-  "app_id": "myapp",
   "name": "product-docs",
+  "description": "Product documentation",
   "embedding_model": "text-embedding-3-small",
   "embedding_dims": 1536,
   "chunk_strategy": "recursive",
   "chunk_size": 512,
   "chunk_overlap": 50,
-  "document_count": 0,
-  "chunk_count": 0,
-  "created_at": "2024-01-15T10:30:00Z",
-  "updated_at": "2024-01-15T10:30:00Z"
+  "metadata": { "domain": "support" }
 }
 ```
 
----
+Only `name` is required. Omitted `chunk_size`, `chunk_overlap`, `chunk_strategy` and `embedding_model` take the engine defaults (512, 50, `recursive`, `text-embedding-3-small`). `embedding_model`, `embedding_dims` and `chunk_strategy` are recorded and nothing more: the engine's configured embedder and chunker do the work.
 
-### `GET /v1/collections`
+**Response** `201 Created`
 
-List collections for the current tenant.
+```json
+{
+  "created_at": "2026-01-15T10:30:00Z",
+  "updated_at": "2026-01-15T10:30:00Z",
+  "id": "col_01h455vbjdx6ycf56rnatbxqkh",
+  "name": "product-docs",
+  "description": "Product documentation",
+  "tenant_id": "tenant-1",
+  "app_id": "",
+  "embedding_model": "text-embedding-3-small",
+  "embedding_dims": 1536,
+  "chunk_strategy": "recursive",
+  "chunk_size": 512,
+  "chunk_overlap": 50,
+  "metadata": { "domain": "support" },
+  "document_count": 0,
+  "chunk_count": 0
+}
+```
 
-**Query parameters**
+`document_count` and `chunk_count` on a collection are never updated and stay at 0. Use the stats route for real counts.
 
-| Param | Type | Description |
-|-------|------|-------------|
-| `limit` | int | Max results (default: 20) |
-| `offset` | int | Pagination offset |
-
-**Response** `200 OK` — array of Collection objects.
-
----
-
-### `GET /v1/collections/:collectionId`
-
-Get a collection by ID.
-
-**Response** `200 OK` — Collection object.
-
-**Error** `404 Not Found` if collection does not exist for the current tenant.
-
----
-
-### `DELETE /v1/collections/:collectionId`
-
-Delete a collection and all associated documents, chunks, and vectors.
-
-**Response** `204 No Content`
+A missing `name` is a 400. A name that already exists for the tenant is a 500.
 
 ---
 
-### `GET /v1/collections/:collectionId/stats`
+### `GET /weave/v1/collections`
 
-Get aggregate statistics for a collection.
+List collections, oldest first.
+
+| Query param | Type | Description |
+|-------------|------|-------------|
+| `limit` | int | Maximum results. Default 50, capped at 1000. |
+| `offset` | int | Results to skip |
+
+**Response** `200 OK`: an array of collection objects, across all tenants.
+
+---
+
+### `GET /weave/v1/collections/:collectionId`
+
+**Response** `200 OK`: a collection object. `400` for an ID that isn't a `col_` TypeID, `404` when there's no such collection.
+
+---
+
+### `DELETE /weave/v1/collections/:collectionId`
+
+Deletes the collection's chunks, documents, vectors and then the collection.
+
+**Response** `204 No Content`, or `404` when there's no such collection.
+
+---
+
+### `GET /weave/v1/collections/:collectionId/stats`
 
 **Response** `200 OK`
 
 ```json
 {
-  "collection_id": "col_01h455...",
+  "collection_id": "col_01h455vbjdx6ycf56rnatbxqkh",
   "collection_name": "product-docs",
   "document_count": 42,
   "chunk_count": 1204,
@@ -98,33 +100,37 @@ Get aggregate statistics for a collection.
 }
 ```
 
+The counts are live: documents in any state, and every chunk.
+
 ---
 
-### `POST /v1/collections/:collectionId/reindex`
+### `POST /weave/v1/collections/:collectionId/reindex`
 
-Re-embed and re-store all chunks in a collection. Use after changing the embedding model.
+Re-embeds the chunks of every `ready` document with the engine's current embedder. The request is synchronous, so a large collection can take a while.
 
-**Response** `204 No Content`
+**Response** `204 No Content`, also for a collection ID that doesn't exist.
 
 ---
 
 ## Documents
 
-### `POST /v1/collections/:collectionId/documents`
+### `POST /weave/v1/collections/:collectionId/documents`
 
-Ingest a document — runs the full load → chunk → embed → store pipeline synchronously.
+Ingest one document. Runs the whole load, chunk, embed and store pipeline before it responds.
 
 **Request**
 
 ```json
 {
-  "title": "string",
-  "content": "string (required)",
-  "source": "string",
-  "source_type": "string (MIME type)",
-  "metadata": { "key": "value" }
+  "title": "Return Policy",
+  "content": "Our return policy allows returns within 30 days...",
+  "source": "policy.md",
+  "source_type": "text/markdown",
+  "metadata": { "category": "support" }
 }
 ```
+
+`content` is required. `source_type` only matters when the engine has a loader that supports it.
 
 **Response** `201 Created`
 
@@ -136,13 +142,11 @@ Ingest a document — runs the full load → chunk → embed → store pipeline 
 }
 ```
 
-**Error** `400 Bad Request` if content is empty.
+Empty `content` is a 400. A collection that doesn't exist, content already in the collection and embedder or store failures are all 500s.
 
 ---
 
-### `POST /v1/collections/:collectionId/documents/batch`
-
-Ingest multiple documents.
+### `POST /weave/v1/collections/:collectionId/documents/batch`
 
 **Request**
 
@@ -155,77 +159,75 @@ Ingest multiple documents.
 }
 ```
 
-**Response** `201 Created` — array of IngestResult objects.
+Each document takes the same fields as the single ingest route. Any empty `content` fails the whole request with a 400 before anything is ingested.
+
+**Response** `201 Created`: an array of ingest results, in order. Documents are ingested one at a time, and the first failure ends the request with an error. The documents before it stay ingested.
 
 ---
 
-### `GET /v1/collections/:collectionId/documents`
+### `GET /weave/v1/collections/:collectionId/documents`
 
-List documents in a collection.
+| Query param | Type | Description |
+|-------------|------|-------------|
+| `state` | string | `pending`, `processing`, `ready` or `failed` |
+| `limit` | int | Maximum results. Default 50, capped at 1000. |
+| `offset` | int | Results to skip |
 
-**Query parameters**
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `state` | string | Filter by state: `pending`, `processing`, `ready`, `failed` |
-| `limit` | int | Max results (default: 20) |
-| `offset` | int | Pagination offset |
-
-**Response** `200 OK` — array of Document objects.
+**Response** `200 OK`: an array of document objects, oldest first.
 
 ---
 
-### `GET /v1/documents/:documentId`
-
-Get a document by ID.
+### `GET /weave/v1/documents/:documentId`
 
 **Response** `200 OK`
 
 ```json
 {
-  "id": "doc_01h455...",
-  "collection_id": "col_01h455...",
+  "created_at": "2026-01-15T10:30:00Z",
+  "updated_at": "2026-01-15T10:30:05Z",
+  "id": "doc_01h455vbjdx6ycf56rnatbxqki",
+  "collection_id": "col_01h455vbjdx6ycf56rnatbxqkh",
   "tenant_id": "tenant-1",
   "title": "Return Policy",
   "source": "policy.md",
   "source_type": "text/markdown",
-  "content_hash": "sha256:abc...",
+  "content_hash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
   "content_length": 1024,
   "chunk_count": 12,
-  "state": "ready",
-  "error": "",
-  "metadata": {},
-  "created_at": "2024-01-15T10:30:00Z",
-  "updated_at": "2024-01-15T10:30:05Z"
+  "metadata": { "category": "support" },
+  "state": "ready"
 }
 ```
 
+`content_hash` is the hex SHA-256 of the raw content. `error` appears when `state` is `failed`.
+
 ---
 
-### `DELETE /v1/documents/:documentId`
+### `DELETE /weave/v1/documents/:documentId`
 
-Delete a document and all its chunks from both metadata and vector stores.
+Deletes the document's vectors, its chunks and the document.
 
-**Response** `204 No Content`
+**Response** `204 No Content`, or `404` when there's no such document.
 
 ---
 
 ## Retrieval
 
-### `POST /v1/collections/:collectionId/retrieve`
+### `POST /weave/v1/collections/:collectionId/retrieve`
 
-Semantic retrieval within a collection.
+Semantic retrieval within one collection.
 
 **Request**
 
 ```json
 {
-  "query": "string (required)",
+  "query": "What is the return policy?",
   "top_k": 5,
-  "min_score": 0.75,
-  "strategy": "similarity | mmr | hybrid"
+  "min_score": 0.3
 }
 ```
+
+`query` is required. Send `top_k`: when you leave it out the engine is asked for 0 results, the built-in vector stores turn that into 10, and the MMR retriever returns nothing. `default_top_k` isn't applied on this route. A `strategy` field is accepted and ignored.
 
 **Response** `200 OK`
 
@@ -233,61 +235,66 @@ Semantic retrieval within a collection.
 [
   {
     "chunk": {
-      "id": "chunk_01h455...",
-      "document_id": "doc_01h455...",
-      "collection_id": "col_01h455...",
+      "id": "chk_01h455vbjdx6ycf56rnatbxqkj",
+      "document_id": "doc_01h455vbjdx6ycf56rnatbxqki",
+      "collection_id": "col_01h455vbjdx6ycf56rnatbxqkh",
       "tenant_id": "tenant-1",
-      "content": "Our return policy allows...",
+      "content": "Our return policy allows returns within 30 days...",
       "index": 0,
       "start_offset": 0,
       "end_offset": 312,
-      "token_count": 48,
-      "metadata": {}
+      "token_count": 78,
+      "metadata": {
+        "chunk_index": "0",
+        "collection_id": "col_01h455vbjdx6ycf56rnatbxqkh",
+        "document_id": "doc_01h455vbjdx6ycf56rnatbxqki",
+        "tenant_id": "tenant-1"
+      },
+      "created_at": "2026-01-15T10:30:05Z"
     },
-    "score": 0.94
+    "score": 0.94,
+    "hydrated": true
   }
 ]
 ```
 
-Results are sorted by `score` descending.
+Hits come back best first. `orphaned: true` marks a hit whose chunk is in the vector store but no longer in the metadata store.
 
 ---
 
-### `POST /v1/search`
+### `POST /weave/v1/search`
 
-Hybrid search across one or more collections.
+Search across collections.
 
 **Request**
 
 ```json
 {
-  "query": "string (required)",
-  "collections": ["col_01h455...", "col_02x..."],
+  "query": "refund timeline",
+  "collections": ["col_01h455vbjdx6ycf56rnatbxqkh", "col_01h455vbjdx6ycf56rnatbxqkm"],
   "top_k": 10,
-  "min_score": 0.7,
-  "strategy": "similarity | mmr | hybrid"
+  "min_score": 0.3
 }
 ```
 
-When `collections` is omitted, searches all collections visible to the current tenant.
+With `collections`, each one is searched separately and the hits are merged, sorted by score and cut to `top_k`. Without it, one search runs over every collection, filtered to the request's tenant when there is one. `top_k` defaults to `default_top_k` here. `strategy` is accepted and ignored.
 
-**Response** `200 OK` — array of ScoredChunk objects, merged and sorted by score.
+**Response** `200 OK`: an array of scored chunks, as for retrieve.
 
 ---
 
-## Error format
+## Errors
 
-All error responses use a consistent JSON envelope:
+400 and 404 responses carry Forge's HTTP error body:
 
 ```json
-{
-  "error": "human-readable message",
-  "code": "ERROR_CODE"
-}
+{ "error": "content is required", "code": 400 }
 ```
 
-| HTTP status | `code` | Cause |
-|-------------|--------|-------|
-| `400` | `BAD_REQUEST` | Missing required field, empty content |
-| `404` | `NOT_FOUND` | Collection or document not found for tenant |
-| `500` | `INTERNAL_ERROR` | Store, embedder, or vector store failure |
+| Status | When |
+|--------|------|
+| `400` | A malformed ID, or a missing `name`, `content` or `query` |
+| `404` | The collection or document doesn't exist, on the get, delete and stats routes |
+| `500` | Anything else, including ingesting into a missing collection, duplicate names or content, and embedder or store failures |
+
+A 500 goes through Forge's error handling, which by default doesn't put the error text in the response.

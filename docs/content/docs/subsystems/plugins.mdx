@@ -1,9 +1,9 @@
 ---
 title: Extension System
-description: Weave lifecycle hooks — reacting to ingestion, retrieval, collection, and reindex events.
+description: Weave lifecycle hooks for ingestion, retrieval, collection, delete, reindex and shutdown events.
 ---
 
-Weave's extension system lets you attach callbacks to every significant engine event. Extensions are used for metrics, tracing, audit trails, alerting, and custom side-effects — without modifying the core pipeline.
+Weave's extension system lets you attach callbacks to engine events. Use it for metrics, tracing, audit trails, alerting or any other side effect, without touching the pipeline itself.
 
 ## Extension interface
 
@@ -16,20 +16,24 @@ type Extension interface {
 }
 ```
 
-Beyond `Name()`, extensions implement only the hook interfaces they care about. All hook interfaces are optional.
+Beyond `Name()`, an extension implements only the hook interfaces it cares about. The engine type-asserts each extension against every hook interface when you register it.
+
+The `ext` and `plugins` packages declare the same interfaces. `engine.WithExtension` takes an `ext.Extension` and the Forge extension's `WithExtension` takes a `plugins.Extension`, but since both are just `Name() string`, the same value works for either.
 
 ## Registering extensions
 
 ```go
-engine, err := engine.New(
-    engine.WithStore(store),
-    engine.WithVectorStore(vecStore),
+eng, err := engine.New(
+    engine.WithStore(st),
+    engine.WithVectorStore(vs),
     engine.WithEmbedder(emb),
+    engine.WithChunker(chunker.NewRecursiveChunker()),
     engine.WithExtension(metricsExt),
-    engine.WithExtension(auditExt),
-    // repeatable — register as many as needed
+    engine.WithExtension(auditExt), // repeatable
 )
 ```
+
+Hooks fire in registration order. In a Forge app, pass them with `extension.WithExtension(x)`.
 
 ## All hook interfaces
 
@@ -50,7 +54,7 @@ type CollectionDeleted interface {
 ### Ingestion hooks
 
 ```go
-// Called when ingestion starts — before chunking.
+// Called after the document row is created, before loading and chunking.
 type IngestStarted interface {
     OnIngestStarted(ctx context.Context, colID id.CollectionID, docs []*document.Document) error
 }
@@ -121,7 +125,7 @@ type ReindexCompleted interface {
 ### Shutdown hook
 
 ```go
-// Called during graceful engine shutdown.
+// Called by engine.Stop, before the store is closed.
 type Shutdown interface {
     OnShutdown(ctx context.Context) error
 }
@@ -168,6 +172,25 @@ func (e *AuditExtension) OnIngestFailed(
 
 ## Error handling
 
-Hook errors do **not** abort the ingestion or retrieval pipeline. If `OnIngestCompleted` returns an error, it is logged at WARN level and the original operation result is returned unchanged. This ensures extensions are non-critical side-effects.
+Hook errors never reach the caller. If a hook returns an error, the registry logs it at warn level (with the hook and extension name) through the engine's logger and carries on with the next extension and the operation itself. Hooks run synchronously on the calling goroutine, so a slow hook slows `Ingest` or `Retrieve` down.
 
-The one exception is `OnIngestFailed` — it receives the ingestion error for observability but cannot prevent it from being returned to the caller.
+`OnIngestFailed` and `OnRetrievalFailed` receive the error for observability. They can't change what the caller gets back.
+
+## Built-in extensions
+
+`observability.NewMetricsExtension()` counts events, see [observability](/docs/subsystems/observability).
+
+`audit_hook` (package `audithook`) turns every hook except `IngestChunked`, `IngestEmbedded` and `Shutdown` into an `AuditEvent` and hands it to a `Recorder`:
+
+```go
+import audithook "github.com/xraph/weave/audit_hook"
+
+audit := audithook.New(audithook.RecorderFunc(
+    func(ctx context.Context, ev *audithook.AuditEvent) error {
+        log.Printf("%s %s %s", ev.Action, ev.ResourceID, ev.Outcome)
+        return nil
+    },
+))
+```
+
+The `Recorder` interface has the same shape as Chronicle's emitter, so you can bridge it to [Chronicle](https://github.com/xraph/chronicle) without Weave importing it. `audithook.WithActions(audithook.ActionIngestFailed, ...)` limits which actions get recorded, and failures are recorded with `SeverityCritical`.

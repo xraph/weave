@@ -1,14 +1,14 @@
 {
   "title": "Components",
   "pages": [
-    "recording",
-    "verification",
-    "erasure",
-    "compliance",
-    "sinks",
-    "retention",
+    "ingestion",
+    "retrieval",
+    "loader",
+    "chunker",
+    "embedder",
+    "assembler",
     "plugins",
     "observability",
-    "admin-api"
+    "http-api"
   ]
 }

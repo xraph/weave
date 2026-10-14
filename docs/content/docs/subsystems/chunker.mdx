@@ -1,0 +1,122 @@
+---
+title: Text Chunker
+description: The Chunker interface and built-in strategies for splitting documents into embeddable chunks.
+---
+
+The chunker splits a document's text into `ChunkResult` values before embedding. Weave ships five chunkers in the `chunker` package, and you can write your own.
+
+## Chunker interface
+
+```go
+// package chunker
+type Chunker interface {
+    Chunk(ctx context.Context, text string, opts *Options) ([]ChunkResult, error)
+}
+
+type Options struct {
+    ChunkSize    int    // target chunk size in tokens
+    ChunkOverlap int    // overlap between chunks in tokens
+    Strategy     string // the collection's ChunkStrategy, passed through
+}
+```
+
+Set the chunker with `engine.WithChunker(c)`. There's no default: without one, `Ingest` returns `weave.ErrNoChunker`.
+
+On every ingest the engine passes the collection's `ChunkSize`, `ChunkOverlap` and `ChunkStrategy`. None of the built-in chunkers read `Strategy`, so the chunker you configured is the one that runs, whatever the collection's `ChunkStrategy` says.
+
+## ChunkResult
+
+```go
+type ChunkResult struct {
+    Content     string            // text of the chunk
+    Index       int               // zero-based position in the document
+    StartOffset int               // byte offset of the start in the text
+    EndOffset   int               // byte offset of the end in the text
+    TokenCount  int               // estimated tokens
+    Metadata    map[string]string // copied onto the chunk and its vector
+}
+```
+
+## Built-in chunkers
+
+| Constructor | Kind | How it splits | Overlap |
+|-------------|------|---------------|---------|
+| `chunker.NewRecursiveChunker()` | `recursive` | Tries `Separators` in order (`"\n\n"`, `"\n"`, `". "`, `" "` by default) until pieces fit `ChunkSize` | Yes |
+| `chunker.NewFixedChunker()` | `fixed` | Cuts at exact character positions | Yes |
+| `chunker.NewSlidingChunker()` | `sliding` | A window of `ChunkSize` that advances by `ChunkSize - ChunkOverlap` | Yes (50 when you pass none) |
+| `chunker.NewSemanticChunker()` | `semantic` | Groups whole sentences (split on `.`, `!`, `?`) until the next one wouldn't fit | No |
+| `chunker.NewCodeChunker()` | `code` | Splits on the first of these that appears at a line start: `func`, `def`, `class`, `function`, `const`, `var`, `type`, a blank line, a newline. Then it packs the pieces up to `ChunkSize` | No |
+
+All of them measure size in characters, at four characters per token, and default to 512 tokens when `ChunkSize` is zero. The semantic and code chunkers report approximate offsets.
+
+The semantic chunker doesn't use embeddings. It's sentence-based, nothing more.
+
+Keep `ChunkOverlap` smaller than `ChunkSize`. An overlap at or above the size makes the fixed chunker loop forever and the recursive chunker panic. The Forge extension refuses such defaults at startup, but `engine.New` and `CreateCollection` don't check.
+
+To change the recursive chunker's separators, set the field:
+
+```go
+rc := chunker.NewRecursiveChunker()
+rc.Separators = []string{"\n## ", "\n\n", "\n", " "}
+```
+
+## Per-collection settings
+
+Chunk size and overlap live on the collection:
+
+```go
+col := &collection.Collection{
+    Name:         "manuals",
+    ChunkSize:    1024, // tokens
+    ChunkOverlap: 100,  // tokens
+}
+```
+
+`CreateCollection` fills zero values from the engine config (`DefaultChunkSize` 512, `DefaultChunkOverlap` 50).
+
+## Calling a chunker directly
+
+```go
+chunks, err := chunker.NewSlidingChunker().Chunk(ctx, text, &chunker.Options{
+    ChunkSize:    200,
+    ChunkOverlap: 20,
+})
+```
+
+## Custom chunker
+
+Implement `chunker.Chunker`:
+
+```go
+type SentenceChunker struct{}
+
+func (c *SentenceChunker) Chunk(_ context.Context, text string, opts *chunker.Options) ([]chunker.ChunkResult, error) {
+    var results []chunker.ChunkResult
+    offset := 0
+    for i, sentence := range strings.SplitAfter(text, ". ") {
+        results = append(results, chunker.ChunkResult{
+            Content:     strings.TrimSpace(sentence),
+            Index:       i,
+            StartOffset: offset,
+            EndOffset:   offset + len(sentence),
+            TokenCount:  len(sentence) / 4,
+        })
+        offset += len(sentence)
+    }
+    return results, nil
+}
+```
+
+Register it with `engine.WithChunker(&SentenceChunker{})`. If it also implements `weave.Describer`, `eng.Components()` reports it by name.
+
+## Token counting
+
+The chunkers' `TokenCount` is the same four-characters-per-token estimate. Context assembly counts tokens separately; for a real tokenizer there, implement `assembler.TokenCounter`:
+
+```go
+type TokenCounter interface {
+    CountTokens(text string) int
+}
+```
+
+and pass it to an assembler you build yourself with `assembler.WithTokenCounter`. `engine.Assemble` always uses the four-character estimate. See [context assembler](/docs/subsystems/assembler).

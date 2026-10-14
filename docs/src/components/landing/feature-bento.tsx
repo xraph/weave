@@ -34,13 +34,13 @@ const features: FeatureCard[] = [
         <path d="M3 15v4a2 2 0 002 2h14a2 2 0 002-2v-4" />
       </svg>
     ),
-    code: `doc, err := engine.Ingest(ctx, "col-123",
-  weave.IngestInput{
-    Title:   "Product FAQ",
-    Content: "Our return policy...",
-    Source:  "faq.md",
-  })
-// doc.State=ready chunks=12`,
+    code: `res, err := eng.Ingest(ctx, &engine.IngestInput{
+  CollectionID: col.ID,
+  Title:        "Product FAQ",
+  Content:      "Our return policy...",
+  Source:       "faq.md",
+})
+// res.State=ready res.ChunkCount=12`,
     filename: "ingest.go",
   },
   {
@@ -63,19 +63,18 @@ const features: FeatureCard[] = [
         <path d="M11 8v6M8 11h6" />
       </svg>
     ),
-    code: `results, err := engine.Retrieve(ctx, "col-123",
-  &weave.RetrieveInput{
-    Query:    "return policy",
-    TopK:     5,
-    MinScore: 0.75,
-  })
-// [0.94] Our return policy allows...`,
+    code: `hits, err := eng.Retrieve(ctx, "return policy",
+  engine.WithCollection(col.ID),
+  engine.WithTopK(5),
+  engine.WithMinScore(0.75),
+)
+// hits[0].Score=0.94 hits[0].Chunk.Content="Our return policy allows..."`,
     filename: "retrieve.go",
   },
   {
     title: "Multi-Tenant Isolation",
     description:
-      "Every collection, document, and chunk is scoped to a tenant via context. Cross-tenant queries are structurally impossible.",
+      "Put the tenant on the context and every collection, document and chunk is stored under it. Retrieval filters the vector search to the same tenant.",
     icon: (
       <svg
         className="size-5"
@@ -95,8 +94,9 @@ const features: FeatureCard[] = [
     code: `ctx = weave.WithTenant(ctx, "tenant-1")
 ctx = weave.WithApp(ctx, "myapp")
 
-// All ingestions and retrievals are
-// automatically scoped to tenant-1`,
+// Collections, documents and chunks created
+// under ctx belong to tenant-1, and Retrieve
+// only searches tenant-1's vectors`,
     filename: "scope.go",
   },
   {
@@ -119,11 +119,11 @@ ctx = weave.WithApp(ctx, "myapp")
         <path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5" />
       </svg>
     ),
-    code: `engine, _ := weave.NewEngine(
-  weave.WithStore(postgres.New(pool)),
-  weave.WithVectorStore(pgvector.New(pool)),
-  weave.WithEmbedder(myEmbedder),
-  weave.WithLogger(slog.Default()),
+    code: `eng, err := engine.New(
+  engine.WithStore(postgres.New(db)),
+  engine.WithVectorStore(pgvector.New(db)),
+  engine.WithEmbedder(embedder.NewOpenAIEmbedder(apiKey)),
+  engine.WithChunker(chunker.NewRecursiveChunker()),
 )`,
     filename: "main.go",
   },
@@ -147,20 +147,21 @@ ctx = weave.WithApp(ctx, "myapp")
         <line x1="17.5" y1="15" x2="9" y2="15" />
       </svg>
     ),
-    code: `func (e *MetricsExt) OnIngestCompleted(
+    code: `func (e *ChunkCounter) OnIngestCompleted(
   ctx context.Context,
-  colID string,
+  colID id.CollectionID,
   docs, chunks int,
   elapsed time.Duration,
-) {
-  metrics.Inc("weave.chunks.created", chunks)
+) error {
+  e.created.Add(int64(chunks))
+  return nil
 }`,
     filename: "extension.go",
   },
   {
     title: "Collection Management",
     description:
-      "Organize documents with per-collection embedding models, chunk strategies, and metadata. Reindex any collection at any time.",
+      "Each collection carries its own chunk strategy, size, overlap and metadata. Reindex a collection to re-embed every chunk in it.",
     icon: (
       <svg
         className="size-5"
@@ -176,15 +177,14 @@ ctx = weave.WithApp(ctx, "myapp")
         <rect x="2" y="3" width="20" height="18" rx="2" />
       </svg>
     ),
-    code: `col, _ := engine.CreateCollection(ctx,
-  weave.CreateCollectionInput{
-    Name:            "product-docs",
-    EmbeddingModel:  "text-embedding-3-small",
-    ChunkStrategy:   "recursive",
-    ChunkSize:       512,
-    ChunkOverlap:    50,
-  })
-// Reindex: engine.Reindex(ctx, col.ID)`,
+    code: `col := &collection.Collection{
+  Name:          "product-docs",
+  ChunkStrategy: "recursive",
+  ChunkSize:     512,
+  ChunkOverlap:  50,
+}
+err := eng.CreateCollection(ctx, col)
+// Reindex: eng.ReindexCollection(ctx, col.ID)`,
     filename: "collection.go",
     colSpan: 2,
   },
@@ -215,7 +215,7 @@ export function FeatureBento() {
         <SectionHeader
           badge="Features"
           title="Everything you need for RAG pipelines"
-          description="Weave handles the hard parts — ingestion, chunking, embedding, retrieval, and multi-tenancy — so you can focus on your application."
+          description="Weave handles ingestion, chunking, embedding, retrieval and multi-tenancy, so you can focus on your application."
         />
 
         <motion.div

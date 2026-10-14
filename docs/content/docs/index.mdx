@@ -3,34 +3,21 @@ title: Introduction
 description: Composable RAG pipeline engine for Go.
 ---
 
-Weave is a Go library that handles the **full document lifecycle** for Retrieval-Augmented Generation: ingest documents, chunk text, generate embeddings, store vectors, retrieve relevant context, and assemble prompts.
+Weave is a Go library for retrieval-augmented generation (RAG). You hand it documents, and it chunks the text, generates embeddings, writes the vectors to a vector store, then retrieves the closest chunks for a query and assembles them into prompt context with a token budget and `[n]` citation markers.
 
-Weave is a **library** — not a service. You bring your own database, vector store, embedder, and HTTP server. Weave provides the RAG plumbing.
+It's a library, not a service. You own `main`, the database connection and the process lifecycle. If you run [Forge](https://github.com/xraph/forge), the `extension` package mounts the same engine as a Forge extension with an HTTP API.
 
 ## What it does
 
-- **Document ingestion** — Load, chunk, embed, and store documents in a single `engine.Ingest` call. Supports single and batch ingestion with configurable concurrency.
-- **Semantic retrieval** — Retrieve the most relevant chunks via cosine similarity, MMR (Maximal Marginal Relevance), or hybrid search across one or multiple collections.
-- **Collection management** — Organize documents into named collections with per-collection embedding models, chunking strategies, and custom metadata.
-- **Pluggable components** — Every subsystem (Loader, Chunker, Embedder, Retriever, VectorStore, MetadataStore) is a Go interface. Swap any component with one line.
-- **Multi-tenant isolation** — Every collection, document, and chunk is scoped to a tenant via context. Cross-tenant queries are structurally impossible.
-- **Extension system** — Hook into 14 lifecycle events (ingestion, retrieval, collection, reindex) for metrics, audit trails, or custom processing.
-- **Context assembly** — Build LLM prompts from retrieved chunks with token budgeting and citation tracking.
-- **Pluggable stores** — In-memory (testing), PostgreSQL (bun ORM), SQLite, and pgvector. All implement the same composite store interfaces.
-- **Forge integration** — Drop-in `forge.Extension` with DI-injected `Engine` and auto-registered HTTP routes.
-- **HTTP API** — 12 endpoints for collections, documents, retrieval, and hybrid search.
-
-## Design philosophy
-
-**Library, not service.** Weave is a set of Go packages you import. You control `main`, the database connection, and the process lifecycle.
-
-**Interfaces over implementations.** Every subsystem defines a Go interface. Swap any storage or embedding backend with a single type change.
-
-**Composable stores.** Each subsystem (metadata, vector) has its own store interface. Pass the same backend value wherever a store is needed.
-
-**Tenant-scoped by design.** `weave.WithTenant` and `weave.WithApp` inject context that is enforced at every layer — no cross-tenant data is accessible regardless of what the caller passes.
-
-**TypeID everywhere.** All entities use type-prefixed, K-sortable, UUIDv7-based identifiers. Passing a `doc_` ID where a `col_` ID is expected is a compile error.
+- `engine.Ingest` runs one document through load, chunk, embed and store. `IngestBatch` runs a slice of them, one after another.
+- `engine.Retrieve` embeds the query and searches the vector store, or hands off to a retriever you configure: similarity, MMR, hybrid (Reciprocal Rank Fusion) or a reranker wrapper. `HybridSearch` covers several collections at once.
+- `engine.Assemble` turns the hits into one context string that fits a token budget, with a marker in front of each chunk.
+- Documents live in named collections, each with its own chunk size, overlap and a recorded embedding model.
+- The loader, chunker, embedder, retriever, vector store and metadata store are all Go interfaces.
+- Metadata goes in PostgreSQL, SQLite, MongoDB or memory. Vectors go in pgvector, [Fabriq](https://github.com/xraph/fabriq) or memory.
+- `weave.WithTenant` on the context stamps the tenant on everything you create and filters retrieval to it. See [multi-tenancy](/docs/concepts/multi-tenancy) for exactly what is and isn't scoped.
+- You can hook into 14 lifecycle events (collections, ingestion, retrieval, deletes, reindexing and shutdown). Weave ships a metrics extension and a Chronicle audit bridge built on them.
+- `extension.New` builds the engine, provides `*engine.Engine` in the DI container and mounts 13 routes under `/weave/v1`.
 
 ## Quick look
 
@@ -41,58 +28,66 @@ import (
     "context"
     "fmt"
     "log"
+    "os"
 
-    "github.com/xraph/weave"
-    memstore "github.com/xraph/weave/store/memory"
-    memvec "github.com/xraph/weave/vectorstore/memory"
+    "github.com/xraph/weave/chunker"
+    "github.com/xraph/weave/collection"
+    "github.com/xraph/weave/embedder"
+    "github.com/xraph/weave/engine"
+    "github.com/xraph/weave/store/memory"
+    vsmemory "github.com/xraph/weave/vectorstore/memory"
 )
 
 func main() {
     ctx := context.Background()
-    ctx = weave.WithTenant(ctx, "tenant-1")
-    ctx = weave.WithApp(ctx, "myapp")
 
-    engine, err := weave.NewEngine(
-        weave.WithStore(memstore.New()),
-        weave.WithVectorStore(memvec.New()),
-        weave.WithEmbedder(myEmbedder),
+    eng, err := engine.New(
+        engine.WithStore(memory.New()),
+        engine.WithVectorStore(vsmemory.New()),
+        engine.WithEmbedder(embedder.NewOpenAIEmbedder(os.Getenv("OPENAI_API_KEY"))),
+        engine.WithChunker(chunker.NewRecursiveChunker()),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer eng.Stop(ctx)
+
+    col := &collection.Collection{Name: "handbook"}
+    if err := eng.CreateCollection(ctx, col); err != nil {
+        log.Fatal(err)
+    }
+
+    res, err := eng.Ingest(ctx, &engine.IngestInput{
+        CollectionID: col.ID,
+        Title:        "Leave policy",
+        Content:      "Full-time staff get 25 days of paid leave a year.",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("ingested %s into %d chunks\n", res.DocumentID, res.ChunkCount)
+
+    hits, err := eng.Retrieve(ctx, "How many vacation days do I get?",
+        engine.WithCollection(col.ID),
+        engine.WithTopK(3),
     )
     if err != nil {
         log.Fatal(err)
     }
 
-    // Create a collection.
-    col, _ := engine.CreateCollection(ctx, weave.CreateCollectionInput{
-        Name:         "product-docs",
-        ChunkSize:    512,
-        ChunkOverlap: 50,
-    })
-
-    // Ingest a document.
-    doc, _ := engine.Ingest(ctx, col.ID, weave.IngestInput{
-        Title:   "Return Policy",
-        Content: "Our return policy allows returns within 30 days...",
-        Source:  "faq.md",
-    })
-    fmt.Printf("ingested doc=%s state=%s chunks=%d\n",
-        doc.ID, doc.State, doc.ChunkCount)
-
-    // Retrieve relevant chunks.
-    results, _ := engine.Retrieve(ctx, col.ID, &weave.RetrieveInput{
-        Query: "How long do I have to return an item?",
-        TopK:  3,
-    })
-    for _, r := range results {
-        fmt.Printf("[%.2f] %s\n", r.Score, r.Content[:60])
+    prompt, err := eng.Assemble(ctx, hits, engine.AssembleParams{MaxTokens: 1024})
+    if err != nil {
+        log.Fatal(err)
     }
+    fmt.Println(prompt.Context)
 }
 ```
 
 ## Where to go next
 
 <Cards>
-  <Card title="Getting started" href="/docs/getting-started" description="Install Weave and ingest your first document in minutes." />
-  <Card title="Architecture" href="/docs/architecture" description="Understand how the packages fit together." />
-  <Card title="Core concepts" href="/docs/concepts/entities" description="Learn about Collections, Documents, and Chunks." />
-  <Card title="HTTP API reference" href="/docs/api-reference/http-api" description="Full HTTP API documentation for all 12 endpoints." />
+  <Card title="Getting started" href="/docs/getting-started" description="Install Weave and ingest your first document." />
+  <Card title="Architecture" href="/docs/architecture" description="How the packages fit together." />
+  <Card title="Core concepts" href="/docs/concepts/entities" description="Collections, documents and chunks." />
+  <Card title="HTTP API reference" href="/docs/api-reference/http-api" description="The 13 routes the Forge extension mounts." />
 </Cards>

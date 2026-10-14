@@ -1,15 +1,9 @@
 ---
 title: SQLite Store
-description: Lightweight SQLite MetadataStore using Grove ORM with sqlitedriver.
+description: Lightweight SQLite metadata store using Grove with sqlitedriver.
 ---
 
-The `store/sqlite` package provides a SQLite-backed MetadataStore using the [Grove ORM](https://github.com/xraph/grove) with `sqlitedriver`. It is suitable for embedded applications, CLI tools, and single-node services that don't require a separate database server.
-
-## Installation
-
-```bash
-go get github.com/xraph/weave/store/sqlite
-```
+The `store/sqlite` package keeps collections, documents and chunks in SQLite through [Grove](https://github.com/xraph/grove) and its `sqlitedriver`. Use it for embedded apps, CLI tools and single-node services that don't want a database server.
 
 ## Setup
 
@@ -17,67 +11,67 @@ go get github.com/xraph/weave/store/sqlite
 import (
     "github.com/xraph/grove"
     "github.com/xraph/grove/drivers/sqlitedriver"
+
     sqlitestore "github.com/xraph/weave/store/sqlite"
 )
 
-// Open a SQLite connection via Grove's sqlitedriver.
-db := grove.Open(sqlitedriver.New("weave.db"))
+sdb := sqlitedriver.New()
+if err := sdb.Open(ctx, "weave.db"); err != nil {
+    log.Fatal(err)
+}
+db, err := grove.Open(sdb)
+if err != nil {
+    log.Fatal(err)
+}
 
-store := sqlitestore.New(db)
+st := sqlitestore.New(db)
+if err := st.Migrate(ctx); err != nil {
+    log.Fatal(err)
+}
 ```
 
 ## Migrations
 
-```go
-if err := store.Migrate(ctx); err != nil {
-    log.Fatal("migrate:", err)
-}
-```
-
-Creates the same three tables as the PostgreSQL store (`weave_collections`, `weave_documents`, `weave_chunks`) using the Grove migration orchestrator with SQLite-compatible column types.
+`Migrate` runs `sqlitestore.Migrations` through Grove's migration orchestrator. It creates the same three tables as the PostgreSQL store (`weave_collections`, `weave_documents`, `weave_chunks`) with SQLite column types, and the same unique constraints: collection names per tenant, content hashes per collection.
 
 ## Pairing with a vector store
 
-SQLite does not support pgvector. Pair it with the in-memory vector store for single-node use:
+SQLite has no pgvector, so pair it with the in-memory vector store on a single node:
 
 ```go
 import (
+    "github.com/xraph/weave/chunker"
+    "github.com/xraph/weave/engine"
     sqlitestore "github.com/xraph/weave/store/sqlite"
-    memvec "github.com/xraph/weave/vectorstore/memory"
+    vsmemory "github.com/xraph/weave/vectorstore/memory"
 )
 
 eng, err := engine.New(
     engine.WithStore(sqlitestore.New(db)),
-    engine.WithVectorStore(memvec.New()),
+    engine.WithVectorStore(vsmemory.New()),
     engine.WithEmbedder(emb),
+    engine.WithChunker(chunker.NewRecursiveChunker()),
 )
 ```
 
-## Internals
-
-| Aspect | Detail |
-|--------|--------|
-| Driver | Grove ORM with `sqlitedriver` (SQLite) |
-| Migrations | Grove migration orchestrator with programmatic migrations |
-| Transactions | Database-level transactions via SQLite |
+The in-memory vectors are gone on restart while the metadata stays. After a restart, call `eng.ReindexCollection` for each collection to rebuild the vectors from the stored chunks, or use a persistent vector store.
 
 ## Lifecycle
 
 | Method | Behaviour |
 |--------|-----------|
-| `Migrate(ctx)` | Creates tables and indexes using the Grove migration orchestrator |
-| `Ping(ctx)` | Verifies database connectivity |
-| `Close()` | Closes the underlying database connection |
+| `Migrate(ctx)` | Applies pending migrations through the orchestrator |
+| `Ping(ctx)` | Pings the database |
+| `Close()` | Closes the `*grove.DB` |
 
-## When to use
+## When to use it
 
-- **Local development** -- single-file database, no server process required.
-- **Testing** -- fast, isolated store with no external dependencies.
-- **Embedded / single-process** -- CLI tools, desktop apps, or edge deployments.
-- **CI pipelines** -- deterministic tests without a database container.
+- Local development, with a single-file database and no server process.
+- Tests that want a real SQL store without a container.
+- CLI tools, desktop apps and edge deployments.
 
 ## Limitations
 
-- **Single-writer** -- SQLite uses database-level write locks. High write concurrency will serialize.
-- **No pgvector** -- vector similarity search requires a separate vector store.
-- **Not horizontally scalable** -- suited for single-process or embedded use.
+- SQLite takes a database-wide write lock, so heavy concurrent writes queue up.
+- No vector search in the database; you need a separate vector store.
+- One process at a time.

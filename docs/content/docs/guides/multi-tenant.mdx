@@ -1,0 +1,101 @@
+---
+title: Multi-Tenant Guide
+description: Patterns for tenant isolation, per-tenant collections and safe data deletion in Weave.
+---
+
+Weave stamps a tenant on everything it writes and filters retrieval by it, but it leaves reads and deletes by ID to you. This guide shows how to set the tenant, where to add your own checks, and how to delete a tenant's data. [Multi-tenancy](/docs/concepts/multi-tenancy) has the call-by-call detail.
+
+## Set the tenant at the request boundary
+
+In a Forge app, a global middleware puts the tenant on the request context, and the Weave routes and your own handlers pick it up from there:
+
+```go
+app.Router().UseGlobal(func(next forge.Handler) forge.Handler {
+    return func(ctx forge.Context) error {
+        tenantID := tenantFromAuth(ctx) // your JWT or API key lookup
+        ctx.WithContext(weave.WithTenant(ctx.Context(), tenantID))
+        return next(ctx)
+    }
+})
+```
+
+Take the tenant from something the caller can't forge, such as verified token claims, not a header they control.
+
+## What's isolated for you
+
+- Collections, documents and chunks created under the context are stamped with its tenant.
+- `Retrieve` and `HybridSearch` only search vectors with that tenant.
+- Collection names are unique per tenant, and `GetCollectionByName` looks within the tenant.
+
+## What you have to check
+
+- `GetCollection`, `GetDocument`, `DeleteCollection`, `DeleteDocument`, `CollectionStats` and `ReindexCollection` act on any ID. Compare the loaded row's `TenantID` with the context before you act.
+- `ListCollections` and `ListDocuments` return every tenant unless you set the filter's `Tenant`.
+- `Ingest` doesn't check that the collection belongs to the caller.
+- `AppID` is stored on collections and not used for any filtering.
+- IDs aren't typed by entity: `id.CollectionID` and `id.DocumentID` are both `id.ID`, so the compiler won't catch a mix-up. `id.ParseCollectionID` and friends check the prefix.
+
+```go
+func ownedCollection(ctx context.Context, eng *engine.Engine, colID id.CollectionID) (*collection.Collection, error) {
+    col, err := eng.GetCollection(ctx, colID)
+    if err != nil {
+        return nil, err
+    }
+    if col.TenantID != weave.TenantFromContext(ctx) {
+        return nil, weave.ErrCollectionNotFound
+    }
+    return col, nil
+}
+```
+
+## Per-tenant collections
+
+Each tenant can have its own collections with different chunk sizes:
+
+```go
+ctxA := weave.WithTenant(ctx, "tenant-a")
+err := eng.CreateCollection(ctxA, &collection.Collection{Name: "support-docs", ChunkSize: 256})
+
+ctxB := weave.WithTenant(ctx, "tenant-b")
+err = eng.CreateCollection(ctxB, &collection.Collection{Name: "support-docs", ChunkSize: 1024})
+```
+
+Both are named `support-docs`, which is fine across tenants. They share the engine's embedder, though. If tenants need different embedding models, give each model its own engine and vector store, since vectors of different sizes can't sit in one pgvector column.
+
+## Deleting tenant data
+
+`DeleteDocument` removes a document's vectors, chunks and row. `DeleteCollection` does the same for every document in a collection, then removes the collection.
+
+To delete everything a tenant owns, list its collections with an explicit tenant filter and delete each one:
+
+```go
+func deleteTenant(ctx context.Context, eng *engine.Engine, tenantID string) error {
+    cols, err := eng.ListCollections(ctx, &collection.ListFilter{Tenant: &tenantID})
+    if err != nil {
+        return err
+    }
+    for _, col := range cols {
+        if err := eng.DeleteCollection(ctx, col.ID); err != nil {
+            return err
+        }
+    }
+    return nil
+}
+```
+
+Don't leave the filter's `Tenant` nil here: that lists every tenant's collections.
+
+This only reaches collections the tenant owns. A document the tenant ingested into someone else's collection carries the tenant's ID but lives in the other collection; find those with `ListDocuments` and a `Tenant` filter if that can happen in your app.
+
+A failed vector delete during `DeleteCollection` or `DeleteDocument` is logged and doesn't stop the metadata delete, so the vectors can outlive the rows. Hits for them come back from `Retrieve` with `Orphaned` set. Check your logs (pass `engine.WithLogger`) when you need deletion to be complete.
+
+## Background jobs
+
+```go
+func reindex(eng *engine.Engine, tenantID string, colID id.CollectionID) error {
+    ctx := weave.WithTenant(context.Background(), tenantID)
+    return eng.ReindexCollection(ctx, colID)
+}
+```
+
+Don't run background work on a request context: it's cancelled when the request ends.

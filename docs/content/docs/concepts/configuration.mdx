@@ -5,38 +5,42 @@ description: Options and defaults for engine.New and the Forge extension.
 
 ## Engine options
 
-`engine.New` accepts a variadic list of option functions:
+`engine.New` takes a variadic list of options:
 
 ```go
 eng, err := engine.New(
-    engine.WithStore(pgStore),            // required
-    engine.WithVectorStore(pgVec),        // required
-    engine.WithEmbedder(myEmbedder),      // required
-    engine.WithChunker(myChunker),        // optional
-    engine.WithLoader(myLoader),          // optional
-    engine.WithRetriever(myRetriever),    // optional
-    engine.WithExtension(metricsPlugin),  // optional, repeatable
-    engine.WithLogger(slog.Default()),    // optional
+    engine.WithStore(st),
+    engine.WithVectorStore(vs),
+    engine.WithEmbedder(emb),
+    engine.WithChunker(chunker.NewRecursiveChunker()),
+    engine.WithLoader(loader.NewMarkdownLoader()),
+    engine.WithRetriever(r),
+    engine.WithExtension(observability.NewMetricsExtension()),
+    engine.WithLogger(logger),
+    engine.WithConfig(weave.DefaultConfig()),
 )
 ```
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `WithStore(s)` | `store.Store` | -- | **Required.** Metadata store for collections, documents, chunks. |
-| `WithVectorStore(v)` | `vectorstore.VectorStore` | -- | **Required.** Vector store for embeddings. |
-| `WithEmbedder(e)` | `embedder.Embedder` | -- | **Required.** Embedding model implementation. |
-| `WithChunker(c)` | `chunker.Chunker` | recursive chunker | Text chunking implementation. |
-| `WithLoader(l)` | `loader.Loader` | `nil` | Document loader for binary formats. |
-| `WithRetriever(r)` | `retriever.Retriever` | built-in | Custom retrieval strategy. |
-| `WithExtension(x)` | `plugins.Extension` | `nil` | Lifecycle hook plugin (repeatable). |
-| `WithLogger(l)` | `*slog.Logger` | `slog.Default()` | Structured logger for internal events. |
+| Option | Type | Default | What happens without it |
+|--------|------|---------|-------------------------|
+| `WithStore(s)` | `store.Store` | none | Every collection and document call returns `weave.ErrNoStore` |
+| `WithVectorStore(v)` | `vectorstore.VectorStore` | none | `Ingest` and `ReindexCollection` return `ErrNoVectorStore`; `Retrieve` fails unless you set a retriever |
+| `WithEmbedder(e)` | `embedder.Embedder` | none | `Ingest` and `ReindexCollection` return `ErrNoEmbedder`; `Retrieve` fails unless you set a retriever |
+| `WithChunker(c)` | `chunker.Chunker` | none | `Ingest` returns `ErrNoChunker` |
+| `WithLoader(l)` | `loader.Loader` | none | Content is chunked as it is |
+| `WithRetriever(r)` | `retriever.Retriever` | none | `Retrieve` embeds the query and searches the vector store directly |
+| `WithExtension(x)` | `ext.Extension` | none | Repeatable; adds a lifecycle hook |
+| `WithLogger(l)` | go-utils `log.Logger` | a no-op logger | Nothing is logged |
+| `WithConfig(cfg)` | `weave.Config` | `weave.DefaultConfig()` | The defaults below apply |
 
-## Default Config
+There's no default chunker or embedder. You always pass both.
+
+## weave.Config
 
 ```go
 weave.Config{
-    DefaultChunkSize:      512,                      // tokens
-    DefaultChunkOverlap:   50,                       // tokens
+    DefaultChunkSize:      512,
+    DefaultChunkOverlap:   50,
     DefaultEmbeddingModel: "text-embedding-3-small",
     DefaultChunkStrategy:  "recursive",
     DefaultTopK:           10,
@@ -45,99 +49,103 @@ weave.Config{
 }
 ```
 
-These defaults apply when a `CreateCollectionInput` omits the corresponding field. Per-collection configuration overrides the engine defaults.
+That's what `weave.DefaultConfig()` returns. `WithConfig` replaces the whole struct, so start from `DefaultConfig()` and change the fields you want.
 
-## Per-collection overrides
+| Field | Used by |
+|-------|---------|
+| `DefaultChunkSize`, `DefaultChunkOverlap` | `CreateCollection`, for a collection that leaves `ChunkSize` or `ChunkOverlap` at zero. Ingest then chunks with the collection's values. |
+| `DefaultEmbeddingModel`, `DefaultChunkStrategy` | `CreateCollection` records them on the collection. Nothing else reads them: the embedder and chunker you configured run whatever the collection says. |
+| `DefaultTopK` | `Retrieve` and `HybridSearch` when you don't set a top K |
+| `ShutdownTimeout` | Nothing yet |
+| `IngestConcurrency` | Nothing yet. `IngestBatch` ingests one document at a time. |
 
-Each collection stores its own chunking and embedding configuration:
+Sizes are in tokens, and the built-in chunkers treat a token as four characters.
+
+## Per-collection settings
+
+Each collection keeps its own chunk settings, and ingest uses them:
 
 ```go
-col, _ := engine.CreateCollection(ctx, weave.CreateCollectionInput{
-    Name:           "legal-docs",
-    EmbeddingModel: "text-embedding-3-large",  // override default model
-    EmbeddingDims:  3072,                      // must match model output
-    ChunkStrategy:  "fixed",                   // override default strategy
-    ChunkSize:      1024,                      // override default size
-    ChunkOverlap:   100,                       // override default overlap
-    Metadata:       map[string]string{
-        "domain": "legal",
-    },
-})
+col := &collection.Collection{
+    Name:          "legal-docs",
+    ChunkSize:     1024,
+    ChunkOverlap:  100,
+    EmbeddingDims: 3072,
+    Metadata:      map[string]string{"domain": "legal"},
+}
+err := eng.CreateCollection(ctx, col)
 ```
 
-When ingesting documents into this collection, Weave uses the collection's configuration rather than the engine defaults.
+Only `ChunkSize` and `ChunkOverlap` change how documents are processed. `EmbeddingModel`, `EmbeddingDims` and `ChunkStrategy` are stored for your reference. If you want a different model or chunker for one collection, build a separate engine for it.
+
+`UpdateCollection` can change a collection's name, description and metadata after the fact. It deliberately can't change the chunk or embedding settings, because Weave can't re-chunk documents that are already in.
 
 ## Forge extension options
 
-The `extension.New` function accepts its own set of options:
-
 ```go
 ext := extension.New(
-    extension.WithStore(pgStore),
-    extension.WithVectorStore(pgVec),
-    extension.WithExtension(metricsPlugin),
-    extension.WithDisableRoutes(),
-    extension.WithDisableMigrate(),
+    extension.WithStore(st),
+    extension.WithVectorStore(vs),
+    extension.WithEngineOption(engine.WithEmbedder(emb)),
+    extension.WithEngineOption(engine.WithChunker(chunker.NewRecursiveChunker())),
+    extension.WithExtension(observability.NewMetricsExtension()),
     extension.WithBasePath("/weave"),
-    extension.WithGroveDatabase(""),
 )
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `WithStore(s)` | `store.Store` | -- | MetadataStore (auto-resolved from grove if not set). |
-| `WithVectorStore(v)` | `vectorstore.VectorStore` | -- | Vector store. |
-| `WithExtension(x)` | `plugins.Extension` | -- | Lifecycle hook plugin (repeatable). |
-| `WithEngineOption(opt)` | `engine.Option` | -- | Pass engine option directly. |
-| `WithConfig(cfg)` | `Config` | defaults | Full config struct. |
-| `WithDisableRoutes()` | -- | `false` | Skip HTTP route registration. |
-| `WithDisableMigrate()` | -- | `false` | Skip migrations on Start. |
-| `WithBasePath(path)` | `string` | `"/weave"` | URL prefix for all weave routes. |
-| `WithGroveDatabase(name)` | `string` | `""` | Named grove.DB to resolve from DI. |
-| `WithRequireConfig(b)` | `bool` | `false` | Require config in YAML files. |
+| `WithStore(s)` | `store.Store` | none | Metadata store. A `*grove.DB` in the container replaces it, see below. |
+| `WithVectorStore(v)` | `vectorstore.VectorStore` | none | Vector store |
+| `WithEngineOption(opt)` | `engine.Option` | none | Any engine option. This is how you pass the embedder, chunker, loader and retriever. |
+| `WithExtension(x)` | `plugins.Extension` | none | Lifecycle hook, repeatable |
+| `WithConfig(cfg)` | `extension.Config` | `extension.DefaultConfig()` | Whole config struct |
+| `WithBasePath(path)` | `string` | `"/weave"` | Route prefix |
+| `WithDisableRoutes()` | | off | Don't mount the HTTP routes |
+| `WithDisableMigrate()` | | off | Don't run `Migrate` on `Start` |
+| `WithGroveDatabase(name)` | `string` | `""` | Resolve a `*grove.DB` from the container (by name, or the default one for `""`) and build the matching store |
+| `WithRequireConfig(b)` | `bool` | `false` | Fail `Register` when no `extensions.weave` or `weave` key is in the config |
 
-## File-based configuration (YAML)
+The extension has no embedder or chunker option of its own.
 
-When running as a Forge extension, Weave automatically loads configuration from YAML config files. The extension looks for config under the following keys (in order):
+Store resolution happens in `Register`. With `WithGroveDatabase` (or `grove_database` in YAML) the extension resolves that database and fails if it isn't there. Without it, the extension looks for a default `*grove.DB` in the container anyway and, if it finds one, uses it. Either way it builds a `postgres`, `sqlite` or `mongo` store from the driver name, and that store wins over one you passed with `WithStore`. If there's no grove database and no `WithStore`, the engine has no store, and `Start` skips the migration.
 
-1. `extensions.weave` -- standard Forge extension config namespace
-2. `weave` -- top-level shorthand
+## YAML configuration
 
-### Example
+The extension reads `extensions.weave` and falls back to a top-level `weave` key:
 
 ```yaml
-# forge.yaml
 extensions:
   weave:
+    base_path: /weave
     disable_routes: false
     disable_migrate: false
-    base_path: "/weave"
+    grove_database: ""
     default_chunk_size: 512
     default_chunk_overlap: 50
-    default_embedding_model: "text-embedding-3-small"
-    default_chunk_strategy: "recursive"
+    default_embedding_model: text-embedding-3-small
+    default_chunk_strategy: recursive
     default_top_k: 10
-    shutdown_timeout: "30s"
+    shutdown_timeout: 30s
     ingest_concurrency: 4
-    grove_database: ""
 ```
 
-### Config fields
-
-| YAML Key | Type | Default | Description |
-|----------|------|---------|-------------|
-| `disable_routes` | `bool` | `false` | Skip HTTP route registration |
-| `disable_migrate` | `bool` | `false` | Skip migrations on Start |
-| `base_path` | `string` | `"/weave"` | URL prefix for all routes |
-| `default_chunk_size` | `int` | `512` | Default tokens per chunk |
-| `default_chunk_overlap` | `int` | `50` | Default token overlap |
-| `default_embedding_model` | `string` | `"text-embedding-3-small"` | Default embedding model |
-| `default_chunk_strategy` | `string` | `"recursive"` | Default chunking strategy |
-| `default_top_k` | `int` | `10` | Default similarity search result count |
-| `shutdown_timeout` | `duration` | `"30s"` | Max graceful shutdown wait |
-| `ingest_concurrency` | `int` | `4` | Parallel ingest operations |
-| `grove_database` | `string` | `""` | Named grove.DB from DI |
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `base_path` | string | `/weave` | Route prefix |
+| `disable_routes` | bool | `false` | Skip route registration |
+| `disable_migrate` | bool | `false` | Skip `Migrate` on `Start` |
+| `grove_database` | string | `""` | Named `*grove.DB` to build the store from |
+| `default_chunk_size` | int | `512` | Engine `DefaultChunkSize` |
+| `default_chunk_overlap` | int | `50` | Engine `DefaultChunkOverlap`; must be smaller than `default_chunk_size` or `Register` fails |
+| `default_embedding_model` | string | `text-embedding-3-small` | Recorded on new collections |
+| `default_chunk_strategy` | string | `recursive` | Recorded on new collections |
+| `default_top_k` | int | `10` | Engine `DefaultTopK` |
+| `shutdown_timeout` | duration | `30s` | Not used yet |
+| `ingest_concurrency` | int | `4` | Not used yet |
 
 ### Merge behaviour
 
-File-based configuration is merged with programmatic options. Programmatic options set via `extension.New(...)` take precedence over YAML values.
+When the config file has a weave section, its values win. A programmatic value only fills a field the file leaves empty or zero, and `WithDisableRoutes` and `WithDisableMigrate` turn their flag on whatever the file says. Anything still zero after that gets the default. When the file has no weave section, your programmatic config is used with the defaults filled in.
+
+An engine option passed with `WithEngineOption(engine.WithConfig(...))` is applied after the extension's own config, so it wins.

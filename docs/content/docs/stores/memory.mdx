@@ -1,44 +1,45 @@
 ---
 title: In-Memory Store
-description: In-memory MetadataStore and VectorStore for development, testing, and prototyping.
+description: In-memory metadata store and vector store for development, testing and prototyping.
 ---
 
-Weave ships two in-memory store implementations — one for metadata (collections, documents, chunks) and one for vectors. Both are zero-dependency and suitable for local development and unit tests.
+Weave ships two in-memory stores: one for metadata (collections, documents, chunks) and one for vectors. Neither has dependencies, and both lose everything when the process exits.
 
-## MetadataStore
+## Metadata store
 
 ```go
 import "github.com/xraph/weave/store/memory"
 
-store := memory.New()
+st := memory.New()
 ```
 
-`memory.Store` implements `store.Store` (the composite MetadataStore interface). It stores all entities in Go maps protected by a `sync.RWMutex`. All operations are scoped to tenant and app as usual — the in-memory store enforces the same isolation guarantees as the PostgreSQL implementation.
+`memory.Store` implements `store.Store`. It keeps entities in Go maps behind a `sync.RWMutex` and follows the same rules as the database stores: collection names are unique per tenant, the same content hash can't appear twice in a collection, and list filters apply `Tenant` only when you set it.
 
-## VectorStore
+## Vector store
 
 ```go
-import "github.com/xraph/weave/vectorstore/memory"
+import vsmemory "github.com/xraph/weave/vectorstore/memory"
 
-vecStore := memory.New()
+vs := vsmemory.New()
 ```
 
-`vectorstore/memory.Store` implements `vectorstore.VectorStore`. It stores vectors in a flat slice and performs brute-force cosine similarity search on every `Search` call. This is fast enough for development and small test datasets.
+`vectorstore/memory.Store` implements `vectorstore.VectorStore`. It keeps entries in a map and scores every one on each `Search` with cosine similarity, applying the metadata filter and `tenant_id` as exact matches. Ties are broken by ID, so the order is stable. With no `TopK` it returns 10.
 
 ## Using both together
 
 ```go
 import (
-    "github.com/xraph/weave"
+    "github.com/xraph/weave/chunker"
     "github.com/xraph/weave/engine"
-    memstore "github.com/xraph/weave/store/memory"
-    memvec "github.com/xraph/weave/vectorstore/memory"
+    "github.com/xraph/weave/store/memory"
+    vsmemory "github.com/xraph/weave/vectorstore/memory"
 )
 
 eng, err := engine.New(
-    engine.WithStore(memstore.New()),
-    engine.WithVectorStore(memvec.New()),
-    engine.WithEmbedder(myEmbedder),
+    engine.WithStore(memory.New()),
+    engine.WithVectorStore(vsmemory.New()),
+    engine.WithEmbedder(emb),
+    engine.WithChunker(chunker.NewRecursiveChunker()),
 )
 ```
 
@@ -46,34 +47,36 @@ eng, err := engine.New(
 
 | Method | Behaviour |
 |--------|-----------|
-| `Migrate(ctx)` | No-op — no schema to create |
-| `Ping(ctx)` | Always returns `nil` |
-| `Close()` | No-op — nothing to release |
+| `Migrate(ctx)` | Does nothing |
+| `Ping(ctx)` | Returns `nil` |
+| `Close()` | Does nothing |
 
 ## Limitations
 
-- **Not persistent** — all data is lost on process restart
-- **Not shared** — each `memory.New()` instance is independent; multiple servers cannot share state
-- **Brute-force search** — O(n) over all vectors; impractical for large datasets
+- Nothing is persisted.
+- Each `New()` is independent, so several processes can't share one.
+- Search is a full scan over every vector, which is fine for tests and small data sets and slow for large ones.
 
-For production use, switch to the PostgreSQL MetadataStore and pgvector VectorStore.
+## Moving to PostgreSQL
 
-## Swapping to PostgreSQL
-
-The in-memory stores implement the same interfaces as the production stores, so switching is a one-line change at construction:
+The stores implement the same interfaces, so the switch happens where you build the engine:
 
 ```go
 // Development
-eng, _ := engine.New(
-    engine.WithStore(memstore.New()),
-    engine.WithVectorStore(memvec.New()),
+eng, err := engine.New(
+    engine.WithStore(memory.New()),
+    engine.WithVectorStore(vsmemory.New()),
     engine.WithEmbedder(emb),
+    engine.WithChunker(chunker.NewRecursiveChunker()),
 )
 
 // Production
-eng, _ := engine.New(
-    engine.WithStore(pgstore.New(db)),
-    engine.WithVectorStore(pgvec.New(db)),
+eng, err = engine.New(
+    engine.WithStore(postgres.New(db)),
+    engine.WithVectorStore(pgvector.New(db)),
     engine.WithEmbedder(emb),
+    engine.WithChunker(chunker.NewRecursiveChunker()),
 )
 ```
+
+Remember the extra steps on the production side: call `Migrate` on the Postgres store and create the pgvector table yourself, see [PostgreSQL store](/docs/stores/postgres#pgvector).

@@ -1,15 +1,9 @@
 ---
 title: MongoDB Store
-description: Document-oriented MetadataStore using Grove ORM with mongodriver for MongoDB.
+description: Document-oriented metadata store using Grove with mongodriver for MongoDB.
 ---
 
-The `store/mongo` package provides a MongoDB-backed MetadataStore using the [Grove ORM](https://github.com/xraph/grove) with `mongodriver`. It stores collections, documents, and chunks in MongoDB collections with compound indexes for efficient tenant-scoped queries.
-
-## Installation
-
-```bash
-go get github.com/xraph/weave/store/mongo
-```
+The `store/mongo` package keeps collections, documents and chunks in MongoDB through [Grove](https://github.com/xraph/grove) and its `mongodriver`.
 
 ## Setup
 
@@ -17,85 +11,60 @@ go get github.com/xraph/weave/store/mongo
 import (
     "github.com/xraph/grove"
     "github.com/xraph/grove/drivers/mongodriver"
+
     mongostore "github.com/xraph/weave/store/mongo"
 )
 
-// Open a MongoDB connection via Grove's mongodriver.
-db := grove.Open(mongodriver.New(
-    mongodriver.WithURI("mongodb://localhost:27017"),
-    mongodriver.WithDatabase("weave"),
-))
+mdb := mongodriver.New()
+if err := mdb.Open(ctx, "mongodb://localhost:27017", mongodriver.WithDatabase("weave")); err != nil {
+    log.Fatal(err)
+}
+db, err := grove.Open(mdb)
+if err != nil {
+    log.Fatal(err)
+}
 
-store := mongostore.New(db)
+st := mongostore.New(db)
+if err := st.Migrate(ctx); err != nil {
+    log.Fatal(err)
+}
 ```
 
 ## Migrations
 
-```go
-if err := store.Migrate(ctx); err != nil {
-    log.Fatal("migrate:", err)
-}
-```
+`Migrate` creates the three MongoDB collections and their indexes:
 
-Creates collections with JSON Schema validation (auto-generated from Grove model structs) and applies compound and unique indexes on all three collections (`weave_collections`, `weave_documents`, `weave_chunks`) for efficient queries scoped by tenant and app.
+| Collection | Holds | Indexes |
+|------------|-------|---------|
+| `weave_collections` | Collections | unique `(tenant_id, name)`, `tenant_id`, `created_at` |
+| `weave_documents` | Documents | unique `(collection_id, content_hash)`, `(collection_id, state)`, `tenant_id`, `created_at` |
+| `weave_chunks` | Chunk text and offsets | `(document_id, index)`, `collection_id` |
+
+It runs each migration's `Up` directly. The same migrations are exported as `mongostore.Migrations`, a Grove migration group, for Grove's orchestrator.
+
+The unique indexes give you `weave.ErrCollectionAlreadyExists` and `weave.ErrDuplicateDocument`, the same as the SQL stores.
 
 ## Pairing with a vector store
 
-Pair the MongoDB metadata store with a vector store for similarity search:
+MongoDB holds only the metadata. Pair it with any vector store, for example pgvector in a Postgres database:
 
 ```go
-import (
-    mongostore "github.com/xraph/weave/store/mongo"
-    pgvec "github.com/xraph/weave/vectorstore/pgvector"
-)
-
 eng, err := engine.New(
     engine.WithStore(mongostore.New(db)),
-    engine.WithVectorStore(pgvec.New(pool)),
+    engine.WithVectorStore(pgvector.New(pgDB)), // a separate *grove.DB on Postgres
     engine.WithEmbedder(emb),
+    engine.WithChunker(chunker.NewRecursiveChunker()),
 )
 ```
 
-## Internals
+## Tenancy
 
-| Aspect | Detail |
-|--------|--------|
-| Driver | Grove ORM with `mongodriver` (MongoDB) |
-| Migrations | Grove migrations with JSON Schema validation + indexes |
-| Transactions | Individual operations are atomic; multi-document transactions require explicit sessions |
-
-## Collections
-
-| Collection | Entity |
-|------------|--------|
-| `weave_collections` | Collection metadata -- name, model, chunk config, counters |
-| `weave_documents` | Document records -- state, hashes, source info |
-| `weave_chunks` | Chunk text and byte offsets |
-
-All collections include `tenant_id` and `app_id` fields, and queries filter on them automatically.
+Documents in `weave_collections` carry `tenant_id` and `app_id`, and documents and chunks carry `tenant_id`. Queries filter on the tenant only when a list filter's `Tenant` is set, as with every store; see [multi-tenancy](/docs/concepts/multi-tenancy).
 
 ## Lifecycle
 
 | Method | Behaviour |
 |--------|-----------|
-| `Migrate(ctx)` | Creates collections with JSON Schema validation and indexes |
-| `Ping(ctx)` | Verifies database connectivity |
-| `Close()` | Disconnects from MongoDB |
-
-## Grove Migrations
-
-The store exports a `Migrations` group for use with Grove's migration orchestrator. This enables tracked, versioned migrations across all stores in your application:
-
-```go
-import mongostore "github.com/xraph/weave/store/mongo"
-
-// mongostore.Migrations is a migrate.Group for the weave mongo store.
-// Register it with the grove migration orchestrator for coordinated migrations.
-```
-
-## When to use
-
-- **Document-oriented workloads** -- flexible schemas that evolve with your application.
-- **Horizontal scaling** -- MongoDB sharding for large-scale deployments.
-- **Cloud-native** -- MongoDB Atlas for fully managed deployments.
-- **Teams familiar with MongoDB** -- leverage existing document database expertise.
+| `Migrate(ctx)` | Creates the collections and indexes |
+| `Ping(ctx)` | Pings the server |
+| `Close()` | Closes the `*grove.DB` |

@@ -166,6 +166,13 @@ func (s *WeaviateStore) DeleteByMetadata(ctx context.Context, filter map[string]
 eng, _ := engine.New(engine.WithVectorStore(&WeaviateStore{client: weaviateClient}))
 ```
 
+The engine relies on a few things from a vector store:
+
+- `Search` applies every key in `opts.Filter` as an exact metadata match (the engine sends `collection_id` and `tenant_id` there) and treats an empty `TenantKey` as no tenant filter.
+- `SearchResult.ID` is the entry ID you were given, which is the chunk ID. The engine reads the chunk back by it.
+- `DeleteByMetadata` deletes every entry matching all the pairs. Document and collection deletes call it with `document_id` or `collection_id`.
+- Return `SearchResult.Vector` if you can. The MMR retriever needs it.
+
 ## Custom MetadataStore
 
 Implement `store.Store` (which embeds `collection.Store`, `document.Store`, `chunk.Store`) to use a different database:
@@ -187,3 +194,17 @@ eng, _ := engine.New(engine.WithStore(&MyStore{}))
 ```
 
 See [store/store.go](https://github.com/xraph/weave/blob/main/store/store.go) for the full interface definition.
+
+### Testing a custom store
+
+`store/storetest` is the conformance suite the built-in stores run. Point it at yours from a test:
+
+```go
+func TestMyStore(t *testing.T) {
+    storetest.Run(t, func(t *testing.T) store.Store {
+        return newMyStore(t)
+    })
+}
+```
+
+It checks filters, tenancy, ordering, duplicates, timestamps and nil metadata handling.

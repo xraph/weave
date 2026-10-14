@@ -272,15 +272,15 @@ You write a hook as any value that implements one or more of these methods, and 
 | Documents and reindex | `OnDocumentDeleted`, `OnReindexStarted`, `OnReindexCompleted` |
 | Shutdown | `OnShutdown` |
 
-`audit_hook.New(recorder)` turns these into audit events for Chronicle or any `Recorder`, and `observability.NewMetricsExtension()` counts ingests, retrievals and failures.
+`audithook.New(recorder)` (import path `github.com/xraph/weave/audit_hook`) turns these into audit events for Chronicle or any `Recorder`, and `observability.NewMetricsExtension()` counts ingests, retrievals and failures.
 
 ## Documentation
 
 | Topic | Read |
 | --- | --- |
 | First pipeline | [Getting started](https://www.xraph.com/docs/weave/getting-started), [architecture](https://www.xraph.com/docs/weave/architecture), [end-to-end example](https://www.xraph.com/docs/weave/guides/full-example) |
-| Ingestion | [Document ingestion](https://www.xraph.com/docs/weave/subsystems/recording), [loaders](https://www.xraph.com/docs/weave/subsystems/sinks), [chunkers](https://www.xraph.com/docs/weave/subsystems/erasure), [embedders](https://www.xraph.com/docs/weave/subsystems/compliance) |
-| Retrieval and context | [Semantic retrieval](https://www.xraph.com/docs/weave/subsystems/verification), [context assembler](https://www.xraph.com/docs/weave/subsystems/retention) |
+| Ingestion | [Document ingestion](https://www.xraph.com/docs/weave/subsystems/ingestion), [loaders](https://www.xraph.com/docs/weave/subsystems/loader), [chunkers](https://www.xraph.com/docs/weave/subsystems/chunker), [embedders](https://www.xraph.com/docs/weave/subsystems/embedder) |
+| Retrieval and context | [Semantic retrieval](https://www.xraph.com/docs/weave/subsystems/retrieval), [context assembler](https://www.xraph.com/docs/weave/subsystems/assembler) |
 | Storage | [PostgreSQL](https://www.xraph.com/docs/weave/stores/postgres), [SQLite](https://www.xraph.com/docs/weave/stores/sqlite), [MongoDB](https://www.xraph.com/docs/weave/stores/mongo), [Fabriq vectors](https://www.xraph.com/docs/weave/stores/fabriq) |
 | Tenants and config | [Multi-tenancy](https://www.xraph.com/docs/weave/concepts/multi-tenancy), [configuration](https://www.xraph.com/docs/weave/concepts/configuration) |
 | Forge and HTTP | [Forge extension](https://www.xraph.com/docs/weave/guides/forge-extension), [HTTP API](https://www.xraph.com/docs/weave/api-reference/http-api) |

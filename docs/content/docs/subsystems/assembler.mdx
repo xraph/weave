@@ -1,0 +1,139 @@
+---
+title: Context Assembler
+description: Building LLM-ready context strings from retrieved chunks with token budgeting and citations.
+---
+
+After retrieval, you need the hits as one block of text you can paste into a prompt, short enough to fit. You have two ways to get it: `engine.Assemble`, which takes the hits as they come out of `Retrieve`, and the `assembler` package, which you configure yourself.
+
+## engine.Assemble
+
+```go
+hits, err := eng.Retrieve(ctx, question, engine.WithCollection(colID), engine.WithTopK(10))
+if err != nil {
+    return err
+}
+
+ac, err := eng.Assemble(ctx, hits, engine.AssembleParams{MaxTokens: 2000})
+if err != nil {
+    return err
+}
+fmt.Println(ac.Context)
+
+for n, pos := range ac.Included {
+    fmt.Printf("[%d] -> %s\n", n+1, hits[pos].Chunk.DocumentID)
+}
+if ac.FirstExcluded >= 0 {
+    fmt.Println("budget ran out at hit", ac.FirstExcluded)
+}
+```
+
+`MaxTokens` zero or less means 4096. The result:
+
+| Field | Meaning |
+|-------|---------|
+| `Context` | The assembled text |
+| `TotalTokens` | Estimated tokens used |
+| `MaxTokens` | The budget that applied |
+| `Included` | Positions in `hits` that made it in, in marker order: marker `[n]` is `hits[Included[n-1]]` |
+| `FirstExcluded` | The first position that didn't make it in, or `-1` |
+| `TokenCounter` | Always `"chars/4"` |
+
+`engine.Assemble` always uses the default template and the four-characters-per-token estimate. Hits with a nil `Chunk` are skipped.
+
+`eng.AssembleRefs(ctx, refs, params)` does the same from a list of `engine.ChunkRef` (chunk ID and score), reading each chunk back by ID. Use it when you stored a ranking and want to rebuild its context later. A chunk that's gone is an error.
+
+## The assembler package
+
+Build an assembler when you want your own template or token counter:
+
+```go
+results := make([]retriever.Result, 0, len(hits))
+for _, h := range hits {
+    if h.Chunk != nil {
+        results = append(results, retriever.Result{Chunk: h.Chunk, Score: h.Score})
+    }
+}
+
+a := assembler.New(
+    assembler.WithMaxTokens(3000),
+    assembler.WithTemplate(&assembler.Template{
+        Header:      "Sources:\n\n",
+        Separator:   "\n\n",
+        ChunkFormat: "Source %d:\n%s",
+    }),
+)
+out, err := a.Assemble(ctx, results)
+if err != nil {
+    return err
+}
+fmt.Println(out.Context, out.TotalTokens, out.TruncatedCount)
+```
+
+Skip nil chunks before you call it: `Assembler.Assemble` reads `Chunk.Content` on every result and panics on a nil chunk.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `WithMaxTokens(n)` | 4096 | Token budget |
+| `WithTemplate(t)` | `assembler.DefaultTemplate()` | How chunks are laid out |
+| `WithTokenCounter(tc)` | `&assembler.SimpleTokenCounter{}` | Characters divided by four |
+
+## AssembleResult
+
+```go
+type AssembleResult struct {
+    Context        string     // the assembled text
+    Citations      []Citation // one per included chunk, in order
+    TotalTokens    int        // estimated tokens used
+    TruncatedCount int        // chunks skipped for budget
+}
+```
+
+## Token budget
+
+The assembler walks the results in order. A chunk that fits the remaining budget goes in. One that doesn't is skipped and counted in `TruncatedCount`, and the assembler keeps going, so a smaller chunk further down can still make it in. Only chunk text counts against the budget; the header and separators don't.
+
+## Citations
+
+Each included chunk becomes a `Citation`:
+
+```go
+type Citation struct {
+    ChunkIndex int               // position in the results slice you passed
+    Content    string            // chunk text
+    Score      float64           // retrieval score
+    Metadata   map[string]string // the chunk's metadata
+}
+```
+
+After `Retrieve`, a hydrated chunk's metadata includes `document_id`, `collection_id`, `tenant_id` and `chunk_index`, so you can link each citation back to its source.
+
+## Templates
+
+```go
+type Template struct {
+    Header      string // written first
+    Footer      string // written last
+    Separator   string // between chunks
+    ChunkFormat string // fmt verb pair: %d is the 1-based marker, %s the text
+}
+```
+
+The default is a `Relevant context:` header, `\n\n---\n\n` between chunks and `[%d] %s` for each chunk. Leave `ChunkFormat` empty to write the bare text.
+
+## Custom token counter
+
+```go
+type TokenCounter interface {
+    CountTokens(text string) int
+}
+```
+
+Pass yours with `assembler.WithTokenCounter`. A real tokenizer gives a tighter fit than the four-character estimate.
+
+## Simple assembly
+
+```go
+s := assembler.AssembleSimple(results)
+```
+
+joins the chunk texts with `\n\n---\n\n`. No budget, no markers.

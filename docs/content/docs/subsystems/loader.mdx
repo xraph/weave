@@ -1,0 +1,122 @@
+---
+title: Document Loader
+description: The Loader interface and built-in format handlers for extracting text from documents.
+---
+
+A loader is optional. It turns a document's raw content (Markdown, HTML, CSV, JSON) into plain text before chunking. Without one, Weave chunks `IngestInput.Content` as it is.
+
+## When the loader runs
+
+The engine calls the loader only when all three are true:
+
+1. A loader is set with `engine.WithLoader(l)`.
+2. `IngestInput.SourceType` isn't empty.
+3. `l.Supports(SourceType)` returns `true`.
+
+```go
+res, err := eng.Ingest(ctx, &engine.IngestInput{
+    CollectionID: colID,
+    Content:      rawMarkdown,     // the file's contents as a string
+    SourceType:   "text/markdown", // runs a Markdown loader
+})
+```
+
+The engine holds one loader. To handle several formats, write a small loader that dispatches on the type, or pick the format before you call `Ingest`.
+
+Only `LoadResult.Content` is used. The loader's `Metadata` isn't copied onto the document, so pass anything you want to keep in `IngestInput.Metadata`.
+
+## Loader interface
+
+```go
+// package loader
+type Loader interface {
+    Load(ctx context.Context, reader io.Reader) (*LoadResult, error)
+    Supports(mimeType string) bool
+}
+
+type LoadResult struct {
+    Content  string            // extracted text
+    Metadata map[string]string // format-specific metadata
+    MimeType string            // the loader's MIME type
+}
+```
+
+## Built-in loaders
+
+All of them live in the `loader` package.
+
+| Constructor | Supports | What it does |
+|-------------|----------|--------------|
+| `NewTextLoader()` | `text/plain` and `""` | Returns the text unchanged |
+| `NewMarkdownLoader()` | `text/markdown`, `text/x-markdown` | Strips code blocks, inline code, headers, emphasis, link and image syntax and list markers |
+| `NewHTMLLoader()` | `text/html`, `application/xhtml+xml` | Extracts the text, skipping `script`, `style` and `noscript` |
+| `NewCSVLoader()` | `text/csv` | Joins each row's cells with `" \| "` (change `Separator` on the struct) |
+| `NewJSONLoader(fields...)` | `application/json` | Pulls out the named fields, or every string value when you name none |
+| `NewURLLoader(delegate)` | `text/uri-list` | Fetches a URL with `LoadURL` and hands the body to `delegate` |
+| `NewDirectoryLoader(loaders...)` | nothing | Walks a directory with `LoadDir`, picking a loader per file by extension |
+
+The URL and directory loaders don't work through `engine.WithLoader`. `URLLoader.Load` takes a different parameter type from the interface, so a `*URLLoader` doesn't satisfy `loader.Loader` and won't compile as an engine option. `DirectoryLoader.Supports` always returns `false`. Call `LoadURL` and `LoadDir` yourself and ingest what they return:
+
+```go
+dir := loader.NewDirectoryLoader(
+    loader.NewMarkdownLoader(),
+    loader.NewTextLoader(),
+    loader.NewJSONLoader("title", "body"),
+)
+files, err := dir.LoadDir(ctx, "./handbook")
+if err != nil {
+    return
+}
+for _, f := range files {
+    _, err := eng.Ingest(ctx, &engine.IngestInput{
+        CollectionID: colID,
+        Source:       f.Metadata["source_path"],
+        Content:      f.Content,
+    })
+    _ = err
+}
+
+page, err := loader.NewURLLoader(loader.NewHTMLLoader()).LoadURL(ctx, "https://example.com/faq")
+if err != nil {
+    return
+}
+_, err = eng.Ingest(ctx, &engine.IngestInput{
+    CollectionID: colID,
+    Source:       page.Metadata["source_url"],
+    Content:      page.Content,
+})
+```
+
+`LoadDir` sets `source_path` in each result's metadata and skips files no loader supports. `LoadURL` sets `source_url`, and fails on any status other than 200. Use `NewURLLoaderWithClient` to pass your own `*http.Client`.
+
+## Custom loader
+
+```go
+type PDFLoader struct{}
+
+func (l *PDFLoader) Supports(mime string) bool {
+    return mime == "application/pdf"
+}
+
+func (l *PDFLoader) Load(ctx context.Context, r io.Reader) (*loader.LoadResult, error) {
+    data, err := io.ReadAll(r)
+    if err != nil {
+        return nil, err
+    }
+    text, err := extractPDF(data) // your PDF library
+    if err != nil {
+        return nil, err
+    }
+    return &loader.LoadResult{Content: text, MimeType: "application/pdf"}, nil
+}
+```
+
+Register it with `engine.WithLoader(&PDFLoader{})`. The engine hands the loader `strings.NewReader(input.Content)`, so binary formats go through a Go string. That works, since a Go string can hold any bytes, but the content hash and `ContentLength` are computed on the raw bytes, not the extracted text.
+
+## Using a loader on its own
+
+```go
+md := loader.NewMarkdownLoader()
+result, err := md.Load(ctx, strings.NewReader(markdownText))
+// result.Content is plain text
+```

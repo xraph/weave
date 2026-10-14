@@ -1,0 +1,103 @@
+---
+title: Document Ingestion
+description: How Weave ingests documents, through the full load, chunk, embed and store pipeline.
+---
+
+`engine.Ingest` is how content gets into Weave. It runs the whole pipeline synchronously and returns once the document is searchable, or failed.
+
+## Basic ingestion
+
+```go
+import (
+    "github.com/xraph/weave"
+    "github.com/xraph/weave/engine"
+)
+
+ctx = weave.WithTenant(ctx, "tenant-1")
+
+result, err := eng.Ingest(ctx, &engine.IngestInput{
+    CollectionID: colID,
+    Title:        "Product FAQ",
+    Content:      "Our return policy allows...",
+    Source:       "faq.md",
+    SourceType:   "text/markdown",
+})
+// result.DocumentID: TypeID of the new document (doc_...)
+// result.ChunkCount: number of chunks produced
+// result.State:      document.StateReady on success
+```
+
+## IngestInput fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `CollectionID` | `id.CollectionID` | Target collection. It has to exist. |
+| `Title` | `string` | Document title |
+| `Source` | `string` | File name, URL or any identifier you like |
+| `SourceType` | `string` | MIME type. Runs the loader when it supports this type. |
+| `Content` | `string` | Raw content. Empty content returns `weave.ErrEmptyContent`. |
+| `Metadata` | `map[string]string` | Stored on the document |
+
+## Ingestion pipeline
+
+`Ingest` runs these steps in order:
+
+1. Check that a store, embedder, vector store and chunker are configured and `Content` isn't empty.
+2. Read the collection, for its `ChunkSize`, `ChunkOverlap` and `ChunkStrategy`. A missing one returns `weave.ErrCollectionNotFound`.
+3. Hash the raw content with SHA-256.
+4. Create the document with `State=pending`, stamped with the tenant from the context.
+5. Fire `OnIngestStarted`, then update the document to `State=processing`.
+6. If a loader is configured and supports `SourceType`, replace the content with the loader's output.
+7. Chunk the content and fire `OnIngestChunked`.
+8. Embed all chunk texts in one `Embed` call and fire `OnIngestEmbedded`.
+9. Write the chunks to the metadata store.
+10. Upsert one vector per chunk, with `collection_id`, `document_id`, `tenant_id` and `chunk_index` in its metadata.
+11. Update the document to `State=ready` with its `ChunkCount`.
+12. Fire `OnIngestCompleted` with the elapsed time.
+
+If step 6 or anything after it fails, the document is set to `State=failed`, the error text goes in `Document.Error`, `OnIngestFailed` fires, and `Ingest` returns an `IngestResult` with the document ID and `State=failed` alongside an error wrapped as `weave: ingest failed: ...`.
+
+A failed ingest doesn't clean up after itself. The document row stays, and if the failure came after step 9 the chunks stay too. Delete it with `DeleteDocument` before you retry, because the leftover row holds the same content hash.
+
+The state updates in steps 5 and 11 are best effort: if the store write fails, `Ingest` doesn't notice.
+
+## Duplicate content
+
+Every store refuses a second document with the same content hash in the same collection. `Ingest` then fails at step 4 with an error that wraps `weave.ErrDuplicateDocument`, before anything is chunked or embedded:
+
+```go
+_, err := eng.Ingest(ctx, input)
+if errors.Is(err, weave.ErrDuplicateDocument) {
+    // already ingested into this collection
+}
+```
+
+The same content in a different collection is fine.
+
+## Batch ingestion
+
+`IngestBatch` calls `Ingest` for each input, one after another:
+
+```go
+results, err := eng.IngestBatch(ctx, []*engine.IngestInput{
+    {CollectionID: colID, Title: "Doc A", Content: "..."},
+    {CollectionID: colID, Title: "Doc B", Content: "..."},
+    {CollectionID: colID, Title: "Doc C", Content: "..."},
+})
+```
+
+It stops at the first error and returns the results it already has, without the failed one. The inputs can target different collections. The `IngestConcurrency` config field isn't read, so there's no parallelism.
+
+## Reindexing
+
+To re-embed a collection with the engine's current embedder:
+
+```go
+err := eng.ReindexCollection(ctx, colID)
+```
+
+Reindex fires `OnReindexStarted`, lists the collection's `ready` documents, deletes every vector with that `collection_id`, then embeds each document's stored chunks again and upserts them. `OnReindexCompleted` fires at the end. The chunks themselves aren't rebuilt, so changing a collection's chunk size has no effect on documents already ingested.
+
+## Deleting
+
+`DeleteDocument` removes the document's vectors (by `document_id`), its chunks and the document row, then fires `OnDocumentDeleted`. `DeleteCollection` does the same for a whole collection. A failed vector delete is logged at warn level and doesn't stop the metadata delete.

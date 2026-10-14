@@ -1,9 +1,9 @@
 ---
 title: Observability
-description: Built-in metrics extension and tracing support for Weave lifecycle events.
+description: The metrics extension, logging, and how to trace Weave lifecycle events yourself.
 ---
 
-Weave ships a `MetricsExtension` in the `observability` package that automatically records counters for every engine lifecycle event.
+Weave ships a `MetricsExtension` in the `observability` package. It's a lifecycle extension that bumps a counter on each engine event.
 
 ## Metrics extension
 
@@ -12,15 +12,16 @@ import "github.com/xraph/weave/observability"
 
 metricsExt := observability.NewMetricsExtension()
 
-engine, err := engine.New(
-    engine.WithStore(store),
-    engine.WithVectorStore(vecStore),
+eng, err := engine.New(
+    engine.WithStore(st),
+    engine.WithVectorStore(vs),
     engine.WithEmbedder(emb),
+    engine.WithChunker(chunker.NewRecursiveChunker()),
     engine.WithExtension(metricsExt),
 )
 ```
 
-Once registered, `metricsExt` increments the appropriate counter for every lifecycle event — no further configuration needed.
+That's all the setup there is. It doesn't count `IngestChunked`, `IngestEmbedded` or `Shutdown`, and it records no durations.
 
 ## Metric names
 
@@ -44,7 +45,7 @@ All metrics are prefixed with `weave.`:
 
 ## Using a custom metrics factory
 
-In a Forge application, pass the app's metrics factory to share the same metric registry:
+`NewMetricsExtension()` writes to its own collector, so the counters don't show up in your app's metrics endpoint. In a Forge application, pass the app's metrics instead:
 
 ```go
 import (
@@ -70,14 +71,14 @@ metricsExt := observability.NewMetricsExtension()
 
 // Register with engine...
 
-// Read counter values (implementation-defined, e.g. Prometheus):
+// Read the current values:
 fmt.Println("ingests completed:", metricsExt.IngestCompleted.Value())
 fmt.Println("chunks created:", metricsExt.ChunksCreated.Value())
 ```
 
 ## Tracing
 
-For distributed tracing, implement `ext.IngestStarted` and `ext.RetrievalStarted` with your tracer:
+Weave has no tracing built in. Hooks only see the start and end of an operation as separate calls with no shared span, so the simplest thing you can do is record an event per hook:
 
 ```go
 type TracingExtension struct {
@@ -99,20 +100,20 @@ Register it alongside the metrics extension: `engine.WithExtension(&TracingExten
 
 ## Logging
 
-Weave uses `log/slog` internally. Pass a custom logger at engine construction:
+The engine takes a go-utils `log.Logger` (the same logger type Forge uses), not a `*slog.Logger`:
 
 ```go
-logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-    Level: slog.LevelDebug,
-}))
+import log "github.com/xraph/go-utils/log"
 
-engine, err := engine.New(
+eng, err := engine.New(
     // ...
-    engine.WithLogger(logger),
+    engine.WithLogger(log.NewProductionLogger()),
 )
 ```
 
-The engine logs:
-- Chunk and embed step durations (DEBUG)
-- Failed vector deletions during collection/document delete (WARN)
-- Extension hook errors (WARN)
+Without `WithLogger` the engine logs nothing. With one, it logs at warn level when:
+
+- deleting a collection's or document's vectors fails (the metadata delete still goes ahead)
+- a lifecycle hook returns an error
+
+The Forge extension doesn't pass the app's logger to the engine. Add `extension.WithEngineOption(engine.WithLogger(...))` if you want these warnings.

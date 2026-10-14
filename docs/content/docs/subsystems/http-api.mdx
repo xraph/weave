@@ -1,0 +1,82 @@
+---
+title: HTTP API
+description: How the 13 Weave routes are mounted, scoped to tenants and mapped to errors.
+---
+
+The `api` package turns engine calls into Forge routes with OpenAPI metadata. The Forge extension mounts them under `/weave`, so the full paths start with `/weave/v1`. Every route takes and returns JSON. The [HTTP API reference](/docs/api-reference/http-api) has each route's request and response.
+
+## Mounting the routes
+
+With the Forge extension, there's nothing to do: `Register` mounts the routes under `base_path` (default `/weave`) unless you set `disable_routes`.
+
+```go
+app := forge.NewApp(forge.AppConfig{
+    Name: "search-api",
+    Extensions: []forge.Extension{
+        weaveext.New(
+            weaveext.WithStore(memory.New()),
+            weaveext.WithVectorStore(vsmemory.New()),
+            weaveext.WithEngineOption(engine.WithEmbedder(emb)),
+            weaveext.WithEngineOption(engine.WithChunker(chunker.NewRecursiveChunker())),
+            weaveext.WithBasePath("/rag"), // routes at /rag/v1/...
+        ),
+    },
+})
+```
+
+Without the extension, build an `api.API` and register it on a router or group yourself:
+
+```go
+a := api.New(eng, router)
+a.RegisterRoutes(router.Group("/weave")) // /weave/v1/...
+```
+
+`a.Handler()` returns an `http.Handler` with the routes registered on the router you passed (or a new Forge router when you passed nil), with no prefix.
+
+## Routes
+
+| Method and path | Does |
+|-----------------|------|
+| `POST /weave/v1/collections` | Create a collection |
+| `GET /weave/v1/collections` | List collections |
+| `GET /weave/v1/collections/:collectionId` | Get a collection |
+| `DELETE /weave/v1/collections/:collectionId` | Delete a collection with its documents, chunks and vectors |
+| `GET /weave/v1/collections/:collectionId/stats` | Document and chunk counts |
+| `POST /weave/v1/collections/:collectionId/reindex` | Re-embed every chunk |
+| `POST /weave/v1/collections/:collectionId/documents` | Ingest one document |
+| `POST /weave/v1/collections/:collectionId/documents/batch` | Ingest several |
+| `GET /weave/v1/collections/:collectionId/documents` | List documents |
+| `GET /weave/v1/documents/:documentId` | Get a document |
+| `DELETE /weave/v1/documents/:documentId` | Delete a document and its chunks and vectors |
+| `POST /weave/v1/collections/:collectionId/retrieve` | Retrieve from one collection |
+| `POST /weave/v1/search` | Search across collections |
+
+The routes are tagged `collections`, `documents` and `retrieval` in the OpenAPI spec.
+
+## Tenants
+
+The routes don't read a tenant from anywhere. They pass the request context to the engine, so the tenant is whatever your middleware put there with `weave.WithTenant`. Add a global Forge middleware that sets it from your auth:
+
+```go
+app.Router().UseGlobal(func(next forge.Handler) forge.Handler {
+    return func(ctx forge.Context) error {
+        tenantID := ctx.Request().Header.Get("X-Tenant-ID") // or from your auth claims
+        ctx.WithContext(weave.WithTenant(ctx.Context(), tenantID))
+        return next(ctx)
+    }
+})
+```
+
+Even with a tenant set, only creates, ingests and the two search routes use it. `GET /collections` lists every tenant's collections, and the get, delete, stats and reindex routes act on any ID they're given. Put your own authorization in front of them if tenants mustn't see each other's data. See [multi-tenancy](/docs/concepts/multi-tenancy).
+
+## Errors
+
+Validation failures (a malformed ID, a missing `name`, `content` or `query`) return 400, and a collection or document that isn't there returns 404 on the get, delete and stats routes. Both have this body:
+
+```json
+{ "error": "weave: collection not found", "code": 404 }
+```
+
+Reindexing a collection that doesn't exist returns 204, since there's nothing to re-embed.
+
+Everything else comes back as a 500 through Forge's error handling, which by default leaves the error text out of the response. That includes ingesting into a collection that doesn't exist, a duplicate collection name, duplicate document content and embedder or vector store failures.

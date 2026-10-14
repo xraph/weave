@@ -11,17 +11,17 @@ const footerLinks = {
     { label: "Configuration", href: "/docs/concepts/configuration" },
   ],
   Components: [
-    { label: "Ingestion", href: "/docs/subsystems/recording" },
-    { label: "Retrieval", href: "/docs/subsystems/verification" },
-    { label: "Chunker", href: "/docs/subsystems/erasure" },
-    { label: "Embedder", href: "/docs/subsystems/compliance" },
+    { label: "Ingestion", href: "/docs/subsystems/ingestion" },
+    { label: "Retrieval", href: "/docs/subsystems/retrieval" },
+    { label: "Chunker", href: "/docs/subsystems/chunker" },
+    { label: "Embedder", href: "/docs/subsystems/embedder" },
     { label: "Extensions", href: "/docs/subsystems/plugins" },
   ],
   Stores: [
     { label: "Memory", href: "/docs/stores/memory" },
     { label: "PostgreSQL", href: "/docs/stores/postgres" },
     { label: "SQLite", href: "/docs/stores/sqlite" },
-    { label: "pgvector", href: "/docs/stores/bun" },
+    { label: "pgvector", href: "/docs/stores/postgres#pgvector" },
     { label: "Custom Store", href: "/docs/guides/custom-store" },
   ],
   Community: [
@@ -33,16 +33,6 @@ const footerLinks = {
     {
       label: "Issues",
       href: "https://github.com/xraph/weave/issues",
-      external: true,
-    },
-    {
-      label: "Discussions",
-      href: "https://github.com/xraph/weave/discussions",
-      external: true,
-    },
-    {
-      label: "Contributing",
-      href: "https://github.com/xraph/weave/blob/main/CONTRIBUTING.md",
       external: true,
     },
   ],
