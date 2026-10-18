@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,11 +34,14 @@ func TestHookErrorsLogTheTypeAndAreThrottled(t *testing.T) {
 	r.Register(failingHook{"audit"})
 	r.Register(failingHook{"mirror"})
 
-	// Five failures inside a minute: one line per plugin.
-	for range 5 {
-		r.EmitDocumentDeleted(context.Background(), id.NewDocumentID())
-		clock = clock.Add(5 * time.Second)
+	// Twenty events fail at once, as they do when a hook's backend is down
+	// under load: one line per plugin, the rest counted.
+	const n = 20
+	var wg sync.WaitGroup
+	for range n {
+		wg.Go(func() { r.EmitDocumentDeleted(context.Background(), id.NewDocumentID()) })
 	}
+	wg.Wait()
 	logs := tl.GetLogsByLevel("WARN")
 	if len(logs) != 2 {
 		t.Fatalf("got %d warn lines, want one per plugin", len(logs))
@@ -50,8 +54,10 @@ func TestHookErrorsLogTheTypeAndAreThrottled(t *testing.T) {
 	if len(logs) != 4 {
 		t.Fatalf("got %d warn lines after a minute, want 4", len(logs))
 	}
-	if v, _ := logs[2].Field("suppressed"); fmt.Sprint(v) != "4" {
-		t.Errorf("suppressed = %v, want 4", v)
+	for _, e := range logs[2:] {
+		if v, _ := e.Field("suppressed"); fmt.Sprint(v) != fmt.Sprint(n-1) {
+			t.Errorf("suppressed = %v, want %d", v, n-1)
+		}
 	}
 
 	for _, e := range logs {

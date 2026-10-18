@@ -135,6 +135,9 @@ func TestExtensionWiresTelemetryIntoForge(t *testing.T) {
 	if err := eng.DeleteDocument(ctx, res.DocumentID); err != nil {
 		t.Fatal(err)
 	}
+	if err := eng.DeleteCollection(ctx, col.ID); err != nil {
+		t.Fatal(err)
+	}
 	span.End()
 
 	// Spans reach forge's tracer provider under the caller's span.
@@ -184,28 +187,41 @@ func TestExtensionWiresTelemetryIntoForge(t *testing.T) {
 		t.Error("the model reached the scrape")
 	}
 
-	// The app's logger reaches the engine, and the line it logs for the
-	// failed vector delete names the error's type, not its text.
+	// The app's logger reaches the engine, and the lines it logs for the
+	// failed vector deletes name the error's type, not its text.
 	tl, ok := logger.(*log.TestLogger)
 	if !ok {
 		t.Fatalf("logger is %T", logger)
 	}
-	var found bool
+	want := map[string]string{
+		"failed to delete vector entries for document":   "document_id",
+		"failed to delete vector entries for collection": "collection_id",
+	}
+	found := map[string]bool{}
 	for _, e := range tl.GetLogsByLevel("WARN") {
-		if e.Message != "failed to delete vector entries for document" {
+		idKey, ok := want[e.Message]
+		if !ok {
 			continue
 		}
-		found = true
+		found[e.Message] = true
 		if v, _ := e.Field("error_type"); v != "*errors.errorString" {
-			t.Errorf("error_type = %v", v)
+			t.Errorf("%s: error_type = %v", e.Message, v)
+		}
+		if _, ok := e.Field(idKey); !ok {
+			t.Errorf("%s: no %s field", e.Message, idKey)
+		}
+		if _, ok := e.Field("error"); ok {
+			t.Errorf("%s: the error's text was logged", e.Message)
 		}
 		for _, f := range e.Fields {
 			if s, ok := f.Value().(string); ok && strings.Contains(s, "s3cret") {
-				t.Errorf("field %s carries the DSN", f.Key())
+				t.Errorf("%s: field %s carries the DSN", e.Message, f.Key())
 			}
 		}
 	}
-	if !found {
-		t.Error("the engine did not log through the app's logger")
+	for msg := range want {
+		if !found[msg] {
+			t.Errorf("the engine did not log %q through the app's logger", msg)
+		}
 	}
 }

@@ -307,7 +307,7 @@ func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult,
 	defer span.End()
 
 	start := time.Now()
-	res, err := e.ingest(ctx, input)
+	res, err := e.ingest(ctx, span, input)
 
 	result := telemetry.ResultOK
 	switch {
@@ -321,17 +321,16 @@ func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult,
 	}
 	span.SetAttributes(telemetry.Result.String(result))
 	if res != nil {
-		span.SetAttributes(
-			telemetry.DocumentID.String(res.DocumentID.String()),
-			telemetry.ChunkCount.Int(res.ChunkCount),
-		)
+		span.SetAttributes(telemetry.DocumentID.String(res.DocumentID.String()))
 	}
 	e.metrics.ingest.Observe(time.Since(start).Seconds(), e.kinds.chunker, result)
 	return res, err
 }
 
-// ingest is Ingest's body, run under its span.
-func (e *Engine) ingest(ctx context.Context, input *IngestInput) (*IngestResult, error) {
+// ingest is Ingest's body, run under span. It sets weave.chunk.count on the
+// span once the content is chunked, so a document that fails later still
+// says how many chunks it had.
+func (e *Engine) ingest(ctx context.Context, span trace.Span, input *IngestInput) (*IngestResult, error) {
 	start := time.Now()
 	tenantID := weave.TenantFromContext(ctx)
 
@@ -389,6 +388,7 @@ func (e *Engine) ingest(ctx context.Context, input *IngestInput) (*IngestResult,
 	if err != nil {
 		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("chunk: %w", err))
 	}
+	span.SetAttributes(telemetry.ChunkCount.Int(len(chunkResults)))
 
 	// Build chunk entities.
 	chunks := make([]*chunk.Chunk, len(chunkResults))

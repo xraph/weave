@@ -2,7 +2,6 @@ package plugins
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	log "github.com/xraph/go-utils/log"
@@ -13,12 +12,6 @@ import (
 	"github.com/xraph/weave/id"
 	"github.com/xraph/weave/internal/telemetry"
 )
-
-// hookErrorInterval is how often one hook of one plugin may log an error.
-// Errors in between are counted and reported on the next line, so a plugin
-// that fails on every event during an outage logs once a minute, not once
-// per document.
-const hookErrorInterval = time.Minute
 
 // Named entry types pair a hook implementation with the extension name
 // captured at registration time.
@@ -99,9 +92,9 @@ type Registry struct {
 	extensions []Extension
 	logger     log.Logger
 
-	// hookErrs throttles hook error lines, keyed by hook and plugin.
-	errMu    sync.Mutex
-	hookErrs map[hookErrKey]*hookErrState
+	// hookErrs throttles hook error lines per hook and plugin; now is the
+	// clock it reads, time.Now when nil.
+	hookErrs telemetry.HookErrors
 	now      func() time.Time
 
 	// Type-cached slices for each lifecycle hook.
@@ -329,46 +322,23 @@ func (r *Registry) EmitShutdown(ctx context.Context) {
 	}
 }
 
-type hookErrKey struct{ hook, plugin string }
-
-type hookErrState struct {
-	last       time.Time
-	suppressed int
-}
-
 // logHookError logs a warning when a lifecycle hook returns an error.
 // Errors from hooks are never propagated: they must not block the pipeline.
 //
 // Only the error's type is logged. A hook's error is the plugin's own, and
 // its text can quote whatever the hook was handed: a document, a query, a
-// tenant. One hook of one plugin logs at most once per hookErrorInterval;
-// the line says how many errors it stood for since the last one.
+// tenant. One hook of one plugin logs at most once per
+// telemetry.HookErrorInterval; the line says how many errors it stood for
+// since the last one.
 func (r *Registry) logHookError(hook, extName string, err error) {
 	now := time.Now
 	if r.now != nil {
 		now = r.now
 	}
-	t := now()
-
-	r.errMu.Lock()
-	if r.hookErrs == nil {
-		r.hookErrs = make(map[hookErrKey]*hookErrState)
-	}
-	key := hookErrKey{hook, extName}
-	st, ok := r.hookErrs[key]
+	ok, suppressed := r.hookErrs.Allow(hook, extName, now())
 	if !ok {
-		st = &hookErrState{}
-		r.hookErrs[key] = st
-	}
-	if !st.last.IsZero() && t.Sub(st.last) < hookErrorInterval {
-		st.suppressed++
-		r.errMu.Unlock()
 		return
 	}
-	suppressed := st.suppressed
-	st.last, st.suppressed = t, 0
-	r.errMu.Unlock()
-
 	r.logger.Warn("plugin hook error",
 		log.String("hook", hook),
 		log.String("plugin", extName),

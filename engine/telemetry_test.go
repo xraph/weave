@@ -19,10 +19,12 @@ import (
 	gometrics "github.com/xraph/go-utils/metrics"
 
 	"github.com/xraph/weave"
+	"github.com/xraph/weave/chunker"
 	"github.com/xraph/weave/embedder"
 	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/id"
 	"github.com/xraph/weave/retriever"
+	"github.com/xraph/weave/vectorstore"
 )
 
 const secret = "alice@example.com"
@@ -330,6 +332,105 @@ func TestCustomKindsAreBounded(t *testing.T) {
 	}
 }
 
+// plainChunker and plainVectors hide the wrapped component's Describe, the
+// way a component written outside Weave has none.
+type plainChunker struct{ chunker.Chunker }
+
+type plainVectors struct{ vectorstore.VectorStore }
+
+// oddRetriever describes itself with a kind Weave doesn't ship.
+type oddRetriever struct{ retriever.Retriever }
+
+func (oddRetriever) Describe() weave.ComponentInfo { return weave.ComponentInfo{Kind: secret} }
+
+// Every stage falls back to "custom": a chunker and a vector store that
+// don't describe themselves, and a retriever that names a kind of its own.
+func TestCustomComponentsAreLabelledCustom(t *testing.T) {
+	rec := recordSpans(t)
+	sink := newFakeSink()
+	r := newRig(t,
+		withOpt(engine.WithMetrics(sink)),
+		withOpt(engine.WithChunker(plainChunker{chunker.NewRecursiveChunker()})),
+		func(r *testRig) engine.Option { return engine.WithVectorStore(plainVectors{r.Vectors}) },
+		func(r *testRig) engine.Option {
+			return engine.WithRetriever(oddRetriever{retriever.NewSimilarityRetriever(r.Vectors, r.Embed, r.Store)})
+		},
+	)
+	ctx := context.Background()
+	col := mustTestCollection(t, r.Engine, "custom")
+	mustIngest(t, ctx, r.Engine, col.ID, "a", "refunds take thirty days")
+	if _, err := r.Engine.Retrieve(ctx, "refunds", engine.WithCollection(col.ID)); err != nil {
+		t.Fatal(err)
+	}
+
+	ingest := oneSpan(t, rec, "ingest document")
+	wantAttr(t, ingest, "weave.chunker.kind", "custom")
+	wantAttr(t, ingest, "weave.vectorstore.kind", "custom")
+	wantAttr(t, oneSpan(t, rec, "chunk document"), "weave.chunker.kind", "custom")
+	wantAttr(t, oneSpan(t, rec, "upsert vectors"), "weave.vectorstore.kind", "custom")
+	wantAttr(t, oneSpan(t, rec, "retrieve chunks"), "weave.retriever.kind", "custom")
+	assertNoSecret(t, rec)
+
+	if n := sink.observations("weave_ingest_duration_seconds", map[string]string{"chunker": "custom", "result": "ok"}); n != 1 {
+		t.Errorf("ingest observations with chunker=custom = %d, want 1", n)
+	}
+	if n := sink.observations("weave_vector_operation_duration_seconds", map[string]string{"vectorstore": "custom", "operation": "upsert", "result": "ok"}); n != 1 {
+		t.Errorf("upsert observations with vectorstore=custom = %d, want 1", n)
+	}
+	if n := sink.observations("weave_retrieve_duration_seconds", map[string]string{"retriever": "custom", "result": "ok"}); n != 1 {
+		t.Errorf("retrieve observations with retriever=custom = %d, want 1", n)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	for _, fs := range sink.series {
+		for k, v := range fs.labels {
+			if strings.Contains(v, secret) {
+				t.Errorf("%s label %s carries the retriever's own kind", fs.name, k)
+			}
+		}
+	}
+}
+
+// countingEmbedder reports a token count but doesn't describe itself.
+type countingEmbedder struct{ hashEmbedder }
+
+func (c countingEmbedder) Embed(ctx context.Context, texts []string) ([]embedder.EmbedResult, error) {
+	out, err := c.hashEmbedder.Embed(ctx, texts)
+	for i := range out {
+		out[i].TokenCount = 5
+	}
+	return out, err
+}
+
+// Usage comes from TokenCount alone. An embedder without Describe gets no
+// model and the custom provider, but its tokens still count.
+func TestUsageNeedsNoDescriber(t *testing.T) {
+	rec := recordSpans(t)
+	sink := newFakeSink()
+	r := newRig(t,
+		withOpt(engine.WithMetrics(sink)),
+		withOpt(engine.WithEmbedder(countingEmbedder{hashEmbedder{dims: 64}})),
+	)
+	col := mustTestCollection(t, r.Engine, "usage")
+	res, err := r.Engine.Ingest(context.Background(), &engine.IngestInput{CollectionID: col.ID, Content: "a few words"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	embed := oneSpan(t, rec, "embed texts")
+	wantAttr(t, embed, "gen_ai.provider.name", "custom")
+	wantAttr(t, embed, "gen_ai.usage.input_tokens", 5*res.ChunkCount)
+	if _, ok := attrsOf(embed)["gen_ai.request.model"]; ok {
+		t.Error("an embedder that doesn't describe itself got a model")
+	}
+	if n := sink.observations("gen_ai.client.token.usage", map[string]string{
+		"gen_ai.operation.name": "embeddings", "gen_ai.provider.name": "custom",
+		"weave.embed.operation": "ingest", "gen_ai.token.type": "input",
+	}); n != 1 {
+		t.Errorf("token observations = %d, want 1", n)
+	}
+}
+
 func TestIngestFailureNamesTheTypeOnly(t *testing.T) {
 	rec := recordSpans(t)
 	sink := newFakeSink()
@@ -341,6 +442,14 @@ func TestIngestFailureNamesTheTypeOnly(t *testing.T) {
 	if _, err := r.Engine.Ingest(context.Background(), &engine.IngestInput{CollectionID: col.ID, Content: "hello there"}); err == nil {
 		t.Fatal("ingest succeeded with a failing embedder")
 	}
+
+	// The document was chunked before the embedder failed, and the ingest
+	// span says how many chunks it had, as chunk document does.
+	chunks := attrsOf(oneSpan(t, rec, "chunk document"))["weave.chunk.count"].AsInt64()
+	if chunks == 0 {
+		t.Fatal("chunk document recorded no chunks")
+	}
+	wantAttr(t, oneSpan(t, rec, "ingest document"), "weave.chunk.count", chunks)
 
 	for _, name := range []string{"embed texts", "ingest document"} {
 		s := oneSpan(t, rec, name)

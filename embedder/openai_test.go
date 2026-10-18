@@ -281,3 +281,65 @@ func TestOpenAITransportErrorNamesTheTypeOnly(t *testing.T) {
 	}
 	t.Fatal("no POST span")
 }
+
+// recordingTransport passes requests through and remembers what it saw.
+type recordingTransport struct {
+	mu   sync.Mutex
+	seen []http.Header
+}
+
+func (rt *recordingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	rt.mu.Lock()
+	rt.seen = append(rt.seen, r.Header.Clone())
+	rt.mu.Unlock()
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// The embedder traces at the call site, so a client you hand it keeps its
+// own transport, and the default client is left exactly as it was.
+func TestOpenAIClientTransportIsUntouched(t *testing.T) {
+	rec := traced(t)
+	srv := httptest.NewServer(&upstream{tokens: 1})
+	defer srv.Close()
+
+	rt := &recordingTransport{}
+	client := &http.Client{Transport: rt}
+	emb := embedder.NewOpenAIEmbedder(apiKey, embedder.WithOpenAIBaseURL(srv.URL), embedder.WithOpenAIClient(client))
+	ctx, parent := callerContext(t)
+	if _, err := emb.Embed(ctx, []string{"hello world"}); err != nil {
+		t.Fatal(err)
+	}
+	parent.End()
+
+	if client.Transport != rt {
+		t.Errorf("the client's transport was replaced with %T", client.Transport)
+	}
+	rt.mu.Lock()
+	seen := rt.seen
+	rt.mu.Unlock()
+	if len(seen) != 1 {
+		t.Fatalf("the client's transport saw %d requests, want 1", len(seen))
+	}
+	if seen[0].Get("Baggage") != "" || seen[0].Get("Traceparent") == "" {
+		t.Errorf("headers through a custom client: baggage %q, traceparent %q", seen[0].Get("Baggage"), seen[0].Get("Traceparent"))
+	}
+	var posts int
+	for _, s := range rec.Ended() {
+		if s.Name() == http.MethodPost {
+			posts++
+		}
+	}
+	if posts != 1 {
+		t.Errorf("POST spans = %d, want 1", posts)
+	}
+
+	// The default client is shared with the whole process; the embedder
+	// must not have wrapped or replaced its transport.
+	def := embedder.NewOpenAIEmbedder(apiKey, embedder.WithOpenAIBaseURL(srv.URL))
+	if _, err := def.Embed(context.Background(), []string{"x"}); err != nil {
+		t.Fatal(err)
+	}
+	if http.DefaultClient.Transport != nil {
+		t.Errorf("http.DefaultClient.Transport = %T, want nil", http.DefaultClient.Transport)
+	}
+}
