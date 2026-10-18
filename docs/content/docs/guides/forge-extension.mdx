@@ -155,9 +155,11 @@ app.Router().UseGlobal(func(next forge.Handler) forge.Handler {
 
 Only creates, ingests and searches use the tenant. The list, get, delete, stats and reindex routes don't check it; see [multi-tenancy](/docs/concepts/multi-tenancy).
 
-## Metrics
+## Metrics, traces and logs
 
-To get the counters into your app's metrics output, build the metrics extension from the app's metrics. That needs the app first, so register Weave after `NewApp`:
+You get these without configuring anything. `Register` hands the engine your app's metrics and logger, so the engine's duration and GenAI token metrics land on the app's `/_/metrics` as `forge_weave_*` and `forge_gen_ai_*`, and its spans go to the tracer provider forge installs, under each request's server span. An `engine.WithMetrics` or `engine.WithLogger` you pass through `WithEngineOption` wins over the app's. [Observability](/docs/subsystems/observability) lists every span and series.
+
+The lifecycle counters from the `observability` package are separate and opt-in. To get them into your app's metrics output too, build the metrics extension from the app's metrics. That needs the app first, so register Weave after `NewApp`:
 
 ```go
 app := forge.NewApp(forge.AppConfig{Name: "search-api"})

@@ -17,6 +17,7 @@ eng, err := engine.New(
     engine.WithRetriever(r),
     engine.WithExtension(observability.NewMetricsExtension()),
     engine.WithLogger(logger),
+    engine.WithMetrics(sink),
     engine.WithConfig(weave.DefaultConfig()),
 )
 ```
@@ -31,6 +32,7 @@ eng, err := engine.New(
 | `WithRetriever(r)` | `retriever.Retriever` | none | `Retrieve` embeds the query and searches the vector store directly |
 | `WithExtension(x)` | `ext.Extension` | none | Repeatable; adds a lifecycle hook |
 | `WithLogger(l)` | go-utils `log.Logger` | a no-op logger | Nothing is logged |
+| `WithMetrics(m)` | go-utils `metrics.Metrics` | none | No metrics are recorded; spans still go to the global tracer provider. See [observability](/docs/subsystems/observability) |
 | `WithConfig(cfg)` | `weave.Config` | `weave.DefaultConfig()` | The defaults below apply |
 
 There's no default chunker or embedder. You always pass both.

@@ -51,6 +51,7 @@ eng, err := engine.New(
     engine.WithRetriever(r),                  // optional
     engine.WithExtension(observability.NewMetricsExtension()), // optional, repeatable
     engine.WithLogger(logger),                // optional, a go-utils log.Logger
+    engine.WithMetrics(sink),                 // optional, a go-utils metrics sink
     engine.WithConfig(weave.DefaultConfig()), // optional
 )
 ```

@@ -83,7 +83,7 @@ Each Postgres test gets a random `weave_test_*` schema with `search_path` pinned
 | `api/` | Forge HTTP handlers |
 | `extension/` | the Forge extension |
 | `extension/contract/` | the Forge dashboard contract for the `weave` contributor, with `manifest.yaml` embedded |
-| `internal/` | `pgtest`, `mongotest` and `sqllike` (LIKE escaping) |
+| `internal/` | `pgtest`, `mongotest`, `sqllike` (LIKE escaping) and `telemetry` (the tracer, span attribute keys, error naming, component kinds and metric families the engine and embedders share) |
 | `docs/` | the documentation site |
 | `MIGRATION.md` | what the old templ dashboard did and where each piece went |
 
@@ -109,9 +109,9 @@ Tenant and app IDs travel on the context. Set them with `weave.WithTenant` and `
 
 ### Options and the Forge extension
 
-`engine.New(opts ...engine.Option)` takes `func(*Engine) error` options (`WithStore`, `WithVectorStore`, `WithEmbedder`, `WithChunker`, `WithLogger`, `WithExtension` and so on). The extension uses `ExtOption`, which is `func(*Extension)` and returns no error.
+`engine.New(opts ...engine.Option)` takes `func(*Engine) error` options (`WithStore`, `WithVectorStore`, `WithEmbedder`, `WithChunker`, `WithLogger`, `WithMetrics`, `WithExtension` and so on). The extension uses `ExtOption`, which is `func(*Extension)` and returns no error.
 
-`extension.New` embeds `*forge.BaseExtension`. On `Register` it loads config from the `extensions.weave` key, then the older `weave` key. It takes a store from the named grove database when `GroveDatabase` is set, or else from any `*grove.DB` it finds in the vessel container. Then it builds the engine, mounts the HTTP routes under `/weave` unless `DisableRoutes` is set, and provides `*engine.Engine` to the container. `Start` runs `Migrate` unless `DisableMigrate` is set.
+`extension.New` embeds `*forge.BaseExtension`. On `Register` it loads config from the `extensions.weave` key, then the older `weave` key. It takes a store from the named grove database when `GroveDatabase` is set, or else from any `*grove.DB` it finds in the vessel container. Then it builds the engine with the app's logger and metrics (ahead of any `WithEngineOption`, so a caller's own wins), mounts the HTTP routes under `/weave` unless `DisableRoutes` is set, and provides `*engine.Engine` to the container. `Start` runs `Migrate` unless `DisableMigrate` is set.
 
 Contract handlers in `extension/contract/` call engine methods only, never the store. That way a fix in the engine reaches the dashboard and the HTTP API together.
 
@@ -121,7 +121,11 @@ Contract handlers in `extension/contract/` call engine methods only, never the s
 
 ### Logging
 
-Use `github.com/xraph/go-utils/log`. The engine defaults to `log.NewNoopLogger()` until you pass `engine.WithLogger`. Inside the extension, log through `e.Logger()` with `forge.F` fields.
+Use `github.com/xraph/go-utils/log`. The engine defaults to `log.NewNoopLogger()` until you pass `engine.WithLogger`, and the extension passes the app's logger, so every engine and registry log line is live in a Forge app. Don't log `err.Error()` there: a store error can quote a DSN or a tenant key and a hook's error can quote a document. Log `telemetry.ErrorType(err)` as `error_type`, and throttle anything that could fire once per document. Inside the extension, log through `e.Logger()` with `forge.F` fields.
+
+### Telemetry
+
+Spans start in `engine/` (cortex calls the engine directly, so the HTTP handlers are the wrong place) with `telemetry.Tracer()`, scope `github.com/xraph/weave`. Name them "verb object" in lower case and put counts, enum strings and opaque IDs on them, never query text, content, metadata, tenant IDs or an error's text: mark a failure with `telemetry.Fail(span, err)`. Metrics go through the go-utils sink from `engine.WithMetrics`, never `otel.Meter()`, which a Forge app doesn't export. Component labels come from `telemetry.Kind` against the fixed kind sets, so a new built-in component kind needs adding there. A call to a third party starts on `baggage.ContextWithoutBaggage(ctx)`. `docs/content/docs/subsystems/observability.mdx` lists every span and metric; update it with the code.
 
 ### Lint rules that bite
 

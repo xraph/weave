@@ -64,7 +64,11 @@ emb := embedder.NewOpenAIEmbedder(
 )
 ```
 
-The whole batch goes out in one request, so very large documents can hit the provider's input limits. `TokenCount` on each result is the response's total token usage split evenly across the inputs.
+The whole batch goes out in one request, so very large documents can hit the provider's input limits. `TokenCount` on each result is the response's total token usage split across the inputs: each gets an equal share and the first few one token more, so the counts add up to what the API reported.
+
+A status other than 200 comes back as `*embedder.StatusError`, which carries `StatusCode`. Use `errors.As` to tell a rate limit (429) from a bad key (401).
+
+Each call gets an OpenTelemetry client span named `POST` with the server's host and port and the response status. It never records the URL's path or query, any userinfo in the base URL, the key or the texts, and it drops the caller's baggage before the request leaves. The client you pass with `WithOpenAIClient` is traced the same way, so don't hand it a transport that is traced already. See [observability](/docs/subsystems/observability).
 
 ## Local embedder
 

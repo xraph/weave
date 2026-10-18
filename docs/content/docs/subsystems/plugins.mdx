@@ -3,7 +3,7 @@ title: Extension System
 description: Weave lifecycle hooks for ingestion, retrieval, collection, delete, reindex and shutdown events.
 ---
 
-Weave's extension system lets you attach callbacks to engine events. Use it for metrics, tracing, audit trails, alerting or any other side effect, without touching the pipeline itself.
+Weave's extension system lets you attach callbacks to engine events. Use it for audit trails, counters, alerting or any other side effect, without touching the pipeline itself. You don't need it for tracing: the engine starts its own spans, see [observability](/docs/subsystems/observability).
 
 ## Extension interface
 
@@ -172,7 +172,7 @@ func (e *AuditExtension) OnIngestFailed(
 
 ## Error handling
 
-Hook errors never reach the caller. If a hook returns an error, the registry logs it at warn level (with the hook and extension name) through the engine's logger and carries on with the next extension and the operation itself. Hooks run synchronously on the calling goroutine, so a slow hook slows `Ingest` or `Retrieve` down.
+Hook errors never reach the caller. If a hook returns an error, the registry logs it at warn level through the engine's logger, with the hook, the extension name and the error's type (never its text), and carries on with the next extension and the operation itself. One hook of one extension logs at most once a minute; the line's `suppressed` field counts the errors in between. Hooks run synchronously on the calling goroutine, so a slow hook slows `Ingest` or `Retrieve` down.
 
 `OnIngestFailed` and `OnRetrievalFailed` receive the error for observability. They can't change what the caller gets back.
 
