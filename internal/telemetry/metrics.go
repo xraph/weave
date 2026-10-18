@@ -99,14 +99,20 @@ func (f *family[T]) with(values []string) (T, bool) {
 // nothing.
 type Counter struct{ f *family[gometrics.Counter] }
 
-// NewCounter declares a counter on m. A nil m returns nil.
+// NewCounter declares a counter on m. A nil m returns nil. A counter with
+// no labels is created right away, so it is exported as 0 before its first
+// increment and a rate over it never starts from a missing series.
 func NewCounter(m gometrics.Metrics, name, help string, keys ...string) *Counter {
 	if m == nil {
 		return nil
 	}
-	return &Counter{f: &family[gometrics.Counter]{keys: keys, build: func(l map[string]string) gometrics.Counter {
+	c := &Counter{f: &family[gometrics.Counter]{keys: keys, build: func(l map[string]string) gometrics.Counter {
 		return m.Counter(name, gometrics.WithDescription(help), gometrics.WithLabels(l))
 	}}}
+	if len(keys) == 0 {
+		c.f.with(nil)
+	}
+	return c
 }
 
 // Add adds n to the series for values, given in the declared key order.

@@ -176,6 +176,10 @@ func TestExtensionWiresTelemetryIntoForge(t *testing.T) {
 			t.Errorf("no %s series with %v in:\n%s", c.prefix, c.labels, strings.Join(lines(body, c.prefix), "\n"))
 		}
 	}
+	// The unlabelled counter is exported before its first orphan.
+	if got := lines(body, "forge_weave_retrieve_hits_orphaned_total"); len(got) != 1 || !strings.HasSuffix(got[0], " 0") {
+		t.Errorf("orphaned counter on the scrape = %v, want one series at 0", got)
+	}
 	if strings.Contains(body, "text-embedding-3-small") {
 		t.Error("the model reached the scrape")
 	}
