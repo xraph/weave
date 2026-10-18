@@ -3,6 +3,7 @@ package engine
 
 import (
 	log "github.com/xraph/go-utils/log"
+	gometrics "github.com/xraph/go-utils/metrics"
 
 	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunker"
@@ -69,6 +70,18 @@ func WithRetriever(r retriever.Retriever) Option {
 func WithLogger(l log.Logger) Option {
 	return func(e *Engine) error {
 		e.logger = l
+		return nil
+	}
+}
+
+// WithMetrics records the engine's metrics on m: ingest, retrieve and
+// vector store durations, orphaned retrieve hits, and the OpenTelemetry GenAI
+// client metrics for every embedding call the engine makes. A nil m records
+// nothing, which is the default. The Forge extension passes the app's
+// metrics. Spans need no option: they go to the global tracer provider.
+func WithMetrics(m gometrics.Metrics) Option {
+	return func(e *Engine) error {
+		e.metricsSink = m
 		return nil
 	}
 }

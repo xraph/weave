@@ -10,6 +10,7 @@ import (
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/id"
+	"github.com/xraph/weave/internal/telemetry"
 )
 
 // Named entry types pair a hook implementation with the extension name
@@ -90,6 +91,11 @@ type shutdownEntry struct {
 type Registry struct {
 	extensions []Extension
 	logger     log.Logger
+
+	// hookErrs throttles hook error lines per hook and plugin; now is the
+	// clock it reads, time.Now when nil.
+	hookErrs telemetry.HookErrors
+	now      func() time.Time
 
 	// Type-cached slices for each lifecycle hook.
 	collectionCreated  []collectionCreatedEntry
@@ -317,11 +323,26 @@ func (r *Registry) EmitShutdown(ctx context.Context) {
 }
 
 // logHookError logs a warning when a lifecycle hook returns an error.
-// Errors from hooks are never propagated — they must not block the pipeline.
+// Errors from hooks are never propagated: they must not block the pipeline.
+//
+// Only the error's type is logged. A hook's error is the plugin's own, and
+// its text can quote whatever the hook was handed: a document, a query, a
+// tenant. One hook of one plugin logs at most once per
+// telemetry.HookErrorInterval; the line says how many errors it stood for
+// since the last one.
 func (r *Registry) logHookError(hook, extName string, err error) {
+	now := time.Now
+	if r.now != nil {
+		now = r.now
+	}
+	ok, suppressed := r.hookErrs.Allow(hook, extName, now())
+	if !ok {
+		return
+	}
 	r.logger.Warn("plugin hook error",
 		log.String("hook", hook),
 		log.String("plugin", extName),
-		log.String("error", err.Error()),
+		log.String("error_type", telemetry.ErrorType(err)),
+		log.Int("suppressed", suppressed),
 	)
 }

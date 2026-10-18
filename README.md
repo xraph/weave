@@ -109,6 +109,7 @@ A RAG feature looks small until you build it: you need a chunking strategy, an e
 | Prompt context that fits | Token-budgeted assembly with `[n]` citation markers |
 | One index per customer | Tenant and app IDs on the context, carried into every store and vector query |
 | Hooks into your own systems | 14 lifecycle hooks, a [Chronicle](https://github.com/xraph/chronicle) audit bridge and a metrics extension |
+| Seeing what it does | OpenTelemetry spans for ingest, embedding, vector search, retrieval and reindex, plus duration and GenAI token metrics on your Forge app's `/_/metrics` |
 | An API without writing handlers | Forge routes for collections, documents, retrieval and search, with OpenAPI metadata |
 
 ## Pipeline components
@@ -124,6 +125,7 @@ A RAG feature looks small until you build it: you need a chunking strategy, an e
 | Loader | `engine.WithLoader` | `NewTextLoader`, `NewMarkdownLoader`, `NewHTMLLoader`, `NewCSVLoader`, `NewJSONLoader(fields...)`, `NewURLLoader(delegate)`, `NewDirectoryLoader(loaders...)` |
 | Retriever | `engine.WithRetriever` | `NewSimilarityRetriever`, `NewMMRRetriever`, `NewHybridRetriever`, `NewRerankerRetriever` |
 | Hooks | `engine.WithExtension` | `audit_hook`, `observability` |
+| Metrics | `engine.WithMetrics` | any go-utils metrics sink; the Forge extension passes the app's |
 | Defaults | `engine.WithConfig` | `weave.DefaultConfig()` |
 
 A loader only runs when the `IngestInput` names a `SourceType` the loader supports, such as `text/markdown` or `text/html`. Without one, Weave chunks `Content` as it is.
@@ -273,6 +275,10 @@ You write a hook as any value that implements one or more of these methods, and 
 | Shutdown | `OnShutdown` |
 
 `audithook.New(recorder)` (import path `github.com/xraph/weave/audit_hook`) turns these into audit events for Chronicle or any `Recorder`, and `observability.NewMetricsExtension()` counts ingests, retrievals and failures.
+
+## Telemetry
+
+You don't need a hook for tracing. The engine starts OpenTelemetry spans for its own work (`ingest document`, `embed texts`, `search vectors`, `retrieve chunks`, `reindex collection` and a few more) on the global tracer provider, so in a Forge app they sit under the request's server span. With a metrics sink it also records ingest, retrieval and vector store durations and the GenAI client metrics for every embedding call. The Forge extension wires the app's metrics and logger in for you; outside Forge, pass `engine.WithMetrics`. No span or label carries query text, document content, tenant IDs or keys. The [observability page](https://www.xraph.com/docs/weave/subsystems/observability) lists every span, metric and label value.
 
 ## Documentation
 

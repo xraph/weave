@@ -101,9 +101,15 @@ func (e *Extension) Register(fapp forge.App) error {
 		)
 	}
 
-	// The config goes first so an engine option the caller passed with
-	// WithEngineOption still wins.
-	opts := append([]engine.Option{engine.WithConfig(e.config.engineConfig())}, e.engineOpts...)
+	// The config, the app's logger and the app's metrics go first, so an
+	// engine option the caller passed with WithEngineOption still wins.
+	opts := make([]engine.Option, 0, 3+len(e.engineOpts))
+	opts = append(opts, engine.WithConfig(e.config.engineConfig()))
+	if l := e.Logger(); l != nil {
+		opts = append(opts, engine.WithLogger(l))
+	}
+	opts = append(opts, engine.WithMetrics(e.Metrics()))
+	opts = append(opts, e.engineOpts...)
 	eng, err := engine.New(opts...)
 	if err != nil {
 		return fmt.Errorf("weave: create engine: %w", err)

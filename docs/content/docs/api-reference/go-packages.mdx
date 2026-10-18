@@ -27,7 +27,7 @@ Everything lives in the one module, `github.com/xraph/weave`. The full API is on
 | Export | Description |
 |--------|-------------|
 | `New(...Option) (*Engine, error)` | Create an engine |
-| `WithStore`, `WithVectorStore`, `WithEmbedder`, `WithChunker`, `WithLoader`, `WithRetriever`, `WithExtension`, `WithLogger`, `WithConfig` | Engine options |
+| `WithStore`, `WithVectorStore`, `WithEmbedder`, `WithChunker`, `WithLoader`, `WithRetriever`, `WithExtension`, `WithLogger`, `WithMetrics`, `WithConfig` | Engine options |
 | `Engine.CreateCollection`, `GetCollection`, `GetCollectionByName`, `ListCollections`, `CountCollections`, `UpdateCollection`, `DeleteCollection`, `CollectionStats` | Collections |
 | `Engine.Ingest`, `IngestBatch` | Ingestion |
 | `Engine.GetDocument`, `ListDocuments`, `CountDocuments`, `DeleteDocument` | Documents |
@@ -174,7 +174,7 @@ func DefaultTemplate() *Template
 | `chunker.NewSlidingChunker()` | `chunker.Chunker` | Sliding window |
 | `chunker.NewSemanticChunker()` | `chunker.Chunker` | Sentence groups |
 | `chunker.NewCodeChunker()` | `chunker.Chunker` | Code block boundaries |
-| `embedder.NewOpenAIEmbedder(apiKey, opts...)` | `embedder.Embedder` | OpenAI or any compatible endpoint |
+| `embedder.NewOpenAIEmbedder(apiKey, opts...)` | `embedder.Embedder` | OpenAI or any compatible endpoint; a non-200 answer returns `*embedder.StatusError` |
 | `embedder.NewLocalEmbedder(dims)` | `embedder.Embedder` | Placeholder, returns `ErrNotImplemented` |
 | `retriever.NewSimilarityRetriever(vs, emb, store)` | `retriever.Retriever` | Plain vector search |
 | `retriever.NewMMRRetriever(vs, emb, lambda)` | `retriever.Retriever` | Maximal Marginal Relevance |
