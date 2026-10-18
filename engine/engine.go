@@ -195,9 +195,11 @@ func (e *Engine) DeleteCollection(ctx context.Context, colID id.CollectionID) er
 		if err := e.vectorStore.DeleteByMetadata(ctx, map[string]string{
 			"collection_id": colID.String(),
 		}); err != nil {
+			// The error's text can quote a DSN, a host or a tenant key, so
+			// only its type is logged.
 			e.logger.Warn("failed to delete vector entries for collection",
 				log.String("collection_id", colID.String()),
-				log.String("error", err.Error()),
+				log.String("error_type", telemetry.ErrorType(err)),
 			)
 		}
 	}
@@ -758,9 +760,11 @@ func (e *Engine) DeleteDocument(ctx context.Context, docID id.DocumentID) error 
 		if err := e.vectorStore.DeleteByMetadata(ctx, map[string]string{
 			"document_id": docID.String(),
 		}); err != nil {
+			// The error's text can quote a DSN, a host or a tenant key, so
+			// only its type is logged.
 			e.logger.Warn("failed to delete vector entries for document",
 				log.String("document_id", docID.String()),
-				log.String("error", err.Error()),
+				log.String("error_type", telemetry.ErrorType(err)),
 			)
 		}
 	}
