@@ -7,6 +7,7 @@ import (
 
 	"github.com/xraph/weave"
 	"github.com/xraph/weave/id"
+	"github.com/xraph/weave/internal/telemetry"
 	"github.com/xraph/weave/retriever"
 	"github.com/xraph/weave/vectorstore"
 )
@@ -87,7 +88,7 @@ func (e *Engine) RetrieveCompare(ctx context.Context, query string, p ComparePar
 
 	// Raw side.
 	vecStart := time.Now()
-	embedded, err := e.embedder.Embed(ctx, []string{query})
+	embedded, err := e.embed(ctx, telemetry.EmbedQuery, []string{query})
 	if err != nil {
 		return nil, fmt.Errorf("weave: embed query: %w", err)
 	}
@@ -98,7 +99,7 @@ func (e *Engine) RetrieveCompare(ctx context.Context, query string, p ComparePar
 	// explicit filter is given.
 	scope := &RetrieveParams{CollectionID: p.CollectionID.String(), TenantID: weave.TenantFromContext(ctx), TenantFilter: p.Tenant}
 	filter, tenantKey := searchScope(scope)
-	raw, err := e.vectorStore.Search(ctx, embedded[0].Vector, &vectorstore.SearchOptions{TopK: window, Filter: filter, TenantKey: tenantKey})
+	raw, err := e.searchVectors(ctx, embedded[0].Vector, &vectorstore.SearchOptions{TopK: window, Filter: filter, TenantKey: tenantKey})
 	if err != nil {
 		return nil, fmt.Errorf("weave: raw vector search: %w", err)
 	}

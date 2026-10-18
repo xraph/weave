@@ -9,7 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	log "github.com/xraph/go-utils/log"
+	gometrics "github.com/xraph/go-utils/metrics"
 
 	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
@@ -18,6 +22,7 @@ import (
 	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/embedder"
 	"github.com/xraph/weave/id"
+	"github.com/xraph/weave/internal/telemetry"
 	"github.com/xraph/weave/loader"
 	"github.com/xraph/weave/plugins"
 	"github.com/xraph/weave/retriever"
@@ -37,6 +42,10 @@ type Engine struct {
 	retriever   retriever.Retriever
 	extensions  *plugins.Registry
 	pendingExts []plugins.Extension
+
+	metricsSink gometrics.Metrics
+	metrics     engineMetrics
+	kinds       kinds
 }
 
 // New creates a new Engine with the given options.
@@ -50,6 +59,10 @@ func New(opts ...Option) (*Engine, error) {
 			return nil, fmt.Errorf("weave: apply option: %w", err)
 		}
 	}
+
+	// Components are fixed from here on, so their telemetry labels are too.
+	e.kinds = e.describeKinds()
+	e.metrics = newEngineMetrics(e.metricsSink)
 
 	// Wire up the extension registry.
 	e.extensions = plugins.NewRegistry(e.logger)
@@ -283,6 +296,40 @@ func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult,
 		return nil, weave.ErrEmptyContent
 	}
 
+	ctx, span := telemetry.Tracer().Start(ctx, "ingest document", trace.WithAttributes(
+		telemetry.CollectionID.String(input.CollectionID.String()),
+		telemetry.ChunkerKind.String(e.kinds.chunker),
+		telemetry.VectorStoreKind.String(e.kinds.vectorStore),
+		telemetry.ContentBytes.Int(len(input.Content)),
+	))
+	defer span.End()
+
+	start := time.Now()
+	res, err := e.ingest(ctx, input)
+
+	result := telemetry.ResultOK
+	switch {
+	case errors.Is(err, weave.ErrCollectionNotFound):
+		// The caller named a collection that isn't there: a 404, not a
+		// failure of the pipeline.
+		result = telemetry.ResultNotFound
+	case err != nil:
+		result = telemetry.ResultError
+		telemetry.Fail(span, err)
+	}
+	span.SetAttributes(telemetry.Result.String(result))
+	if res != nil {
+		span.SetAttributes(
+			telemetry.DocumentID.String(res.DocumentID.String()),
+			telemetry.ChunkCount.Int(res.ChunkCount),
+		)
+	}
+	e.metrics.ingest.Observe(time.Since(start).Seconds(), e.kinds.chunker, result)
+	return res, err
+}
+
+// ingest is Ingest's body, run under its span.
+func (e *Engine) ingest(ctx context.Context, input *IngestInput) (*IngestResult, error) {
 	start := time.Now()
 	tenantID := weave.TenantFromContext(ctx)
 
@@ -336,7 +383,7 @@ func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult,
 		ChunkOverlap: col.ChunkOverlap,
 		Strategy:     col.ChunkStrategy,
 	}
-	chunkResults, err := e.chunker.Chunk(ctx, content, chunkOpts)
+	chunkResults, err := e.chunk(ctx, content, chunkOpts)
 	if err != nil {
 		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("chunk: %w", err))
 	}
@@ -367,7 +414,7 @@ func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult,
 		texts[i] = ch.Content
 	}
 
-	embedResults, err := e.embedder.Embed(ctx, texts)
+	embedResults, err := e.embed(ctx, telemetry.EmbedIngest, texts)
 	if err != nil {
 		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("embed: %w", err))
 	}
@@ -401,7 +448,7 @@ func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult,
 	}
 
 	// Upsert vector entries.
-	if err := e.vectorStore.Upsert(ctx, entries); err != nil {
+	if err := e.upsertVectors(ctx, entries); err != nil {
 		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("upsert vectors: %w", err))
 	}
 
@@ -523,6 +570,18 @@ func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOpt
 	}
 
 	colID, _ := id.ParseCollectionID(params.CollectionID) //nolint:errcheck // empty for cross-collection search
+
+	// The query text never reaches the span: it is the user's question.
+	attrs := []attribute.KeyValue{
+		telemetry.RetrieverKind.String(e.kinds.retriever),
+		telemetry.RetrieveTopK.Int(params.TopK),
+	}
+	if !colID.IsNil() {
+		attrs = append(attrs, telemetry.CollectionID.String(colID.String()))
+	}
+	ctx, span := telemetry.Tracer().Start(ctx, "retrieve chunks", trace.WithAttributes(attrs...))
+	defer span.End()
+
 	start := time.Now()
 	e.extensions.EmitRetrievalStarted(ctx, colID, query)
 
@@ -531,9 +590,32 @@ func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOpt
 		hits, err = e.hydrate(ctx, hits)
 	}
 	if err != nil {
+		telemetry.Fail(span, err)
+		span.SetAttributes(telemetry.Result.String(telemetry.ResultError))
+		e.metrics.retrieve.Observe(time.Since(start).Seconds(), e.kinds.retriever, telemetry.ResultError)
 		e.extensions.EmitRetrievalFailed(ctx, colID, err)
 		return nil, err
 	}
+
+	// One GetChunk runs per hit, so the counts go here rather than on a
+	// span per hit.
+	hydrated, orphaned := 0, 0
+	for i := range hits {
+		if hits[i].Hydrated {
+			hydrated++
+		}
+		if hits[i].Orphaned {
+			orphaned++
+		}
+	}
+	span.SetAttributes(
+		telemetry.Result.String(telemetry.ResultOK),
+		telemetry.RetrieveResults.Int(len(hits)),
+		telemetry.RetrieveHydrated.Int(hydrated),
+		telemetry.RetrieveOrphaned.Int(orphaned),
+	)
+	e.metrics.retrieve.Observe(time.Since(start).Seconds(), e.kinds.retriever, telemetry.ResultOK)
+	e.metrics.orphaned.Add(float64(orphaned))
 	e.extensions.EmitRetrievalCompleted(ctx, colID, len(hits), time.Since(start))
 	return hits, nil
 }
@@ -585,14 +667,14 @@ func (e *Engine) retrieveRaw(ctx context.Context, query string, params *Retrieve
 		return scored, nil
 	}
 
-	embedResults, err := e.embedder.Embed(ctx, []string{query})
+	embedResults, err := e.embed(ctx, telemetry.EmbedQuery, []string{query})
 	if err != nil {
 		return nil, fmt.Errorf("weave: embed query: %w", err)
 	}
 	if len(embedResults) == 0 {
 		return nil, fmt.Errorf("weave: embed query: no vector returned")
 	}
-	searchResults, err := e.vectorStore.Search(ctx, embedResults[0].Vector, &vectorstore.SearchOptions{
+	searchResults, err := e.searchVectors(ctx, embedResults[0].Vector, &vectorstore.SearchOptions{
 		TopK:      params.TopK,
 		Filter:    filter,
 		TenantKey: tenantKey,
@@ -713,6 +795,26 @@ func (e *Engine) ReindexCollection(ctx context.Context, colID id.CollectionID) e
 		return weave.ErrNoVectorStore
 	}
 
+	ctx, span := telemetry.Tracer().Start(ctx, "reindex collection", trace.WithAttributes(
+		telemetry.CollectionID.String(colID.String()),
+		telemetry.VectorStoreKind.String(e.kinds.vectorStore),
+	))
+	defer span.End()
+
+	docs, chunks, err := e.reindex(ctx, colID)
+	span.SetAttributes(
+		telemetry.ReindexDocuments.Int(docs),
+		telemetry.ReindexChunks.Int(chunks),
+	)
+	if err != nil {
+		telemetry.Fail(span, err)
+	}
+	return err
+}
+
+// reindex is ReindexCollection's body, run under its span. It returns how
+// many documents and chunks it re-embedded, so far when it fails.
+func (e *Engine) reindex(ctx context.Context, colID id.CollectionID) (docCount, chunkCount int, err error) {
 	start := time.Now()
 	e.extensions.EmitReindexStarted(ctx, colID)
 
@@ -722,21 +824,21 @@ func (e *Engine) ReindexCollection(ctx context.Context, colID id.CollectionID) e
 		State:        document.StateReady,
 	})
 	if err != nil {
-		return fmt.Errorf("weave: list documents for reindex: %w", err)
+		return 0, 0, fmt.Errorf("weave: list documents for reindex: %w", err)
 	}
 
 	// Delete existing vector entries for the collection.
 	if err := e.vectorStore.DeleteByMetadata(ctx, map[string]string{
 		"collection_id": colID.String(),
 	}); err != nil {
-		return fmt.Errorf("weave: delete vectors for reindex: %w", err)
+		return 0, 0, fmt.Errorf("weave: delete vectors for reindex: %w", err)
 	}
 
 	// Re-embed each document's chunks.
 	for _, doc := range docs {
 		chunks, err := e.store.ListChunksByDocument(ctx, doc.ID)
 		if err != nil {
-			return fmt.Errorf("weave: list chunks for reindex: %w", err)
+			return docCount, chunkCount, fmt.Errorf("weave: list chunks for reindex: %w", err)
 		}
 
 		if len(chunks) == 0 {
@@ -748,9 +850,9 @@ func (e *Engine) ReindexCollection(ctx context.Context, colID id.CollectionID) e
 			texts[i] = ch.Content
 		}
 
-		embedResults, err := e.embedder.Embed(ctx, texts)
+		embedResults, err := e.embed(ctx, telemetry.EmbedReindex, texts)
 		if err != nil {
-			return fmt.Errorf("weave: embed for reindex: %w", err)
+			return docCount, chunkCount, fmt.Errorf("weave: embed for reindex: %w", err)
 		}
 
 		entries := make([]vectorstore.Entry, len(chunks))
@@ -772,14 +874,16 @@ func (e *Engine) ReindexCollection(ctx context.Context, colID id.CollectionID) e
 			}
 		}
 
-		if err := e.vectorStore.Upsert(ctx, entries); err != nil {
-			return fmt.Errorf("weave: upsert for reindex: %w", err)
+		if err := e.upsertVectors(ctx, entries); err != nil {
+			return docCount, chunkCount, fmt.Errorf("weave: upsert for reindex: %w", err)
 		}
+		docCount++
+		chunkCount += len(chunks)
 	}
 
 	elapsed := time.Since(start)
 	e.extensions.EmitReindexCompleted(ctx, colID, elapsed)
-	return nil
+	return docCount, chunkCount, nil
 }
 
 // ──────────────────────────────────────────────────
