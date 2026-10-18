@@ -27,7 +27,7 @@ Every span below comes from the tracer `github.com/xraph/weave` and is `Internal
 
 | Span | Parent | Attributes |
 |------|--------|------------|
-| `ingest document` | the caller's span | `weave.collection.id`, `weave.document.id`, `weave.chunker.kind`, `weave.vectorstore.kind`, `weave.content.bytes`, `weave.chunk.count`, `weave.result` |
+| `ingest document` | the caller's span | `weave.collection.id`, `weave.document.id`, `weave.chunker.kind`, `weave.vectorstore.kind`, `weave.content.bytes`, `weave.chunk.count` (once the content is chunked, so a later failure keeps it), `weave.result` |
 | `chunk document` | `ingest document` | `weave.chunker.kind`, `weave.chunk.count` |
 | `embed texts` | `ingest document`, `retrieve chunks`, `reindex collection` or the caller's span | `gen_ai.operation.name` (`embeddings`), `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `weave.embed.operation`, `weave.embed.inputs` |
 | `upsert vectors` | `ingest document` or `reindex collection` | `weave.vectorstore.kind`, `weave.vector.count` |
@@ -36,7 +36,7 @@ Every span below comes from the tracer `github.com/xraph/weave` and is `Internal
 | `reindex collection` | the caller's span | `weave.collection.id`, `weave.vectorstore.kind`, `weave.reindex.documents`, `weave.reindex.chunks` |
 | `POST` (Client) | `embed texts` | `http.request.method`, `server.address`, `server.port`, `http.response.status_code` |
 
-`embed texts` and `search vectors` sit straight under the caller's span when `RetrieveCompare` makes them (the dashboard's retrieval page). `gen_ai.request.model` is the model the embedder describes itself with, and `gen_ai.usage.input_tokens` is only set when the embedder reports a token count. The OpenAI embedder does both; a custom embedder that doesn't implement `weave.Describer` gets neither.
+`embed texts` and `search vectors` sit straight under the caller's span when `RetrieveCompare` makes them (the dashboard's retrieval page). `gen_ai.request.model` is the `model` param an embedder reports through `weave.Describer`, so an embedder that doesn't describe itself has no model on its span. `gen_ai.usage.input_tokens` doesn't depend on that: it's the sum of the `TokenCount` values the embedder returns, set whenever that sum is above zero. The OpenAI embedder sets both.
 
 `retrieve chunks` reads each hit back with one `GetChunk`. You'll see those as grove spans, and the totals as `weave.retrieve.hydrated` and `weave.retrieve.orphaned`. An orphan is a hit whose chunk row is gone from the metadata store.
 
@@ -44,7 +44,7 @@ When you configure a retriever, it embeds the query and searches with its own em
 
 `POST` is the OpenAI embedder's call to `{baseURL}/v1/embeddings`. It records the host and port of the base URL (any userinfo dropped) and the status, never the path, the query, the key or the texts. It starts on a context without baggage, because the provider is a third party and baggage from your clients can carry user or tenant IDs. The W3C `traceparent` header still goes. If you pass `WithOpenAIClient` a client whose transport is already traced, you'll get the call twice.
 
-A failed span has status `Error`, an `error.type` attribute and an `exception` event that holds only `exception.type`. The type is the Weave sentinel the error wraps (`weave.ErrChunkNotFound`), the context error, or the Go type of the innermost error (`*url.Error`). For a non-200 answer from the OpenAI endpoint, the `POST` span's `error.type` is the status code and the returned error is `*embedder.StatusError`. An ingest into a collection that doesn't exist is the caller's mistake, so it ends with `weave.result=not_found` and no error status.
+A failed span has status `Error`, an `error.type` attribute and an `exception` event that holds only `exception.type`. The type is the Weave sentinel the error wraps (`weave.ErrChunkNotFound`), the context error, or the Go type of the innermost error in the chain. Wrappers unwrap, so a transport failure under a `*url.Error` shows as what's inside it: `syscall.Errno` for a refused connection, `*net.DNSError` for a failed lookup, `*net.OpError` when nothing further unwraps. For a non-200 answer from the OpenAI endpoint, the `POST` span's `error.type` is the status code and the returned error is `*embedder.StatusError`. An ingest into a collection that doesn't exist is the caller's mistake, so it ends with `weave.result=not_found` and no error status.
 
 No span carries query text, document or chunk content, titles, sources, metadata, tenant IDs, keys or an error's text.
 
@@ -61,7 +61,7 @@ Forge exports a metric name outside its semconv namespaces with a `forge_` prefi
 | `forge_gen_ai_client_operation_duration` | histogram, seconds | `gen_ai_operation_name`, `gen_ai_provider_name`, `weave_embed_operation`, `error_type` |
 | `forge_gen_ai_client_token_usage` | histogram, tokens | `gen_ai_operation_name`, `gen_ai_provider_name`, `weave_embed_operation`, `gen_ai_token_type` |
 
-The label values are fixed:
+Every label value comes from a bounded set. All but `error_type` are fixed lists:
 
 | Label | Values |
 |-------|--------|
@@ -73,12 +73,14 @@ The label values are fixed:
 | `gen_ai_operation_name` | `embeddings` |
 | `gen_ai_provider_name` | `openai`, `local`, `custom` |
 | `weave_embed_operation` | `ingest`, `query`, `reindex` |
-| `error_type` | empty on success, otherwise the error type described above |
+| `error_type` | empty on success, otherwise the error type described above. It isn't a fixed list, but it is bounded: the values are the Weave sentinels, the two context errors and the Go error types your process can return, never error text |
 | `gen_ai_token_type` | `input` |
 
 A component's label is the `Kind` it reports through `weave.Describer`. A kind Weave doesn't ship, or a component that doesn't describe itself, is `custom`, so the strategy string on a request never becomes a label. The model is never a label either: it goes on the span only.
 
-The two `gen_ai` metrics are the OpenTelemetry GenAI client metrics, with the buckets the GenAI conventions advise. `gen_ai` isn't one of forge's semconv namespaces, so they keep the `forge_` prefix and don't get a `_seconds` suffix. Nexus records the same two names. If one app runs both, the families share a name and forge fills a missing label with an empty value, so `sum by (gen_ai_provider_name)` works across both.
+The two `gen_ai` metrics are the OpenTelemetry GenAI client metrics, with the buckets the GenAI conventions advise. `gen_ai` isn't one of forge's semconv namespaces, so they keep the `forge_` prefix and don't get a `_seconds` suffix. Nexus records the same two names with different keys: nexus carries `gen_ai_request_model` where Weave carries `weave_embed_operation`. If one app runs both, the families share a name and forge fills a missing label with an empty value, so nexus's rows have `weave_embed_operation=""` and Weave's have `gen_ai_request_model=""`. `sum by (gen_ai_provider_name)` still works across both, and `weave_embed_operation!=""` picks out Weave's rows.
+
+Mind one double count. If you point Weave's OpenAI embedder at a nexus gateway in the same app (its base URL set to nexus), both sides record the call: Weave as `embeddings` with provider `openai`, and nexus as `embeddings` with whatever provider it routed to, often `openai` too. A sum over the whole family then counts that call twice, so filter on `weave_embed_operation` one way or the other.
 
 The vector histogram only times calls the engine makes itself. For pgvector, grove also records `db_client_operation_duration_seconds` for the same queries.
 

@@ -83,7 +83,7 @@ Each Postgres test gets a random `weave_test_*` schema with `search_path` pinned
 | `api/` | Forge HTTP handlers |
 | `extension/` | the Forge extension |
 | `extension/contract/` | the Forge dashboard contract for the `weave` contributor, with `manifest.yaml` embedded |
-| `internal/` | `pgtest`, `mongotest`, `sqllike` (LIKE escaping) and `telemetry` (the tracer, span attribute keys, error naming, component kinds and metric families the engine and embedders share) |
+| `internal/` | `pgtest`, `mongotest`, `sqllike` (LIKE escaping) and `telemetry` (the tracer, span attribute keys, error naming, component kinds, metric families and the hook error throttle that the engine, the embedders and both hook registries share) |
 | `docs/` | the documentation site |
 | `MIGRATION.md` | what the old templ dashboard did and where each piece went |
 
