@@ -333,6 +333,6 @@ Postgres and MongoDB store tests skip unless you set `WEAVE_TEST_POSTGRES_DSN` o
 
 ## License
 
-See the [Weave repository](https://github.com/xraph/weave) for license terms.
+MIT. See [LICENSE](LICENSE).
 
 Weave is part of the [forgery stack](https://github.com/xraph/forge#the-forgery-stack) built on [Forge](https://github.com/xraph/forge), by [Rex Raphael](https://github.com/juicycleff) and [contributors](https://github.com/xraph/weave/graphs/contributors).
