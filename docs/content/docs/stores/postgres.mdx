@@ -51,9 +51,11 @@ if err := pgdb.Open(ctx, dsn, driver.WithPoolSize(25)); err != nil {
 
 ## Migrations
 
-`st.Migrate(ctx)` creates the tables and indexes with `CREATE TABLE IF NOT EXISTS`, so running it again is safe. It runs each migration's `Up` directly, without a tracking table. The same migrations are exported as `postgres.Migrations`, a Grove migration group, if you'd rather run them through Grove's orchestrator.
+`st.Migrate(ctx)` runs `postgres.Migrations`, a Grove migration group named `weave`, through Grove's orchestrator. Each version gets one row in `grove_migrations`, so a second call applies nothing.
 
-The Forge extension calls `Migrate` on `Start` unless you set `disable_migrate`.
+Weave v1.8 and earlier ran every migration's `Up` on each start and recorded nothing. You don't need to do anything when you upgrade from one of those. Every migration is written with `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`, so the first tracked run finds your tables already there, leaves the rows in them alone and records the versions.
+
+The Forge extension calls `Migrate` on `Start` unless you set `disable_migrate`. Set it when your app runs its own Grove orchestrator, and add `postgres.Migrations` to that run.
 
 ## Schema
 
@@ -71,7 +73,7 @@ The unique constraints are where `weave.ErrCollectionAlreadyExists` and `weave.E
 
 | Method | Behaviour |
 |--------|-----------|
-| `Migrate(ctx)` | Creates the tables and indexes if they don't exist |
+| `Migrate(ctx)` | Applies pending migrations through the orchestrator |
 | `Ping(ctx)` | Pings the database |
 | `Close()` | Closes the `*grove.DB` |
 

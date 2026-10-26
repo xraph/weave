@@ -15,6 +15,7 @@ import (
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/drivers/mongodriver"
 	"github.com/xraph/grove/drivers/mongodriver/mongomigrate"
+	"github.com/xraph/grove/migrate"
 
 	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
@@ -47,15 +48,14 @@ func New(db *grove.DB) *Store {
 	}
 }
 
-// Migrate runs grove migrations for the Weave schema (creates indexes).
+// Migrate applies the pending migrations in Migrations (collections and
+// indexes) through grove's orchestrator, which records each version in
+// grove_migrations. Every Up is idempotent, so an install that ran them
+// untracked is adopted in place.
 func (s *Store) Migrate(ctx context.Context) error {
-	exec := mongomigrate.New(s.mdb)
-	for _, m := range Migrations.Migrations() {
-		if m.Up != nil {
-			if err := m.Up(ctx, exec); err != nil {
-				return fmt.Errorf("weave: %w: %s: %w", weave.ErrMigrationFailed, m.Name, err)
-			}
-		}
+	orch := migrate.NewOrchestrator(mongomigrate.New(s.mdb), Migrations)
+	if _, err := orch.Migrate(ctx); err != nil {
+		return fmt.Errorf("weave: %w: %w", weave.ErrMigrationFailed, err)
 	}
 	return nil
 }

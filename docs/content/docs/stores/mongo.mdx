@@ -40,7 +40,9 @@ if err := st.Migrate(ctx); err != nil {
 | `weave_documents` | Documents | unique `(collection_id, content_hash)`, `(collection_id, state)`, `tenant_id`, `created_at` |
 | `weave_chunks` | Chunk text and offsets | `(document_id, index)`, `collection_id` |
 
-It runs each migration's `Up` directly. The same migrations are exported as `mongostore.Migrations`, a Grove migration group, for Grove's orchestrator.
+It runs `mongostore.Migrations`, a Grove migration group named `weave`, through Grove's orchestrator, which records each version in a `grove_migrations` collection. A second call applies nothing.
+
+Weave v1.8 and earlier ran every `Up` on each start and recorded nothing. Creating a collection or an index that already exists does nothing, so when you upgrade from one of those the first tracked run keeps your documents and just records the versions.
 
 The unique indexes give you `weave.ErrCollectionAlreadyExists` and `weave.ErrDuplicateDocument`, the same as the SQL stores.
 
@@ -65,6 +67,6 @@ Documents in `weave_collections` carry `tenant_id` and `app_id`, and documents a
 
 | Method | Behaviour |
 |--------|-----------|
-| `Migrate(ctx)` | Creates the collections and indexes |
+| `Migrate(ctx)` | Applies pending migrations through the orchestrator |
 | `Ping(ctx)` | Pings the server |
 | `Close()` | Closes the `*grove.DB` |

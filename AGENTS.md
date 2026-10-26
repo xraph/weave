@@ -103,7 +103,7 @@ Every entity ID is an `id.ID` wrapping a TypeID, in the form `prefix_suffix`. Th
 
 `store.Store` embeds `document.Store`, `collection.Store` and `chunk.Store`, plus `Migrate`, `Ping` and `Close`. Each backend declares `var _ store.Store = (*Store)(nil)`, builds on a `*grove.DB` (memory aside), and has a `conformance_test.go` that hands `storetest.Run` an opener returning a fresh, migrated, empty store, so when you add or change store behaviour the place for the test is a new case in `store/storetest/`, where all four backends pick it up. A test in one backend's package covers that backend only.
 
-Migrations are grove `migrate.Group`s registered in each backend's `migrations.go`. The `.sql` files under `store/postgres/migrations/` aren't loaded by anything: the schema that runs is the one in `store/postgres/migrations.go`.
+Migrations are grove `migrate.Group`s registered in each backend's `migrations.go`, all named `weave`, and each backend's `Migrate` runs its group through `migrate.NewOrchestrator`, so every version gets one `grove_migrations` row. Postgres and Mongo installs from v1.8 and earlier ran every `Up` on each start with nothing recorded. The orchestrator adopts them only because every `Up` is idempotent, so keep any migration you add that way (`IF NOT EXISTS` in SQL, collection and index creation in Mongo). The `.sql` files under `store/postgres/migrations/` aren't loaded by anything: the schema that runs is the one in `store/postgres/migrations.go`.
 
 Tenant and app IDs travel on the context. Set them with `weave.WithTenant` and `weave.WithApp`, and the engine reads it back with `weave.TenantFromContext`.
 
