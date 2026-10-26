@@ -2,8 +2,10 @@ package mongo_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/xraph/grove/drivers/mongodriver"
 	"github.com/xraph/grove/drivers/mongodriver/mongomigrate"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/internal/mongotest"
 	"github.com/xraph/weave/store/mongo"
 )
@@ -83,6 +86,22 @@ func TestMigrateAdoptsAnUntrackedInstall(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("weave_collections holds %d documents after adoption, want 1", count)
+	}
+}
+
+// TestMigrateErrorHasOnePrefix closes the database, then expects Migrate's
+// error to match weave.ErrMigrationFailed and to start with a single
+// "weave: " prefix.
+func TestMigrateErrorHasOnePrefix(t *testing.T) {
+	ctx, db := openMigrateDB(t)
+	_ = db.Close()
+
+	err := mongo.New(db).Migrate(ctx)
+	if !errors.Is(err, weave.ErrMigrationFailed) {
+		t.Fatalf("migrate on a closed database: %v, want weave.ErrMigrationFailed", err)
+	}
+	if !strings.HasPrefix(err.Error(), "weave: migration failed: ") {
+		t.Fatalf("migrate error %q, want it to start with %q", err, "weave: migration failed: ")
 	}
 }
 

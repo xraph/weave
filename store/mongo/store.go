@@ -55,7 +55,7 @@ func New(db *grove.DB) *Store {
 func (s *Store) Migrate(ctx context.Context) error {
 	orch := migrate.NewOrchestrator(mongomigrate.New(s.mdb), Migrations)
 	if _, err := orch.Migrate(ctx); err != nil {
-		return fmt.Errorf("weave: %w: %w", weave.ErrMigrationFailed, err)
+		return fmt.Errorf("%w: %w", weave.ErrMigrationFailed, err)
 	}
 	return nil
 }

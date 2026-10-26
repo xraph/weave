@@ -44,6 +44,8 @@ It runs `mongostore.Migrations`, a Grove migration group named `weave`, through 
 
 Weave v1.8 and earlier ran every `Up` on each start and recorded nothing. Creating a collection or an index that already exists does nothing, so when you upgrade from one of those the first tracked run keeps your documents and just records the versions.
 
+Grove's Mongo lock is a single document in `grove_migration_locks`, and it has no lease. If a replica dies while it holds the lock, the document stays locked. Every later start then waits out Grove's five-minute lock timeout and fails, until you set `locked` back to `false` on that document.
+
 The unique indexes give you `weave.ErrCollectionAlreadyExists` and `weave.ErrDuplicateDocument`, the same as the SQL stores.
 
 ## Pairing with a vector store

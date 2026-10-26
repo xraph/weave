@@ -50,7 +50,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	}
 	orch := migrate.NewOrchestrator(executor, Migrations)
 	if _, err := orch.Migrate(ctx); err != nil {
-		return fmt.Errorf("weave: %w: %w", weave.ErrMigrationFailed, err)
+		return fmt.Errorf("%w: %w", weave.ErrMigrationFailed, err)
 	}
 	return nil
 }

@@ -2,8 +2,11 @@ package postgres_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +14,7 @@ import (
 	"github.com/xraph/grove/drivers/pgdriver"
 	"github.com/xraph/grove/drivers/pgdriver/pgmigrate"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/internal/pgtest"
 	"github.com/xraph/weave/store/postgres"
 )
@@ -67,17 +71,77 @@ VALUES ('col_01h455vb4pex5vsknk084sn02q', 'kept', 'tenant-a', 'app-a')`); err !=
 	}
 }
 
+// TestMigrateConcurrentFirstBoot starts eight replicas on one empty schema at
+// once, each with its own connection pool, and expects every Migrate to
+// succeed with one row per version. Grove creates its tracking tables before
+// it takes the migration lock, so the replicas race on that CREATE.
+func TestMigrateConcurrentFirstBoot(t *testing.T) {
+	ctx, scoped := migrateSchema(t)
+
+	const replicas = 8
+	dbs := make([]*grove.DB, replicas)
+	for i := range dbs {
+		dbs[i] = openDB(ctx, t, scoped)
+	}
+
+	errs := make([]error, replicas)
+	var wg sync.WaitGroup
+	for i, db := range dbs {
+		wg.Go(func() { errs[i] = postgres.New(db).Migrate(ctx) })
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("replica %d migrate: %v", i, err)
+		}
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
+	assertAppliedOnce(ctx, t, pgdriver.Unwrap(dbs[0]))
+}
+
+// TestMigrateErrorHasOnePrefix closes the database, then expects Migrate's
+// error to match weave.ErrMigrationFailed and to start with a single
+// "weave: " prefix.
+func TestMigrateErrorHasOnePrefix(t *testing.T) {
+	ctx, db := openMigrateDB(t)
+	_ = db.Close()
+
+	err := postgres.New(db).Migrate(ctx)
+	if !errors.Is(err, weave.ErrMigrationFailed) {
+		t.Fatalf("migrate on a closed database: %v, want weave.ErrMigrationFailed", err)
+	}
+	if !strings.HasPrefix(err.Error(), "weave: migration failed: ") {
+		t.Fatalf("migrate error %q, want it to start with %q", err, "weave: migration failed: ")
+	}
+}
+
 func openMigrateDB(t *testing.T) (context.Context, *grove.DB) {
+	t.Helper()
+	ctx, scoped := migrateSchema(t)
+	return ctx, openDB(ctx, t, scoped)
+}
+
+// migrateSchema returns a context bounded for one test and a DSN pinned to a
+// fresh schema of its own.
+func migrateSchema(t *testing.T) (context.Context, string) {
 	t.Helper()
 	dsn := os.Getenv("WEAVE_TEST_POSTGRES_DSN")
 	if dsn == "" {
 		t.Skip("WEAVE_TEST_POSTGRES_DSN not set, skipping postgres")
 	}
 	scoped := pgtest.Schema(t, dsn)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
+	return ctx, scoped
+}
+
+func openDB(ctx context.Context, t *testing.T, dsn string) *grove.DB {
+	t.Helper()
 	drv := pgdriver.New()
-	if err := drv.Open(ctx, scoped); err != nil {
+	if err := drv.Open(ctx, dsn); err != nil {
 		t.Fatalf("open postgres: %v", err)
 	}
 	db, err := grove.Open(drv)
@@ -85,7 +149,7 @@ func openMigrateDB(t *testing.T) (context.Context, *grove.DB) {
 		t.Fatalf("grove.Open postgres: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return ctx, db
+	return db
 }
 
 // assertAppliedOnce checks that grove_migrations holds exactly one weave row

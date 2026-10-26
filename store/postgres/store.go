@@ -4,8 +4,10 @@ package postgres
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/xraph/grove"
@@ -42,12 +44,65 @@ func New(db *grove.DB) *Store {
 // Migrate applies the pending migrations in Migrations through grove's
 // orchestrator, which records each version in grove_migrations. Every Up is
 // idempotent, so an install that ran them untracked is adopted in place.
+//
+// Grove v1.10.0 creates grove_migrations and grove_migration_locks before it
+// takes the migration lock, so replicas booting together on a database
+// without those tables race on the CREATE, and the losers fail with
+// duplicate_table or duplicate_object. Migrate retries that failure a few
+// times with a short jittered pause. By the next attempt the tables exist and
+// grove's lock serialises the replicas.
 func (s *Store) Migrate(ctx context.Context) error {
-	orch := migrate.NewOrchestrator(pgmigrate.New(s.pg), Migrations)
-	if _, err := orch.Migrate(ctx); err != nil {
-		return fmt.Errorf("weave: %w: %w", weave.ErrMigrationFailed, err)
+	var err error
+	for attempt := 1; ; attempt++ {
+		_, err = migrate.NewOrchestrator(pgmigrate.New(s.pg), Migrations).Migrate(ctx)
+		if err == nil {
+			return nil
+		}
+		if attempt == migrateAttempts || !isConcurrentCreate(err) {
+			break
+		}
+		if waitErr := pause(ctx, migrateBackoff(attempt)); waitErr != nil {
+			err = errors.Join(err, waitErr)
+			break
+		}
 	}
-	return nil
+	return fmt.Errorf("%w: %w", weave.ErrMigrationFailed, err)
+}
+
+// migrateAttempts bounds how many times Migrate runs the orchestrator when
+// replicas race on grove's tracking tables.
+const migrateAttempts = 5
+
+// migrateBackoff returns the pause before the next attempt: a base that grows
+// with each attempt plus up to as much again of jitter, so racing replicas
+// spread out. Attempt 1 waits 50 to 100ms, attempt 4 at most 400ms.
+func migrateBackoff(attempt int) time.Duration {
+	base := time.Duration(attempt) * 50 * time.Millisecond
+	return base + jitter(base)
+}
+
+// jitter returns a random duration in [0, limit).
+func jitter(limit time.Duration) time.Duration {
+	if limit <= 0 {
+		return 0
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(limit)))
+	if err != nil {
+		return limit / 2
+	}
+	return time.Duration(n.Int64())
+}
+
+// pause waits for d or until ctx is done, whichever comes first.
+func pause(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // Ping verifies the database connection.

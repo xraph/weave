@@ -55,6 +55,10 @@ if err := pgdb.Open(ctx, dsn, driver.WithPoolSize(25)); err != nil {
 
 Weave v1.8 and earlier ran every migration's `Up` on each start and recorded nothing. You don't need to do anything when you upgrade from one of those. Every migration is written with `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`, so the first tracked run finds your tables already there, leaves the rows in them alone and records the versions.
 
+Grove v1.10.0 creates `grove_migrations` and `grove_migration_locks` before it takes its migration lock. When several replicas boot at once on a database that doesn't have those tables yet, they race on the `CREATE`, and the losers fail with `duplicate_table` (42P07) or `duplicate_object` (42710). `Migrate` works around this by retrying the run, up to five attempts with a short random pause in between. By the second attempt the tables exist and Grove's lock lines the replicas up.
+
+That lock is `pg_try_advisory_lock(1)`, one key for every Grove migration on the database, whatever its schema or group. If your app or another library also migrates through Grove on the same database, weave's run waits for theirs and theirs waits for weave's.
+
 The Forge extension calls `Migrate` on `Start` unless you set `disable_migrate`. Set it when your app runs its own Grove orchestrator, and add `postgres.Migrations` to that run.
 
 ## Schema
