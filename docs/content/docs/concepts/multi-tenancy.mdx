@@ -1,9 +1,9 @@
 ---
 title: Multi-Tenancy
-description: How Weave scopes collections, documents and chunks to tenant and app contexts, and where it doesn't.
+description: Every Weave call works within the tenant on its context. What that covers, and what happens without one.
 ---
 
-Weave records a tenant on every collection, document and chunk, and filters retrieval by it. It does not filter everything by it. Reads and deletes by ID, and list calls without a tenant filter, see every tenant's data. This page says exactly which calls are scoped so you know where your own checks go.
+You put a tenant on the context, and every collection, document and chunk call works inside it. A call without one fails with `weave.ErrTenantRequired`, and no call lists or reads another tenant's rows.
 
 ## Setting the scope
 
@@ -14,52 +14,47 @@ ctx = weave.WithTenant(ctx, "tenant-1")
 ctx = weave.WithApp(ctx, "myapp")
 ```
 
-Both are plain strings on the context. Neither is required: with no tenant, everything is written with an empty `TenantID` and retrieval searches across all tenants.
+Both are plain strings on the context. The tenant is required. The app is optional and only recorded.
 
-## What the tenant does
+## Every call is scoped
 
-| Call | Uses the context tenant |
-|------|-------------------------|
-| `CreateCollection` | Sets `TenantID` (and `AppID` from `WithApp`) when the collection leaves them empty |
-| `GetCollectionByName` | Looks the name up within the tenant |
-| `Ingest`, `IngestBatch` | Stamps the tenant on the document, its chunks and the `tenant_id` key of each vector |
-| `Retrieve`, `HybridSearch` | Filters the vector search to `tenant_id` |
-| `GetCollection`, `GetDocument`, `GetChunk` | No, any ID is returned |
-| `DeleteCollection`, `DeleteDocument` | No, any ID is deleted |
-| `CollectionStats`, `ReindexCollection` | No |
-| `ListCollections`, `ListDocuments`, `ListChunks`, `Count*` | Only through the filter's `Tenant` field, see below |
+The metadata store reads the tenant from the context on every call except `Migrate`, `Ping` and `Close`, and refuses before it touches the database when there isn't one.
 
-`Ingest` doesn't check that the target collection belongs to the context tenant. A caller with another tenant's collection ID can write into it (the new document gets the caller's tenant).
+| Call | With tenant `t` on the context |
+|------|--------------------------------|
+| `CreateCollection` | Sets `TenantID` (and `AppID` from `WithApp`) when the collection leaves them empty. A collection naming another tenant is `ErrInvalidArgument` |
+| `GetCollectionByName` | Looks the name up within `t` |
+| `GetCollection`, `GetDocument`, `GetChunk` | Find the ID only among `t`'s rows. Another tenant's ID gets the same not-found error as one that doesn't exist |
+| `UpdateCollection` | Same: another tenant's collection is `ErrCollectionNotFound` |
+| `ListCollections`, `ListDocuments`, `ListChunks`, `Count*` | Return only `t`'s rows |
+| `Ingest`, `IngestBatch` | Read the collection within `t` first, so another tenant's collection ID is `ErrCollectionNotFound`. The document, its chunks and the `tenant_id` key of each vector get `t` |
+| `CollectionStats` | Reads the collection and its counts within `t` |
+| `ReindexCollection` | Re-embeds only `t`'s documents |
+| `DeleteCollection`, `DeleteDocument` | Delete only `t`'s rows. Another tenant's ID is not-found |
+| `Retrieve`, `HybridSearch` | Filter the vector search to `tenant_id` and read each hit back within `t` |
+
+Another tenant's ID is not-found on purpose: if it gave a different error, anyone holding a list of IDs could work out which of them exist.
 
 `AppID` is recorded on collections and nothing else. No call filters by it.
 
-## Scoping reads yourself
+The vector side of `DeleteDocument`, `DeleteCollection` and `ReindexCollection` still goes by `document_id` or `collection_id` alone. Called with another tenant's ID, they leave that tenant's rows alone but remove its vectors. So when an ID comes from outside your service, check it with `GetDocument` or `GetCollection` under the caller's tenant before you pass it to one of them.
 
-List calls take an explicit tenant. `Tenant: nil` means every tenant, and a pointer means an exact match:
+## The Tenant filter field
 
-```go
-tenant := weave.TenantFromContext(ctx)
-
-cols, err := eng.ListCollections(ctx, &collection.ListFilter{Tenant: &tenant})
-docs, err := eng.ListDocuments(ctx, &document.ListFilter{
-    CollectionID: colID,
-    Tenant:       &tenant,
-})
-```
-
-For a lookup by ID, compare the owner after you load it:
+`collection.ListFilter`, `collection.CountFilter`, `document.ListFilter`, `document.CountFilter`, `chunk.ListFilter` and `chunk.CountFilter` still have a `Tenant *string` field, so code that sets it keeps compiling. It's deprecated. Leave it nil: the context already scopes the call. A non-nil value must equal the context tenant, and anything else, `""` included, is `ErrInvalidArgument`.
 
 ```go
-col, err := eng.GetCollection(ctx, colID)
-if err != nil {
-    return err
-}
-if col.TenantID != weave.TenantFromContext(ctx) {
-    return weave.ErrCollectionNotFound
-}
+ctx = weave.WithTenant(ctx, "tenant-1")
+
+cols, err := eng.ListCollections(ctx, &collection.ListFilter{})
+docs, err := eng.ListDocuments(ctx, &document.ListFilter{CollectionID: colID})
 ```
 
-The HTTP routes don't do either of these, so in a multi-tenant deployment put an authorization check in front of the list, get, delete, stats and reindex routes.
+Both return `tenant-1`'s rows and nobody else's.
+
+## Rows written without a tenant
+
+Weave v1.8 let you write with no tenant, and its dashboard always did, so an existing install can hold collections, documents and chunks with `tenant_id = ''`. No call reaches them now: `""` is not a tenant, and a filter can't name it. They stay in the tables until you assign them to a real tenant, which the upgrade notes cover.
 
 ## Retrieval
 
@@ -70,23 +65,23 @@ At ingest, each vector's metadata gets `tenant_id` and `collection_id`. `Retriev
 | nothing, with a tenant on the context | the context tenant |
 | `engine.WithTenantID("t")` | `t`, overriding the context |
 | `engine.WithTenantFilter("t")` | exactly `t`, overriding the context |
-| `engine.WithTenantFilter("")` | rows with no tenant |
-| nothing, no tenant on the context | none, every tenant |
 
-The in-memory and pgvector stores apply it as an exact match on the `tenant_id` metadata key. The Fabriq store also sets Fabriq's own tenant scope from it.
+Each hit is then read back from the metadata store within the context tenant. With no tenant on the context, that read is refused, so `Retrieve` fails with `ErrTenantRequired` as soon as the search finds anything. With an option naming a different tenant from the context's, the hits can't be read back and come back marked `Orphaned`.
+
+The in-memory and pgvector stores apply the filter as an exact match on the `tenant_id` metadata key. The Fabriq store also sets Fabriq's own tenant scope from it.
 
 ## Tenant and app
 
 | Field | Recorded on | Filtered by |
 |-------|-------------|-------------|
-| `TenantID` | collections, documents, chunks, vectors | retrieval, `GetCollectionByName`, and list filters you set |
+| `TenantID` | collections, documents, chunks, vectors | every store call, and retrieval |
 | `AppID` | collections | nothing |
 
 Collection names are unique per tenant, so two tenants can each have a `support-docs` collection.
 
 ## Background jobs
 
-A job that isn't serving a request should build its own context, so the request's cancellation doesn't stop it and the tenant is the one you meant:
+A job that isn't serving a request builds its own context. That way the request's cancellation doesn't stop it, and the tenant is the one you meant:
 
 ```go
 func reindex(eng *engine.Engine, tenantID string, colID id.CollectionID) error {
@@ -95,4 +90,4 @@ func reindex(eng *engine.Engine, tenantID string, colID id.CollectionID) error {
 }
 ```
 
-`ReindexCollection` doesn't read the tenant; each vector it rewrites keeps its chunk's stored tenant.
+Use the collection's own tenant. Under any other tenant, `ReindexCollection` finds none of the collection's documents, and it still clears the collection's vectors first (see above).

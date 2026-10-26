@@ -1,7 +1,6 @@
 package storetest
 
 import (
-	"context"
 	"testing"
 
 	"github.com/xraph/weave/chunk"
@@ -10,7 +9,7 @@ import (
 )
 
 func testChunks(t *testing.T, s store.Store) {
-	ctx := context.Background()
+	ctx := as("t1")
 
 	a := mustCollection(t, s, "chunks-a", "t1")
 	b := mustCollection(t, s, "chunks-b", "t1")
@@ -64,9 +63,11 @@ func testChunks(t *testing.T, s store.Store) {
 	}
 	sameOrder(t, "offset two, no limit", chunkIDs(rest), chunkIDs(all[2:]))
 
-	none, err := s.ListChunks(ctx, &chunk.ListFilter{CollectionID: a.ID, Tenant: ptr("t2")})
+	// Another tenant listing this collection sees none of its chunks. A
+	// filter naming another tenant is refused, see TenantFilterMustMatch.
+	none, err := s.ListChunks(as("t2"), &chunk.ListFilter{CollectionID: a.ID})
 	if err != nil {
-		t.Fatalf("list other tenant: %v", err)
+		t.Fatalf("list as another tenant: %v", err)
 	}
-	sameSet(t, "other tenant", chunkIDs(none), nil)
+	sameSet(t, "another tenant", chunkIDs(none), nil)
 }

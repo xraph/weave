@@ -22,8 +22,9 @@ type ListFilter struct {
 	// SortDesc lists newest first. The default is oldest first, which API
 	// clients paging by offset already depend on.
 	SortDesc bool
-	// Tenant filters by tenant. Nil means every tenant. A non-nil value is
-	// an exact match, so a pointer to "" means rows written with no tenant.
+	// Tenant is the old explicit tenant filter.
+	//
+	// Deprecated: the tenant comes from the context (weave.WithTenant). A non-nil value must equal it.
 	Tenant *string
 }
 
@@ -35,17 +36,20 @@ type CountFilter struct {
 	State State
 	// Search filters by title, matched exactly as ListFilter.Search.
 	Search string
-	// Tenant filters by tenant. Nil means every tenant. A non-nil value is
-	// an exact match, so a pointer to "" means rows written with no tenant.
+	// Tenant is the old explicit tenant filter.
+	//
+	// Deprecated: the tenant comes from the context (weave.WithTenant). A non-nil value must equal it.
 	Tenant *string
 	// UpdatedBefore counts only documents last updated before this instant.
 	// Zero means no filter.
 	UpdatedBefore time.Time
 }
 
-// Store defines the persistence contract for documents.
+// Store defines the persistence contract for documents. Every method is
+// scoped to the context tenant; see store.Store for the rules.
 type Store interface {
-	// CreateDocument persists a new document.
+	// CreateDocument persists a new document. Its TenantID must be the
+	// context tenant.
 	CreateDocument(ctx context.Context, doc *Document) error
 
 	// GetDocument retrieves a document by ID.

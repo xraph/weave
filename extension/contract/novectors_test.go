@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/xraph/weave"
 )
 
 // assertNoVectors fails if any key anywhere in v's JSON names a vector or
@@ -43,7 +45,7 @@ func assertNoVectors(t *testing.T, label string, v any) {
 // populated engine, and walks each answer.
 func TestNoResponseCarriesAVector(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	p := principal()
 	col := mustCollection(t, deps, "kb")
 	doc := mustIngest(t, ctx, deps, col.ID, "refunds", "refunds are issued within thirty days")

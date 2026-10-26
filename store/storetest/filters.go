@@ -1,7 +1,6 @@
 package storetest
 
 import (
-	"context"
 	"testing"
 
 	"github.com/xraph/weave/chunk"
@@ -18,7 +17,7 @@ import (
 // metacharacters "(" and ".*" and the LIKE metacharacters "%", "_" and "\"
 // each match only themselves.
 func testFilters(t *testing.T, s store.Store) {
-	ctx := context.Background()
+	ctx := as("t1")
 
 	a := mustCollection(t, s, "alpha-col", "t1")
 	b := mustCollection(t, s, "beta-col", "t1")

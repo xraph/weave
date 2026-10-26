@@ -12,6 +12,8 @@ import (
 	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
 	"github.com/xraph/forge/extensions/dashboard/contract/dispatcher"
 	"github.com/xraph/forge/extensions/dashboard/contract/transport"
+
+	"github.com/xraph/weave"
 )
 
 // handler registers the contract on fresh registries and returns forge's
@@ -31,7 +33,7 @@ func handler(t *testing.T, deps Deps, opts ...transport.HandlerOption) http.Hand
 func postRaw(h http.Handler, kind, intent, key, payload string) *httptest.ResponseRecorder {
 	body := `{"envelope":"v1","kind":"` + kind + `","contributor":"weave","intent":"` + intent + `",` +
 		`"csrf":"test","idempotencyKey":"` + key + `","payload":` + payload + `}`
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/dashboard/v1", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(weave.WithTenant(context.Background(), "t1"), http.MethodPost, "/api/dashboard/v1", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec

@@ -15,7 +15,7 @@ It's a library, not a service. You own `main`, the database connection and the p
 - Documents live in named collections, each with its own chunk size, overlap and a recorded embedding model.
 - The loader, chunker, embedder, retriever, vector store and metadata store are all Go interfaces.
 - Metadata goes in PostgreSQL, SQLite, MongoDB or memory. Vectors go in pgvector, [Fabriq](https://github.com/xraph/fabriq) or memory.
-- `weave.WithTenant` on the context stamps the tenant on everything you create and filters retrieval to it. See [multi-tenancy](/docs/concepts/multi-tenancy) for exactly what is and isn't scoped.
+- `weave.WithTenant` on the context is required. It stamps the tenant on everything you create, and reads, lists and searches only see that tenant's data. See [multi-tenancy](/docs/concepts/multi-tenancy).
 - You can hook into 14 lifecycle events (collections, ingestion, retrieval, deletes, reindexing and shutdown). Weave ships a metrics extension and a Chronicle audit bridge built on them.
 - `extension.New` builds the engine, provides `*engine.Engine` in the DI container and mounts 13 routes under `/weave/v1`.
 

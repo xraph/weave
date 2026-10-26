@@ -19,7 +19,7 @@ import (
 
 func TestSystemOverview(t *testing.T) {
 	forEachStore(t, func(t *testing.T, deps Deps) {
-		ctx := context.Background()
+		ctx := weave.WithTenant(context.Background(), "t1")
 		col := mustCollection(t, deps, "support")
 		first := mustIngest(t, ctx, deps, col.ID, "refunds", "refunds are issued within thirty days")
 		time.Sleep(5 * time.Millisecond)
@@ -30,7 +30,7 @@ func TestSystemOverview(t *testing.T) {
 
 		// One document stuck in processing, last touched long ago as far
 		// as the overview's clock is concerned.
-		stuck := &document.Document{ID: id.NewDocumentID(), CollectionID: col.ID, Title: "stuck", ContentHash: "stuck", State: document.StateProcessing, Metadata: map[string]string{}}
+		stuck := &document.Document{ID: id.NewDocumentID(), CollectionID: col.ID, TenantID: "t1", Title: "stuck", ContentHash: "stuck", State: document.StateProcessing, Metadata: map[string]string{}}
 		if err := deps.Engine.Store().CreateDocument(ctx, stuck); err != nil {
 			t.Fatalf("seed stuck: %v", err)
 		}
@@ -86,26 +86,9 @@ func TestSystemOverview(t *testing.T) {
 	})
 }
 
-func TestSystemOverview_TenantFilter(t *testing.T) {
-	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
-	col := mustCollection(t, deps, "mixed")
-	mustIngest(t, weave.WithTenant(ctx, "t1"), deps, col.ID, "a", "alpha text")
-	mustIngest(t, ctx, deps, col.ID, "b", "bravo text")
-
-	empty := ""
-	out, err := systemOverviewHandler(deps)(ctx, tenantInput{Tenant: &empty}, principal())
-	if err != nil {
-		t.Fatalf("overview: %v", err)
-	}
-	if out.Documents != 1 || len(out.NewestDocuments) != 1 || out.NewestDocuments[0].Title != "b" {
-		t.Errorf("tenant \"\": %+v", out)
-	}
-}
-
 func TestSystemComponents(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	out, err := systemComponentsHandler(deps)(context.Background(), struct{}{}, principal())
+	out, err := systemComponentsHandler(deps)(weave.WithTenant(context.Background(), "t1"), struct{}{}, principal())
 	if err != nil {
 		t.Fatalf("components: %v", err)
 	}
@@ -126,7 +109,7 @@ func (collectionLookupDown) GetCollection(context.Context, id.CollectionID) (*co
 }
 
 func TestSystemOverview_CollectionLookupFailure(t *testing.T) {
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	mem := memory.New()
 	seed := newDeps(t, mem)
 	col := mustCollection(t, seed, "support")

@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/retriever"
 )
@@ -25,7 +26,7 @@ func TestRetrieveHitsCarryIdentity(t *testing.T) {
 	for name, extra := range configs {
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t, extra...)
-			ctx := context.Background()
+			ctx := weave.WithTenant(context.Background(), "t1")
 			col := mustTestCollection(t, r.Engine, "identity")
 			mustIngest(t, ctx, r.Engine, col.ID, "shipping", "shipping takes five working days")
 			want := mustIngest(t, ctx, r.Engine, col.ID, "refunds", "refunds are issued within thirty days")
@@ -59,7 +60,7 @@ func TestRetrieveHitsCarryIdentity(t *testing.T) {
 
 func TestRetrieveMarksOrphans(t *testing.T) {
 	r := newRig(t)
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, r.Engine, "orphans")
 	doc := mustIngest(t, ctx, r.Engine, col.ID, "refunds", "refunds are issued within thirty days")
 
@@ -86,7 +87,7 @@ func TestRetrieveMarksOrphans(t *testing.T) {
 
 func TestRetrieveKeepsVectorMetadataAndOwnsItsChunk(t *testing.T) {
 	r := newRig(t)
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, r.Engine, "metadata")
 	mustIngest(t, ctx, r.Engine, col.ID, "refunds", "refunds are issued within thirty days")
 
@@ -128,7 +129,7 @@ func TestRetrieveKeepsVectorMetadataAndOwnsItsChunk(t *testing.T) {
 
 func TestRetrieveOrphanKeepsItsPlace(t *testing.T) {
 	r := newRig(t)
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, r.Engine, "mixed")
 	mustIngest(t, ctx, r.Engine, col.ID, "refunds", "refunds are issued within thirty days")
 	mustIngest(t, ctx, r.Engine, col.ID, "late refunds", "late refunds take longer")

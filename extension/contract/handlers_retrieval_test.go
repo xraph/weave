@@ -45,7 +45,7 @@ func sameContext(t *testing.T, label string, got, want *engine.AssembledContext)
 
 func TestRetrievalRunAndAssemble(t *testing.T) {
 	forEachStore(t, func(t *testing.T, deps Deps) {
-		ctx := context.Background()
+		ctx := weave.WithTenant(context.Background(), "t1")
 		p := principal()
 		col := mustCollection(t, deps, "kb")
 		want := mustIngest(t, ctx, deps, col.ID, "refunds", "refunds are issued within thirty days")
@@ -69,26 +69,9 @@ func TestRetrievalRunAndAssemble(t *testing.T) {
 	})
 }
 
-func TestRetrievalRun_TenantFilter(t *testing.T) {
-	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
-	col := mustCollection(t, deps, "kb")
-	mustIngest(t, weave.WithTenant(ctx, "t1"), deps, col.ID, "tenanted", "refunds for tenant one")
-	open := mustIngest(t, ctx, deps, col.ID, "open", "refunds for nobody in particular")
-
-	empty := ""
-	out, err := retrievalRunHandler(deps)(ctx, runInput{Query: "refunds", Tenant: &empty}, principal())
-	if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if len(out.Result.Hits) != 1 || out.Result.Hits[0].Chunk.DocumentID.String() != open.String() {
-		t.Errorf("tenant \"\": %+v", out.Result.Hits)
-	}
-}
-
 func TestRetrievalRun_Validation(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	cases := map[string]runInput{
 		"blank query":     {Query: "   "},
 		"huge query":      {Query: strings.Repeat("q", maxQueryBytes+1)},
@@ -109,7 +92,7 @@ func TestRetrievalRun_NoEmbedderIsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = retrievalRunHandler(Deps{Engine: e})(context.Background(), runInput{Query: "anything"}, principal())
+	_, err = retrievalRunHandler(Deps{Engine: e})(weave.WithTenant(context.Background(), "t1"), runInput{Query: "anything"}, principal())
 	if codeOf(err) != dashcontract.CodeUnavailable {
 		t.Errorf("no embedder: %v", err)
 	}
@@ -121,7 +104,7 @@ func TestRetrievalRun_NoVectorStoreIsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = retrievalRunHandler(Deps{Engine: e})(context.Background(), runInput{Query: "anything"}, principal())
+	_, err = retrievalRunHandler(Deps{Engine: e})(weave.WithTenant(context.Background(), "t1"), runInput{Query: "anything"}, principal())
 	if codeOf(err) != dashcontract.CodeUnavailable || !strings.Contains(err.Error(), "vector store") {
 		t.Errorf("no vector store: %v", err)
 	}
@@ -131,7 +114,7 @@ func TestRetrievalRun_NoVectorStoreIsUnavailable(t *testing.T) {
 // hits and budget give back exactly what the run handed the model.
 func TestRetrievalAssemble_ParityWithRun(t *testing.T) {
 	forEachStore(t, func(t *testing.T, deps Deps) {
-		ctx := context.Background()
+		ctx := weave.WithTenant(context.Background(), "t1")
 		col := mustCollection(t, deps, "kb")
 		mustIngest(t, ctx, deps, col.ID, "refunds", strings.Repeat("refunds are issued within thirty days. ", 8))
 		mustIngest(t, ctx, deps, col.ID, "returns", "returns and refunds need the original receipt")
@@ -153,7 +136,7 @@ func TestRetrievalAssemble_ParityWithRun(t *testing.T) {
 // text to the model, so assemble must reproduce it rather than refuse.
 func TestRetrievalAssemble_OrphanParity(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustCollection(t, deps, "kb")
 	mustIngest(t, ctx, deps, col.ID, "keep", "refunds are issued within thirty days")
 	gone := mustIngest(t, ctx, deps, col.ID, "gone", "refunds orphan text lives only in the vector")
@@ -186,7 +169,7 @@ func TestRetrievalAssemble_OrphanParity(t *testing.T) {
 
 func TestRetrievalAssemble_UnidentifiedHit(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ac, err := retrievalAssembleHandler(deps)(context.Background(), assembleInput{Hits: []assembleHit{{Content: text("from a custom retriever"), Score: 0.5}}}, principal())
+	ac, err := retrievalAssembleHandler(deps)(weave.WithTenant(context.Background(), "t1"), assembleInput{Hits: []assembleHit{{Content: text("from a custom retriever"), Score: 0.5}}}, principal())
 	if err != nil {
 		t.Fatalf("assemble: %v", err)
 	}
@@ -197,7 +180,7 @@ func TestRetrievalAssemble_UnidentifiedHit(t *testing.T) {
 
 func TestRetrievalAssemble_Caps(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	if _, err := retrievalAssembleHandler(deps)(ctx, assembleInput{Hits: make([]assembleHit, maxAssembleRefs+1)}, principal()); codeOf(err) != dashcontract.CodeBadRequest {
 		t.Errorf("too many hits: %v", err)
 	}
@@ -232,7 +215,7 @@ func (m mixedRetriever) Retrieve(context.Context, string, *retriever.Options) ([
 // A hit with a null chunk is skipped by the run's assembler. Re-assembly
 // must skip it too, or the context and the markers drift.
 func TestRetrievalAssemble_NullChunkParity(t *testing.T) {
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	seed := newDeps(t, openMemory(t))
 	col := mustCollection(t, seed, "kb")
 	docID := mustIngest(t, ctx, seed, col.ID, "refunds", "refunds are issued within thirty days")

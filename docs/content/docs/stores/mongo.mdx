@@ -63,7 +63,7 @@ eng, err := engine.New(
 
 ## Tenancy
 
-Documents in `weave_collections` carry `tenant_id` and `app_id`, and documents and chunks carry `tenant_id`. Queries filter on the tenant only when a list filter's `Tenant` is set, as with every store; see [multi-tenancy](/docs/concepts/multi-tenancy).
+Documents in `weave_collections` carry `tenant_id` and `app_id`, and documents and chunks carry `tenant_id`. Every query filters on the context tenant, as with every store; see [multi-tenancy](/docs/concepts/multi-tenancy).
 
 ## Lifecycle
 

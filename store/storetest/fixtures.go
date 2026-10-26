@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
@@ -15,6 +16,13 @@ import (
 	"github.com/xraph/weave/store"
 )
 
+// as returns a context carrying tenant, which every store call now needs.
+func as(tenant string) context.Context {
+	return weave.WithTenant(context.Background(), tenant)
+}
+
+// mustCollection creates a collection owned by tenant, under that tenant's
+// context.
 func mustCollection(t *testing.T, s store.Store, name, tenant string) *collection.Collection {
 	t.Helper()
 	col := &collection.Collection{
@@ -30,12 +38,14 @@ func mustCollection(t *testing.T, s store.Store, name, tenant string) *collectio
 		ChunkOverlap:   8,
 		Metadata:       map[string]string{"team": "search"},
 	}
-	if err := s.CreateCollection(context.Background(), col); err != nil {
+	if err := s.CreateCollection(as(tenant), col); err != nil {
 		t.Fatalf("create collection %q: %v", name, err)
 	}
 	return col
 }
 
+// mustDocument creates a document in col, owned by and created under col's
+// tenant.
 func mustDocument(t *testing.T, s store.Store, col *collection.Collection, title string, state document.State) *document.Document {
 	t.Helper()
 	docID := id.NewDocumentID()
@@ -54,14 +64,15 @@ func mustDocument(t *testing.T, s store.Store, col *collection.Collection, title
 	if state == document.StateFailed {
 		doc.Error = "embed: quota exceeded"
 	}
-	if err := s.CreateDocument(context.Background(), doc); err != nil {
+	if err := s.CreateDocument(as(doc.TenantID), doc); err != nil {
 		t.Fatalf("create document %q: %v", title, err)
 	}
 	return doc
 }
 
 // mustChunks writes n chunks for doc with distinct offsets, token counts and
-// metadata so a round trip that drops any of them is caught.
+// metadata so a round trip that drops any of them is caught. They are owned by
+// and created under doc's tenant.
 func mustChunks(t *testing.T, s store.Store, doc *document.Document, n int) []*chunk.Chunk {
 	t.Helper()
 	chunks := make([]*chunk.Chunk, n)
@@ -79,7 +90,7 @@ func mustChunks(t *testing.T, s store.Store, doc *document.Document, n int) []*c
 			Metadata:     map[string]string{"section": fmt.Sprint(i)},
 		}
 	}
-	if err := s.CreateChunkBatch(context.Background(), chunks); err != nil {
+	if err := s.CreateChunkBatch(as(doc.TenantID), chunks); err != nil {
 		t.Fatalf("create chunks for %q: %v", doc.Title, err)
 	}
 	return chunks

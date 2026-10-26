@@ -1,7 +1,6 @@
 package storetest
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -13,7 +12,7 @@ import (
 // testOrdering pins default ascending order and SortDesc, with paging. The
 // sleeps keep created_at distinct even on Mongo's millisecond clock.
 func testOrdering(t *testing.T, s store.Store) {
-	ctx := context.Background()
+	ctx := as("t1")
 
 	cols := make([]*collection.Collection, 0, 3)
 	for _, name := range []string{"first", "second", "third"} {

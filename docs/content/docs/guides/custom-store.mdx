@@ -195,6 +195,20 @@ eng, _ := engine.New(engine.WithStore(&MyStore{}))
 
 See [store/store.go](https://github.com/xraph/weave/blob/main/store/store.go) for the full interface definition.
 
+### Tenant rules
+
+Weave relies on the store to keep tenants apart, so your store has to do what the built-in ones do. Go through this list before you ship one:
+
+- Every method except `Migrate`, `Ping` and `Close` reads the tenant from the context first, with `weave.RequireTenant(ctx)`. No tenant means `weave.ErrTenantRequired`, returned before any query runs.
+- Get, update and delete by ID match on the tenant as well as the ID (`WHERE id = $1 AND tenant_id = $2` in SQL, a `tenant_id` key in a Mongo filter). A row that belongs to another tenant returns `ErrCollectionNotFound`, `ErrDocumentNotFound` or `ErrChunkNotFound`, the same as an ID that doesn't exist. Never a different error, or IDs leak what exists.
+- An update checks the stored row's tenant, not just the `TenantID` on the struct it's given, so a caller can't move a row into its own tenant by relabelling it.
+- `DeleteChunksByDocument`, `DeleteChunksByCollection`, `DeleteDocumentsByCollection`, `ListChunksByDocument` and every list and count add the tenant predicate too. Pointed at another tenant's collection or document, the deletes succeed and remove nothing.
+- `CreateCollection`, `CreateDocument` and `CreateChunkBatch` refuse an entity whose `TenantID` isn't the context tenant with `weave.ErrInvalidArgument`. For a batch, check every chunk before you write any of them.
+- `GetCollectionByName(ctx, tenantID, name)` refuses a `tenantID` that isn't the context tenant with `weave.ErrInvalidArgument`.
+- The deprecated `Tenant *string` on list and count filters must equal the context tenant when it's set. Anything else, `""` included, is `weave.ErrInvalidArgument`.
+
+Treat `""` as no tenant everywhere. Rows a v1.8 install wrote with an empty tenant must stay unreachable.
+
 ### Testing a custom store
 
 `store/storetest` is the conformance suite the built-in stores run. Point it at yours from a test:
@@ -207,4 +221,4 @@ func TestMyStore(t *testing.T) {
 }
 ```
 
-It checks filters, tenancy, ordering, duplicates, timestamps and nil metadata handling.
+It checks filters, ordering, duplicates, timestamps and nil metadata handling, and every rule in the list above. The tenant cases call every method with no tenant, and try each read, update and delete as one tenant with another tenant's IDs. When `store.Store` gains a method, the tenant case fails until it covers that method too.

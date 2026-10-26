@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunker"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/embedder"
@@ -81,10 +82,17 @@ func newTestEngine(t *testing.T, opts ...engine.Option) *engine.Engine {
 	return newRig(t, extra...).Engine
 }
 
+// mustTestCollection creates a collection owned by tenant t1.
 func mustTestCollection(t *testing.T, e *engine.Engine, name string) *collection.Collection {
 	t.Helper()
+	return mustCollectionAs(t, weave.WithTenant(context.Background(), "t1"), e, name)
+}
+
+// mustCollectionAs creates a collection owned by the tenant on ctx.
+func mustCollectionAs(t *testing.T, ctx context.Context, e *engine.Engine, name string) *collection.Collection { //nolint:revive // t first, as in every helper here
+	t.Helper()
 	col := &collection.Collection{Name: name, ChunkSize: 512, ChunkOverlap: 0}
-	if err := e.CreateCollection(context.Background(), col); err != nil {
+	if err := e.CreateCollection(ctx, col); err != nil {
 		t.Fatalf("create collection %q: %v", name, err)
 	}
 	return col

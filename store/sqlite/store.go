@@ -18,6 +18,7 @@ import (
 	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/id"
 	"github.com/xraph/weave/internal/sqllike"
+	"github.com/xraph/weave/internal/tenancy"
 	"github.com/xraph/weave/store"
 )
 
@@ -70,6 +71,9 @@ func (s *Store) Close() error {
 // ──────────────────────────────────────────────────
 
 func (s *Store) CreateCollection(ctx context.Context, col *collection.Collection) error {
+	if _, err := tenancy.Owner(ctx, "collection", col.TenantID); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	col.CreatedAt = now
 	col.UpdatedAt = now
@@ -86,8 +90,12 @@ func (s *Store) CreateCollection(ctx context.Context, col *collection.Collection
 }
 
 func (s *Store) GetCollection(ctx context.Context, colID id.CollectionID) (*collection.Collection, error) {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	m := new(collectionModel)
-	err := s.sdb.NewSelect(m).Where("id = ?", colID.String()).Scan(ctx)
+	err = s.sdb.NewSelect(m).Where("id = ?", colID.String()).Where("tenant_id = ?", tenant).Scan(ctx)
 	if err != nil {
 		if isNoRows(err) {
 			return nil, weave.ErrCollectionNotFound
@@ -98,9 +106,13 @@ func (s *Store) GetCollection(ctx context.Context, colID id.CollectionID) (*coll
 }
 
 func (s *Store) GetCollectionByName(ctx context.Context, tenantID, name string) (*collection.Collection, error) {
+	tenant, err := tenancy.Scope(ctx, &tenantID)
+	if err != nil {
+		return nil, err
+	}
 	m := new(collectionModel)
-	err := s.sdb.NewSelect(m).
-		Where("tenant_id = ?", tenantID).
+	err = s.sdb.NewSelect(m).
+		Where("tenant_id = ?", tenant).
 		Where("name = ?", name).
 		Scan(ctx)
 	if err != nil {
@@ -113,10 +125,17 @@ func (s *Store) GetCollectionByName(ctx context.Context, tenantID, name string) 
 }
 
 func (s *Store) UpdateCollection(ctx context.Context, col *collection.Collection) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	if col.TenantID != tenant {
+		return weave.ErrCollectionNotFound
+	}
 	col.UpdatedAt = time.Now().UTC()
 	m := collectionToModel(col)
 
-	res, err := s.sdb.NewUpdate(m).WherePK().Exec(ctx)
+	res, err := s.sdb.NewUpdate(m).WherePK().Where("tenant_id = ?", tenant).Exec(ctx)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("weave: update collection: %w", weave.ErrCollectionAlreadyExists)
@@ -134,8 +153,13 @@ func (s *Store) UpdateCollection(ctx context.Context, col *collection.Collection
 }
 
 func (s *Store) DeleteCollection(ctx context.Context, colID id.CollectionID) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
 	res, err := s.sdb.NewDelete((*collectionModel)(nil)).
 		Where("id = ?", colID.String()).
+		Where("tenant_id = ?", tenant).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete collection: %w", err)
@@ -151,19 +175,20 @@ func (s *Store) DeleteCollection(ctx context.Context, colID id.CollectionID) err
 }
 
 func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilter) ([]*collection.Collection, error) {
+	tenant, err := tenancy.CollectionList(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
 	var models []collectionModel
 	order := "created_at ASC, id ASC"
 	if filter != nil && filter.SortDesc {
 		order = "created_at DESC, id DESC"
 	}
-	q := s.sdb.NewSelect(&models).OrderExpr(order)
+	q := s.sdb.NewSelect(&models).OrderExpr(order).Where("tenant_id = ?", tenant)
 
 	if filter != nil {
 		if filter.Search != "" {
 			q = q.Where("name LIKE '%' || ? || '%' ESCAPE '\\'", sqllike.Escape(filter.Search))
-		}
-		if filter.Tenant != nil {
-			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
 		q = page(q, filter.Limit, filter.Offset)
 	}
@@ -184,14 +209,15 @@ func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilt
 }
 
 func (s *Store) CountCollections(ctx context.Context, filter *collection.CountFilter) (int64, error) {
-	q := s.sdb.NewSelect((*collectionModel)(nil))
+	tenant, err := tenancy.CollectionCount(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	q := s.sdb.NewSelect((*collectionModel)(nil)).Where("tenant_id = ?", tenant)
 
 	if filter != nil {
 		if filter.Search != "" {
 			q = q.Where("name LIKE '%' || ? || '%' ESCAPE '\\'", sqllike.Escape(filter.Search))
-		}
-		if filter.Tenant != nil {
-			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
 	}
 
@@ -207,6 +233,9 @@ func (s *Store) CountCollections(ctx context.Context, filter *collection.CountFi
 // ──────────────────────────────────────────────────
 
 func (s *Store) CreateDocument(ctx context.Context, doc *document.Document) error {
+	if _, err := tenancy.Owner(ctx, "document", doc.TenantID); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	doc.CreatedAt = now
 	doc.UpdatedAt = now
@@ -223,8 +252,12 @@ func (s *Store) CreateDocument(ctx context.Context, doc *document.Document) erro
 }
 
 func (s *Store) GetDocument(ctx context.Context, docID id.DocumentID) (*document.Document, error) {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	m := new(documentModel)
-	err := s.sdb.NewSelect(m).Where("id = ?", docID.String()).Scan(ctx)
+	err = s.sdb.NewSelect(m).Where("id = ?", docID.String()).Where("tenant_id = ?", tenant).Scan(ctx)
 	if err != nil {
 		if isNoRows(err) {
 			return nil, weave.ErrDocumentNotFound
@@ -235,10 +268,17 @@ func (s *Store) GetDocument(ctx context.Context, docID id.DocumentID) (*document
 }
 
 func (s *Store) UpdateDocument(ctx context.Context, doc *document.Document) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	if doc.TenantID != tenant {
+		return weave.ErrDocumentNotFound
+	}
 	doc.UpdatedAt = time.Now().UTC()
 	m := documentToModel(doc)
 
-	res, err := s.sdb.NewUpdate(m).WherePK().Exec(ctx)
+	res, err := s.sdb.NewUpdate(m).WherePK().Where("tenant_id = ?", tenant).Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: update document: %w", err)
 	}
@@ -253,8 +293,13 @@ func (s *Store) UpdateDocument(ctx context.Context, doc *document.Document) erro
 }
 
 func (s *Store) DeleteDocument(ctx context.Context, docID id.DocumentID) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
 	res, err := s.sdb.NewDelete((*documentModel)(nil)).
 		Where("id = ?", docID.String()).
+		Where("tenant_id = ?", tenant).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete document: %w", err)
@@ -270,12 +315,16 @@ func (s *Store) DeleteDocument(ctx context.Context, docID id.DocumentID) error {
 }
 
 func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) ([]*document.Document, error) {
+	tenant, err := tenancy.DocumentList(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
 	var models []documentModel
 	order := "created_at ASC, id ASC"
 	if filter != nil && filter.SortDesc {
 		order = "created_at DESC, id DESC"
 	}
-	q := s.sdb.NewSelect(&models).OrderExpr(order)
+	q := s.sdb.NewSelect(&models).OrderExpr(order).Where("tenant_id = ?", tenant)
 
 	if filter != nil {
 		if filter.CollectionID.String() != "" {
@@ -286,9 +335,6 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 		}
 		if filter.Search != "" {
 			q = q.Where("title LIKE '%' || ? || '%' ESCAPE '\\'", sqllike.Escape(filter.Search))
-		}
-		if filter.Tenant != nil {
-			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
 		q = page(q, filter.Limit, filter.Offset)
 	}
@@ -309,7 +355,11 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 }
 
 func (s *Store) CountDocuments(ctx context.Context, filter *document.CountFilter) (int64, error) {
-	q := s.sdb.NewSelect((*documentModel)(nil))
+	tenant, err := tenancy.DocumentCount(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	q := s.sdb.NewSelect((*documentModel)(nil)).Where("tenant_id = ?", tenant)
 
 	if filter != nil {
 		if filter.CollectionID.String() != "" {
@@ -320,9 +370,6 @@ func (s *Store) CountDocuments(ctx context.Context, filter *document.CountFilter
 		}
 		if filter.Search != "" {
 			q = q.Where("title LIKE '%' || ? || '%' ESCAPE '\\'", sqllike.Escape(filter.Search))
-		}
-		if filter.Tenant != nil {
-			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
 		if !filter.UpdatedBefore.IsZero() {
 			q = q.Where("updated_at < ?", filter.UpdatedBefore.UTC())
@@ -337,8 +384,13 @@ func (s *Store) CountDocuments(ctx context.Context, filter *document.CountFilter
 }
 
 func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.CollectionID) error {
-	_, err := s.sdb.NewDelete((*documentModel)(nil)).
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.sdb.NewDelete((*documentModel)(nil)).
 		Where("collection_id = ?", colID.String()).
+		Where("tenant_id = ?", tenant).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete documents by collection: %w", err)
@@ -351,6 +403,14 @@ func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.Collec
 // ──────────────────────────────────────────────────
 
 func (s *Store) CreateChunkBatch(ctx context.Context, chunks []*chunk.Chunk) error {
+	if _, err := weave.RequireTenant(ctx); err != nil {
+		return err
+	}
+	for _, ch := range chunks {
+		if _, err := tenancy.Owner(ctx, "chunk", ch.TenantID); err != nil {
+			return err
+		}
+	}
 	if len(chunks) == 0 {
 		return nil
 	}
@@ -370,8 +430,12 @@ func (s *Store) CreateChunkBatch(ctx context.Context, chunks []*chunk.Chunk) err
 }
 
 func (s *Store) GetChunk(ctx context.Context, chunkID id.ChunkID) (*chunk.Chunk, error) {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	m := new(chunkModel)
-	err := s.sdb.NewSelect(m).Where("id = ?", chunkID.String()).Scan(ctx)
+	err = s.sdb.NewSelect(m).Where("id = ?", chunkID.String()).Where("tenant_id = ?", tenant).Scan(ctx)
 	if err != nil {
 		if isNoRows(err) {
 			return nil, weave.ErrChunkNotFound
@@ -382,9 +446,14 @@ func (s *Store) GetChunk(ctx context.Context, chunkID id.ChunkID) (*chunk.Chunk,
 }
 
 func (s *Store) ListChunksByDocument(ctx context.Context, docID id.DocumentID) ([]*chunk.Chunk, error) {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var models []chunkModel
-	err := s.sdb.NewSelect(&models).
+	err = s.sdb.NewSelect(&models).
 		Where("document_id = ?", docID.String()).
+		Where("tenant_id = ?", tenant).
 		OrderExpr(`"index" ASC`).
 		Scan(ctx)
 	if err != nil {
@@ -403,17 +472,18 @@ func (s *Store) ListChunksByDocument(ctx context.Context, docID id.DocumentID) (
 }
 
 func (s *Store) ListChunks(ctx context.Context, filter *chunk.ListFilter) ([]*chunk.Chunk, error) {
+	tenant, err := tenancy.ChunkList(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
 	var models []chunkModel
-	q := s.sdb.NewSelect(&models).OrderExpr(`document_id ASC, "index" ASC`)
+	q := s.sdb.NewSelect(&models).OrderExpr(`document_id ASC, "index" ASC`).Where("tenant_id = ?", tenant)
 	if filter != nil {
 		if filter.DocumentID.String() != "" {
 			q = q.Where("document_id = ?", filter.DocumentID.String())
 		}
 		if filter.CollectionID.String() != "" {
 			q = q.Where("collection_id = ?", filter.CollectionID.String())
-		}
-		if filter.Tenant != nil {
-			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
 		q = page(q, filter.Limit, filter.Offset)
 	}
@@ -432,8 +502,13 @@ func (s *Store) ListChunks(ctx context.Context, filter *chunk.ListFilter) ([]*ch
 }
 
 func (s *Store) DeleteChunksByDocument(ctx context.Context, docID id.DocumentID) error {
-	_, err := s.sdb.NewDelete((*chunkModel)(nil)).
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.sdb.NewDelete((*chunkModel)(nil)).
 		Where("document_id = ?", docID.String()).
+		Where("tenant_id = ?", tenant).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete chunks by document: %w", err)
@@ -442,8 +517,13 @@ func (s *Store) DeleteChunksByDocument(ctx context.Context, docID id.DocumentID)
 }
 
 func (s *Store) DeleteChunksByCollection(ctx context.Context, colID id.CollectionID) error {
-	_, err := s.sdb.NewDelete((*chunkModel)(nil)).
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.sdb.NewDelete((*chunkModel)(nil)).
 		Where("collection_id = ?", colID.String()).
+		Where("tenant_id = ?", tenant).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete chunks by collection: %w", err)
@@ -452,7 +532,11 @@ func (s *Store) DeleteChunksByCollection(ctx context.Context, colID id.Collectio
 }
 
 func (s *Store) CountChunks(ctx context.Context, filter *chunk.CountFilter) (int64, error) {
-	q := s.sdb.NewSelect((*chunkModel)(nil))
+	tenant, err := tenancy.ChunkCount(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	q := s.sdb.NewSelect((*chunkModel)(nil)).Where("tenant_id = ?", tenant)
 
 	if filter != nil {
 		if filter.CollectionID.String() != "" {
@@ -460,9 +544,6 @@ func (s *Store) CountChunks(ctx context.Context, filter *chunk.CountFilter) (int
 		}
 		if filter.DocumentID.String() != "" {
 			q = q.Where("document_id = ?", filter.DocumentID.String())
-		}
-		if filter.Tenant != nil {
-			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
 	}
 

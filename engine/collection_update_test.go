@@ -11,7 +11,7 @@ import (
 
 func TestUpdateCollection(t *testing.T) {
 	e := newTestEngine(t)
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, e, "support")
 	col.Description = "help centre"
 	col.Metadata = map[string]string{"team": "cx"}

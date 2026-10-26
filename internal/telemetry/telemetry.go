@@ -146,6 +146,7 @@ var sentinels = []struct {
 	{weave.ErrDuplicateDocument, "weave.ErrDuplicateDocument"},
 	{weave.ErrEmptyContent, "weave.ErrEmptyContent"},
 	{weave.ErrInvalidArgument, "weave.ErrInvalidArgument"},
+	{weave.ErrTenantRequired, "weave.ErrTenantRequired"},
 	{weave.ErrStoreClosed, "weave.ErrStoreClosed"},
 }
 

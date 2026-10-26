@@ -15,6 +15,7 @@ import (
 	dashauth "github.com/xraph/forge/extensions/dashboard/auth"
 	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunker"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/embedder"
@@ -60,7 +61,7 @@ func openMemory(*testing.T) store.Store { return memory.New() }
 
 func openSQLite(t *testing.T) store.Store {
 	t.Helper()
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	drv := sqlitedriver.New()
 	if err := drv.Open(ctx, filepath.Join(t.TempDir(), "weave.db")); err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -122,7 +123,7 @@ func principal() dashcontract.Principal {
 func mustCollection(t *testing.T, deps Deps, name string) *collection.Collection {
 	t.Helper()
 	col := &collection.Collection{Name: name, ChunkSize: 512}
-	if err := deps.Engine.CreateCollection(context.Background(), col); err != nil {
+	if err := deps.Engine.CreateCollection(weave.WithTenant(context.Background(), "t1"), col); err != nil {
 		t.Fatalf("create collection %q: %v", name, err)
 	}
 	return col

@@ -16,6 +16,16 @@ func TenantFromContext(ctx context.Context) string {
 	return v
 }
 
+// RequireTenant returns the tenant on ctx, or ErrTenantRequired when there is
+// none. Every store call and every engine call that touches data needs one.
+func RequireTenant(ctx context.Context) (string, error) {
+	tenant := TenantFromContext(ctx)
+	if tenant == "" {
+		return "", ErrTenantRequired
+	}
+	return tenant, nil
+}
+
 // WithTenant returns a copy of ctx with the tenant identifier attached.
 func WithTenant(ctx context.Context, tenant string) context.Context {
 	return context.WithValue(ctx, tenantKey, tenant)

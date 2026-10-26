@@ -7,6 +7,7 @@ import (
 
 	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/id"
@@ -14,7 +15,7 @@ import (
 
 func TestChunksListAndGet(t *testing.T) {
 	forEachStore(t, func(t *testing.T, deps Deps) {
-		ctx := context.Background()
+		ctx := weave.WithTenant(context.Background(), "t1")
 		p := principal()
 		col := &collection.Collection{Name: "long", ChunkSize: 8, ChunkOverlap: 2}
 		if err := deps.Engine.CreateCollection(ctx, col); err != nil {
@@ -62,7 +63,7 @@ func TestChunksListAndGet(t *testing.T) {
 
 func TestChunks_Validation(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	if _, err := chunksListHandler(deps)(ctx, chunksListInput{}, principal()); codeOf(err) != dashcontract.CodeBadRequest {
 		t.Errorf("no scope: %v", err)
 	}
@@ -76,9 +77,9 @@ func TestChunks_Validation(t *testing.T) {
 
 func TestChunksGet_OrphanedChunk(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustCollection(t, deps, "orphans")
-	orphan := &chunk.Chunk{ID: id.NewChunkID(), DocumentID: id.NewDocumentID(), CollectionID: col.ID, Content: "orphan", Index: 0, EndOffset: 6}
+	orphan := &chunk.Chunk{ID: id.NewChunkID(), DocumentID: id.NewDocumentID(), CollectionID: col.ID, TenantID: "t1", Content: "orphan", Index: 0, EndOffset: 6}
 	if err := deps.Engine.Store().CreateChunkBatch(ctx, []*chunk.Chunk{orphan}); err != nil {
 		t.Fatal(err)
 	}

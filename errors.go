@@ -8,6 +8,10 @@ var (
 	ErrStoreClosed     = errors.New("weave: store closed")
 	ErrMigrationFailed = errors.New("weave: migration failed")
 
+	// ErrTenantRequired is returned by a call made on a context with no
+	// tenant (see WithTenant). Nothing reads or writes across tenants.
+	ErrTenantRequired = errors.New("weave: tenant required")
+
 	// Not found errors.
 	ErrCollectionNotFound = errors.New("weave: collection not found")
 	ErrDocumentNotFound   = errors.New("weave: document not found")
@@ -28,4 +32,11 @@ var (
 	ErrNoEmbedder    = errors.New("weave: no embedder configured")
 	ErrNoVectorStore = errors.New("weave: no vector store configured")
 	ErrNoChunker     = errors.New("weave: no chunker configured")
+
+	// ErrDimensionMismatch reports an embedding whose length differs from
+	// the dimensions the collection or vector table was set up with.
+	ErrDimensionMismatch = errors.New("weave: embedding dimensions do not match")
+	// ErrIngestInterrupted marks a document whose ingest stopped before it
+	// finished, for example because the process was killed.
+	ErrIngestInterrupted = errors.New("weave: ingest interrupted before it finished")
 )
