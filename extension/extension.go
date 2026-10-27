@@ -398,16 +398,17 @@ func (e *Extension) resolveGroveDB(fapp forge.App) (*grove.DB, error) {
 }
 
 // buildStoreFromGroveDB constructs the appropriate store backend
-// based on the grove driver type (pg, sqlite, mongo).
+// based on the grove driver type (pg, sqlite, mongo). The database belongs to
+// the container, so the store it returns never closes it.
 func (e *Extension) buildStoreFromGroveDB(db *grove.DB) (store.Store, error) {
 	driverName := db.Driver().Name()
 	switch driverName {
 	case "pg":
-		return pgstore.New(db), nil
+		return borrow(pgstore.New(db)), nil
 	case "sqlite":
-		return sqlitestore.New(db), nil
+		return borrow(sqlitestore.New(db)), nil
 	case "mongo":
-		return mongostore.New(db), nil
+		return borrow(mongostore.New(db)), nil
 	default:
 		return nil, fmt.Errorf("weave: unsupported grove driver %q", driverName)
 	}

@@ -224,6 +224,8 @@ app := forge.NewApp(forge.AppConfig{
 
 The extension has no embedder or chunker option of its own, so you pass those through `WithEngineOption`. Other extensions resolve the engine with `forge.Inject[*engine.Engine](app.Container())`.
 
+Weave's routes do no authentication of their own: they trust the tenant on the request context. Mount them only behind middleware that authenticates the caller and sets `weave.WithTenant` from the principal, or pass `WithDisableRoutes()` (and `WithDisableMigrate()` if you run the migrations yourself) and call the engine from your own authenticated API. A `*grove.DB` the extension borrows from the container stays open when it stops.
+
 ### Configuration
 
 ```yaml

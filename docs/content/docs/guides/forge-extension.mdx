@@ -57,9 +57,9 @@ With the default base path, the routes are at `/weave/v1/...`. The [HTTP API ref
 | `Register` | Loads config, resolves a store from Grove when there is one, builds the engine, mounts the routes (unless `disable_routes`) and provides `*engine.Engine` to the container. Fails when `default_chunk_overlap` isn't smaller than `default_chunk_size`. |
 | `Start` | Runs the metadata store's `Migrate` (unless `disable_migrate`). It doesn't migrate the pgvector table: call `pgvector.Migrate` yourself, see [pgvector](/docs/stores/pgvector). |
 | `Health` | Pings the metadata store. Fails when there's no store. |
-| `Stop` | Calls `engine.Stop`, which fires `OnShutdown` and closes the metadata store. |
+| `Stop` | Calls `engine.Stop`, which fires `OnShutdown` and closes the metadata store, unless the extension borrowed it from the container. |
 
-`Stop` closing the store means a `*grove.DB` the store was built on gets closed too, including one the extension found in the container and that other extensions share.
+A store you hand over with `WithStore` is yours to the end of `Stop`: Weave closes it. A store the extension builds from a `*grove.DB` in the container is different. The database belongs to the container and other extensions are still using it, so `Stop` leaves it open. The extension doesn't build a vector store from Grove, so nothing else on the borrowed path closes it either.
 
 ## Using a Grove database
 
@@ -156,6 +156,14 @@ app.Router().UseGlobal(func(next forge.Handler) forge.Handler {
 ```
 
 Every route works inside that tenant, and a request without one gets a 403. See [multi-tenancy](/docs/concepts/multi-tenancy) for what each call does with it.
+
+## Authentication
+
+Weave's routes don't authenticate anyone. They trust the tenant on the request context, and a request with no tenant gets a 403, but nothing checks that the caller is allowed to use the tenant they name. Mount them only behind middleware that authenticates the caller and sets the tenant from the principal with `weave.WithTenant`. The middleware in [Tenants](#tenants) reads a header, which is fine behind a gateway that sets it and wrong on its own.
+
+If your app has its own API and its own auth, you can skip the routes. Pass `WithDisableRoutes()` and call the engine from your handlers. If you also run migrations yourself, pass `WithDisableMigrate()` so `Start` leaves the schema alone.
+
+Loomplane works this way. It mounts no Weave routes, so it passes `WithDisableRoutes()` and `WithDisableMigrate()`. It runs `postgres.Migrations` and the `weave_pgvector` group in its own migration pass, and it passes `WithDashboardTenant` so the dashboard contract takes its tenant from the principal. Anything else that reaches Weave goes through the engine, behind Loomplane's own auth.
 
 ## Metrics, traces and logs
 
