@@ -124,7 +124,7 @@ func collectionsGetHandler(deps Deps) func(context.Context, idInput, contract.Pr
 			return collectionDetail{}, deps.mapError(intent, err)
 		}
 		stalled, err := deps.Engine.CountDocuments(ctx, &document.CountFilter{
-			CollectionID: colID, State: document.StateProcessing, UpdatedBefore: deps.now().Add(-StalledAfter),
+			CollectionID: colID, State: document.StateProcessing, UpdatedBefore: deps.now().Add(-deps.stalledAfter()),
 		})
 		if err != nil {
 			return collectionDetail{}, deps.mapError(intent, err)

@@ -18,7 +18,7 @@ Both are plain strings on the context. The tenant is required. The app is option
 
 ## Every call is scoped
 
-The metadata store reads the tenant from the context on every call except `Migrate`, `Ping` and `Close`, and refuses before it touches the database when there isn't one.
+The metadata store reads the tenant from the context on every call except `Migrate`, `Ping`, `Close` and `ListStalledDocuments`, and refuses before it touches the database when there isn't one. `ListStalledDocuments` is [recovery](/docs/subsystems/ingestion#recovery)'s one read across tenants. Recovery then handles each document it lists under that document's own tenant.
 
 | Call | With tenant `t` on the context |
 |------|--------------------------------|

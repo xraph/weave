@@ -714,11 +714,11 @@ Document state, proportion first.
 | failed, destructive | destructive: what you came to find | moved |
 | any other state, an outline badge with the raw string | none | dropped: the four states are all there are |
 
-A `processing` document whose `updated_at` is more than 15 minutes old also
-carries a destructive marker with its real age. Ingest runs inside one request,
-so a document still processing after that long almost certainly died with its
-process. Weave has no heartbeat, so the marker states the age and doesn't call
-the document dead.
+A `processing` document whose `updated_at` is older than `stalled_after` (15
+minutes by default) also carries a destructive marker with its real age. An
+ingest sends a heartbeat after each step, so a document that far behind almost
+certainly died with its process. The marker still states the age and doesn't
+call the document dead: recovery fails it on its next sweep.
 
 ### Shared components and helpers
 
@@ -773,8 +773,9 @@ and so the browser walk covers every one of them.
   tenant, chunk size and overlap and created-date columns, and the Documents
   table gains ID, size and updated. The collection detail page shows tenant, app
   and timestamps.
-- The Overview's stalled count (documents in `processing` not updated for 15
-  minutes), and its components strip linking to Pipeline.
+- The Overview's stalled count (documents in `processing` with no heartbeat for
+  `stalled_after`, 15 minutes by default), and its components strip linking to
+  Pipeline.
 - Retrieval's comparison: the configured ranking next to the raw vector ranking,
   with each hit's raw cosine score, raw vector rank and how far it moved. The
   "Context sent to the model" tab shows the assembled text exactly as built, with

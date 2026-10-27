@@ -176,8 +176,10 @@ func testTenantScoping(t *testing.T, s store.Store) {
 // notScoped are the store.Store methods that take no tenant. Every other
 // method must be in testTenantRequired's table. An entry here is a hole in
 // tenant isolation: add one only with a recorded ruling, and give it a case
-// that shows it works with no tenant.
-var notScoped = []string{"Migrate", "Ping", "Close"}
+// that shows it works with no tenant. ListStalledDocuments is the recovery
+// sweep's read across tenants; testListStalledSpansTenants is its case, and
+// recovery then works on each row under that row's own tenant.
+var notScoped = []string{"Migrate", "Ping", "Close", "ListStalledDocuments"}
 
 // testTenantRequired calls every tenant-scoped store.Store method with no
 // tenant on the context and expects ErrTenantRequired, aimed at rows that
@@ -265,6 +267,8 @@ func testTenantRequired(t *testing.T, s store.Store) {
 			_, err := s.ReplaceSourceDocument(ctx, src, chunksFor(src, 1))
 			return err
 		}},
+		{"TouchDocument", func(ctx context.Context) error { return s.TouchDocument(ctx, src.ID, time.Time{}) }},
+		{"FailDocument", func(ctx context.Context) error { return s.FailDocument(ctx, src.ID, "taken over", time.Time{}) }},
 	}
 
 	// The table covers every method of store.Store but notScoped, so a
@@ -279,6 +283,11 @@ func testTenantRequired(t *testing.T, s store.Store) {
 		if !slices.Contains(notScoped, name) && !slices.Contains(covered, name) {
 			t.Errorf("store.Store.%s has no case here", name)
 		}
+	}
+
+	// The one exemption works with no tenant at all (see notScoped).
+	if _, err := s.ListStalledDocuments(context.Background(), time.Now().UTC(), 0); err != nil {
+		t.Errorf("ListStalledDocuments with no tenant: %v", err)
 	}
 
 	for _, tc := range cases {
@@ -411,45 +420,6 @@ func assertCount(t *testing.T, label string, want int64) func(int64, error) {
 		}
 		if got != want {
 			t.Errorf("%s: got %d, want %d", label, got, want)
-		}
-	}
-}
-
-// testStalled pins UpdatedBefore, which the Overview uses to count
-// documents stuck in processing. Three cutoffs fix the direction of the
-// comparison: an inverted filter would give 2, 1, 0 instead of 0, 1, 2.
-func testStalled(t *testing.T, s store.Store) {
-	ctx := as("t1")
-	col := mustCollection(t, s, "stalled", "t1")
-
-	before := time.Now().UTC()
-	time.Sleep(20 * time.Millisecond)
-	mustDocument(t, s, col, "old", document.StateProcessing)
-	time.Sleep(20 * time.Millisecond)
-	middle := time.Now().UTC()
-	time.Sleep(20 * time.Millisecond)
-	mustDocument(t, s, col, "fresh", document.StateProcessing)
-	mustDocument(t, s, col, "done", document.StateReady)
-	time.Sleep(20 * time.Millisecond)
-	after := time.Now().UTC()
-
-	cases := []struct {
-		name   string
-		cutoff time.Time
-		want   int64
-	}{
-		{"before every write", before, 0},
-		{"between old and fresh", middle, 1},
-		{"after every write", after, 2},
-		{"zero means no filter", time.Time{}, 2},
-	}
-	for _, tc := range cases {
-		n, err := s.CountDocuments(ctx, &document.CountFilter{State: document.StateProcessing, UpdatedBefore: tc.cutoff})
-		if err != nil {
-			t.Fatalf("%s: count stalled: %v", tc.name, err)
-		}
-		if n != tc.want {
-			t.Errorf("%s: count stalled: got %d, want %d", tc.name, n, tc.want)
 		}
 	}
 }

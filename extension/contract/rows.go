@@ -65,9 +65,9 @@ func countStates(ctx context.Context, e *engine.Engine, colID id.CollectionID) (
 type documentRow struct {
 	*document.Document
 	CollectionName string `json:"collection_name"`
-	// Stalled is true for a document still processing StalledAfter after
-	// its last update. Weave has no heartbeat, so this is an age, not a
-	// verdict.
+	// Stalled is true for a document still processing stalled_after past
+	// its last heartbeat. It is an age, not a verdict: recovery fails the
+	// document on its next sweep.
 	Stalled bool `json:"stalled"`
 }
 
@@ -112,6 +112,6 @@ func (d Deps) documentRow(ctx context.Context, cache *nameCache, doc *document.D
 	return documentRow{
 		Document:       &cp,
 		CollectionName: name,
-		Stalled:        cp.State == document.StateProcessing && d.now().Sub(cp.UpdatedAt) > StalledAfter,
+		Stalled:        cp.State == document.StateProcessing && d.now().Sub(cp.UpdatedAt) > d.stalledAfter(),
 	}, nil
 }

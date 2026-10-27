@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/collection"
@@ -16,9 +17,11 @@ import (
 // It embeds the subsystem store interfaces for collections, documents,
 // and chunks, plus lifecycle management methods.
 //
-// Every method except Migrate, Ping and Close works within the context
-// tenant (weave.WithTenant) and returns weave.ErrTenantRequired, before any
-// I/O, when there is none. A get, update or delete by ID of another tenant's
+// Every method except Migrate, Ping, Close and ListStalledDocuments works
+// within the context tenant (weave.WithTenant) and returns
+// weave.ErrTenantRequired, before any I/O, when there is none.
+// ListStalledDocuments is the one read across tenants, for recovery, which
+// then works on each document under that document's own tenant. A get, update or delete by ID of another tenant's
 // row returns the same not-found sentinel as an unknown ID, bulk deletes and
 // every list and count see only the context tenant's rows, and a create
 // whose TenantID differs from the context tenant is weave.ErrInvalidArgument.
@@ -47,6 +50,31 @@ type Store interface {
 	// with one ready document, the last to finish.
 	ReplaceSourceDocument(ctx context.Context, doc *document.Document, chunks []*chunk.Chunk) ([]id.DocumentID, error)
 
+	// TouchDocument records a heartbeat for an ingest in progress: it moves
+	// a pending or processing document to processing and sets its UpdatedAt
+	// to now. With a non-zero staleBefore it does so only when the document
+	// was last updated before staleBefore, which makes it a claim: of several
+	// callers that saw the same stalled document, exactly one succeeds. A
+	// document in any other state, or updated since staleBefore, is
+	// weave.ErrInvalidState and nothing is written; a missing document or
+	// another tenant's is weave.ErrDocumentNotFound.
+	TouchDocument(ctx context.Context, docID id.DocumentID, staleBefore time.Time) error
+
+	// FailDocument moves a pending or processing document to failed, with
+	// errText as its Error, and sets its UpdatedAt to now, in one guarded
+	// write: a document another attempt has just made ready is never
+	// overwritten. With a non-zero staleBefore it does so only when the
+	// document was last updated before staleBefore, so a document whose
+	// ingest sent a heartbeat since is left alone. The refusals are
+	// TouchDocument's: weave.ErrInvalidState or weave.ErrDocumentNotFound,
+	// and nothing written.
+	FailDocument(ctx context.Context, docID id.DocumentID, errText string, staleBefore time.Time) error
+
+	// ListStalledDocuments is the one read that spans tenants, for recovery:
+	// documents in pending or processing, or superseded, last updated before
+	// before, oldest first. limit <= 0 means 100. It needs no context tenant.
+	ListStalledDocuments(ctx context.Context, before time.Time, limit int) ([]*document.Document, error)
+
 	// Migrate runs any pending database migrations.
 	Migrate(ctx context.Context) error
 
@@ -56,3 +84,7 @@ type Store interface {
 	// Close releases all store resources.
 	Close() error
 }
+
+// DefaultStalledLimit is how many documents ListStalledDocuments returns
+// when it is given a limit of zero or less.
+const DefaultStalledLimit = 100

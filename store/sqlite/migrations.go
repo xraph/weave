@@ -142,6 +142,19 @@ ALTER TABLE weave_documents DROP COLUMN source_key;
 				return err
 			},
 		},
+		&migrate.Migration{
+			Name:    "index_weave_documents_state_updated",
+			Version: "20261024000200",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// Recovery lists stalled documents by state and age.
+				_, err := exec.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_weave_documents_state_updated ON weave_documents (state, updated_at)`)
+				return err
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				_, err := exec.Exec(ctx, `DROP INDEX IF EXISTS idx_weave_documents_state_updated`)
+				return err
+			},
+		},
 	)
 }
 

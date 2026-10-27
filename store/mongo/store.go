@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"time"
 
@@ -417,6 +418,88 @@ func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.Collec
 		return fmt.Errorf("weave: delete documents by collection: %w", err)
 	}
 	return nil
+}
+
+// TouchDocument records an ingest's heartbeat with one filtered UpdateOne,
+// so of several claims of one stalled document only the first matches.
+func (s *Store) TouchDocument(ctx context.Context, docID id.DocumentID, staleBefore time.Time) error {
+	return s.transition(ctx, "touch document", docID, staleBefore, bson.M{"state": string(document.StateProcessing)})
+}
+
+// FailDocument marks a pending or processing document failed with one
+// filtered UpdateOne.
+func (s *Store) FailDocument(ctx context.Context, docID id.DocumentID, errText string, staleBefore time.Time) error {
+	return s.transition(ctx, "fail document", docID, staleBefore, bson.M{"state": string(document.StateFailed), "error": errText})
+}
+
+// transition sets fields, and updated_at, on docID within the context
+// tenant, but only while the document is pending or processing and, when
+// staleBefore is set, last updated before it. When nothing matches, it reads
+// the document to tell a missing one from one in the wrong state.
+func (s *Store) transition(ctx context.Context, op string, docID id.DocumentID, staleBefore time.Time, fields bson.M) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	filter := bson.M{
+		"_id":       docID.String(),
+		"tenant_id": tenant,
+		"state":     bson.M{"$in": bson.A{string(document.StatePending), string(document.StateProcessing)}},
+	}
+	if !staleBefore.IsZero() {
+		filter["updated_at"] = bson.M{"$lt": staleBefore.UTC()}
+	}
+	set := bson.M{"updated_at": time.Now().UTC()}
+	maps.Copy(set, fields)
+	res, err := s.mdb.NewUpdate((*documentModel)(nil)).Filter(filter).SetUpdate(bson.M{"$set": set}).Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("weave: %s: %w", op, err)
+	}
+	if res.MatchedCount() > 0 {
+		return nil
+	}
+	stored := new(documentModel)
+	err = s.mdb.NewFind(stored).Filter(bson.M{"_id": docID.String(), "tenant_id": tenant}).Scan(ctx)
+	switch {
+	case err != nil && isNotFound(err):
+		return weave.ErrDocumentNotFound
+	case err != nil:
+		return fmt.Errorf("weave: %s: %w", op, err)
+	case stored.State != string(document.StatePending) && stored.State != string(document.StateProcessing):
+		return fmt.Errorf("%w: document is %s", weave.ErrInvalidState, stored.State)
+	}
+	return fmt.Errorf("%w: document was updated since it stalled", weave.ErrInvalidState)
+}
+
+// ListStalledDocuments reads across tenants on the {state, updated_at}
+// index.
+func (s *Store) ListStalledDocuments(ctx context.Context, before time.Time, limit int) ([]*document.Document, error) {
+	if limit <= 0 {
+		limit = store.DefaultStalledLimit
+	}
+	var models []documentModel
+	err := s.mdb.NewFind(&models).
+		Filter(bson.M{
+			"state": bson.M{"$in": bson.A{
+				string(document.StatePending), string(document.StateProcessing), string(document.StateSuperseded),
+			}},
+			"updated_at": bson.M{"$lt": before.UTC()},
+		}).
+		Sort(bson.D{{Key: "updated_at", Value: 1}, {Key: "_id", Value: 1}}).
+		Limit(int64(limit)).
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("weave: list stalled documents: %w", err)
+	}
+	result := make([]*document.Document, len(models))
+	for i := range models {
+		d, convErr := documentFromModel(&models[i])
+		if convErr != nil {
+			return nil, fmt.Errorf("weave: list stalled documents: %w", convErr)
+		}
+		result[i] = d
+	}
+	return result, nil
 }
 
 // ReplaceSourceDocument runs in a multi-document transaction, so it needs a

@@ -455,6 +455,86 @@ func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.Collec
 	return nil
 }
 
+// TouchDocument records an ingest's heartbeat under the store mutex, so of
+// several claims of one stalled document only the first finds it stalled.
+func (s *Store) TouchDocument(ctx context.Context, docID id.DocumentID, staleBefore time.Time) error {
+	return s.transition(ctx, docID, staleBefore, func(d *document.Document) {
+		d.State = document.StateProcessing
+	})
+}
+
+// FailDocument marks a pending or processing document failed under the
+// store mutex.
+func (s *Store) FailDocument(ctx context.Context, docID id.DocumentID, errText string, staleBefore time.Time) error {
+	return s.transition(ctx, docID, staleBefore, func(d *document.Document) {
+		d.State = document.StateFailed
+		d.Error = errText
+	})
+}
+
+// transition applies change to a copy of a pending or processing document
+// of the context tenant, last updated before staleBefore when that is set,
+// and stores the copy with UpdatedAt now. The stored pointer is replaced,
+// never edited, because callers hold the documents GetDocument returned.
+func (s *Store) transition(ctx context.Context, docID id.DocumentID, staleBefore time.Time, change func(*document.Document)) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := docID.String()
+	stored, ok := s.documents[key]
+	if !ok || stored.TenantID != tenant {
+		return weave.ErrDocumentNotFound
+	}
+	if stored.State != document.StatePending && stored.State != document.StateProcessing {
+		return fmt.Errorf("%w: document is %s", weave.ErrInvalidState, stored.State)
+	}
+	if !staleBefore.IsZero() && !stored.UpdatedAt.Before(staleBefore) {
+		return fmt.Errorf("%w: document was updated since it stalled", weave.ErrInvalidState)
+	}
+	next := *stored
+	change(&next)
+	next.UpdatedAt = time.Now().UTC()
+	s.documents[key] = &next
+	return nil
+}
+
+// ListStalledDocuments lists, across tenants, the pending, processing and
+// superseded documents last updated before before, oldest first.
+func (s *Store) ListStalledDocuments(_ context.Context, before time.Time, limit int) ([]*document.Document, error) {
+	if limit <= 0 {
+		limit = store.DefaultStalledLimit
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []*document.Document
+	for _, doc := range s.documents {
+		switch doc.State {
+		case document.StatePending, document.StateProcessing, document.StateSuperseded:
+		default:
+			continue
+		}
+		if doc.UpdatedAt.Before(before) {
+			result = append(result, doc)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		a, b := result[i], result[j]
+		if !a.UpdatedAt.Equal(b.UpdatedAt) {
+			return a.UpdatedAt.Before(b.UpdatedAt)
+		}
+		return a.ID.String() < b.ID.String()
+	})
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
 // ReplaceSourceDocument supersedes the source's ready and failed documents,
 // swaps their chunks for chunks and makes doc ready, all under the store
 // mutex. Everything is checked before the first change, so a refused call

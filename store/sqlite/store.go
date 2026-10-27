@@ -32,7 +32,9 @@ type Store struct {
 	db  *grove.DB
 	sdb *sqlitedriver.SqliteDB
 
-	// replaceMu serialises ReplaceSourceDocument within this process.
+	// replaceMu serialises ReplaceSourceDocument, TouchDocument and
+	// FailDocument within this process, so concurrent claims of one document
+	// queue instead of failing with SQLITE_BUSY.
 	replaceMu sync.Mutex
 }
 
@@ -426,6 +428,96 @@ func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.Collec
 		return fmt.Errorf("weave: delete documents by collection: %w", err)
 	}
 	return nil
+}
+
+// TouchDocument records an ingest's heartbeat with one guarded UPDATE, so
+// of several claims of one stalled document only the first matches a row.
+func (s *Store) TouchDocument(ctx context.Context, docID id.DocumentID, staleBefore time.Time) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	q := s.sdb.NewUpdate((*documentModel)(nil)).Set("state = ?", string(document.StateProcessing))
+	return s.transition(ctx, "touch document", tenant, docID, staleBefore, q)
+}
+
+// FailDocument marks a pending or processing document failed with one
+// guarded UPDATE.
+func (s *Store) FailDocument(ctx context.Context, docID id.DocumentID, errText string, staleBefore time.Time) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	q := s.sdb.NewUpdate((*documentModel)(nil)).
+		Set("state = ?", string(document.StateFailed)).
+		Set("error = ?", errText)
+	return s.transition(ctx, "fail document", tenant, docID, staleBefore, q)
+}
+
+// transition runs q, an UPDATE that already sets the new state, on docID
+// within tenant, but only while the row is pending or processing and, when
+// staleBefore is set, last updated before it. When no row matches, it reads
+// the row to tell a missing document from one in the wrong state.
+func (s *Store) transition(ctx context.Context, op, tenant string, docID id.DocumentID, staleBefore time.Time, q *sqlitedriver.UpdateQuery) error {
+	q = q.Set("updated_at = ?", time.Now().UTC()).
+		Where("id = ?", docID.String()).
+		Where("tenant_id = ?", tenant).
+		Where("state IN (?, ?)", string(document.StatePending), string(document.StateProcessing))
+	if !staleBefore.IsZero() {
+		q = q.Where("updated_at < ?", staleBefore.UTC())
+	}
+	s.replaceMu.Lock()
+	defer s.replaceMu.Unlock()
+	res, err := q.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("weave: %s: %w", op, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("weave: %s rows affected: %w", op, err)
+	}
+	if n > 0 {
+		return nil
+	}
+	stored := new(documentModel)
+	err = s.sdb.NewSelect(stored).Where("id = ?", docID.String()).Where("tenant_id = ?", tenant).Scan(ctx)
+	switch {
+	case err != nil && isNoRows(err):
+		return weave.ErrDocumentNotFound
+	case err != nil:
+		return fmt.Errorf("weave: %s: %w", op, err)
+	case stored.State != string(document.StatePending) && stored.State != string(document.StateProcessing):
+		return fmt.Errorf("%w: document is %s", weave.ErrInvalidState, stored.State)
+	}
+	return fmt.Errorf("%w: document was updated since it stalled", weave.ErrInvalidState)
+}
+
+// ListStalledDocuments reads across tenants on the (state, updated_at)
+// index.
+func (s *Store) ListStalledDocuments(ctx context.Context, before time.Time, limit int) ([]*document.Document, error) {
+	if limit <= 0 {
+		limit = store.DefaultStalledLimit
+	}
+	var models []documentModel
+	err := s.sdb.NewSelect(&models).
+		Where("state IN (?, ?, ?)",
+			string(document.StatePending), string(document.StateProcessing), string(document.StateSuperseded)).
+		Where("updated_at < ?", before.UTC()).
+		OrderExpr("updated_at ASC, id ASC").
+		Limit(limit).
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("weave: list stalled documents: %w", err)
+	}
+	result := make([]*document.Document, len(models))
+	for i := range models {
+		d, convErr := documentFromModel(&models[i])
+		if convErr != nil {
+			return nil, fmt.Errorf("weave: list stalled documents: %w", convErr)
+		}
+		result[i] = d
+	}
+	return result, nil
 }
 
 // ReplaceSourceDocument runs in one transaction. SQLite lets one writer in

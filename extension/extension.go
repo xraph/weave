@@ -108,8 +108,11 @@ func (e *Extension) Register(fapp forge.App) error {
 
 	// The config, the app's logger and the app's metrics go first, so an
 	// engine option the caller passed with WithEngineOption still wins.
-	opts := make([]engine.Option, 0, 3+len(e.engineOpts))
-	opts = append(opts, engine.WithConfig(e.config.engineConfig()))
+	if err := checkStalledAfter(e.config); err != nil {
+		return err
+	}
+	opts := make([]engine.Option, 0, 4+len(e.engineOpts))
+	opts = append(opts, engine.WithConfig(e.config.engineConfig()), engine.WithRecovery(e.config.recoveryConfig()))
 	if l := e.Logger(); l != nil {
 		opts = append(opts, engine.WithLogger(l))
 	}
@@ -251,6 +254,8 @@ func (e *Extension) loadConfiguration() error {
 		forge.F("default_chunk_size", e.config.DefaultChunkSize),
 		forge.F("default_embedding_model", e.config.DefaultEmbeddingModel),
 		forge.F("ingest_concurrency", e.config.IngestConcurrency),
+		forge.F("recovery_interval", e.config.RecoveryInterval.String()),
+		forge.F("stalled_after", e.config.StalledAfter.String()),
 	)
 
 	return nil
@@ -314,6 +319,12 @@ func (e *Extension) mergeWithDefaults(cfg Config) Config {
 	if cfg.IngestConcurrency == 0 {
 		cfg.IngestConcurrency = defaults.IngestConcurrency
 	}
+	if cfg.RecoveryInterval == 0 {
+		cfg.RecoveryInterval = defaults.RecoveryInterval
+	}
+	if cfg.StalledAfter == 0 {
+		cfg.StalledAfter = defaults.StalledAfter
+	}
 	return cfg
 }
 
@@ -357,6 +368,12 @@ func (e *Extension) mergeConfigurations(yamlConfig, programmaticConfig Config) C
 	}
 	if yamlConfig.IngestConcurrency == 0 && programmaticConfig.IngestConcurrency != 0 {
 		yamlConfig.IngestConcurrency = programmaticConfig.IngestConcurrency
+	}
+	if yamlConfig.RecoveryInterval == 0 && programmaticConfig.RecoveryInterval != 0 {
+		yamlConfig.RecoveryInterval = programmaticConfig.RecoveryInterval
+	}
+	if yamlConfig.StalledAfter == 0 && programmaticConfig.StalledAfter != 0 {
+		yamlConfig.StalledAfter = programmaticConfig.StalledAfter
 	}
 
 	// Fill remaining zeros with defaults.

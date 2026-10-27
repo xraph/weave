@@ -114,9 +114,11 @@ extensions:
     default_top_k: 10
     shutdown_timeout: 30s
     ingest_concurrency: 4
+    recovery_interval: 5m
+    stalled_after: 15m
 ```
 
-Those are the defaults. `shutdown_timeout` and `ingest_concurrency` are read but nothing uses them yet. `default_embedding_model` and `default_chunk_strategy` are only recorded on new collections. [Configuration](/docs/concepts/configuration#yaml-configuration) describes every key.
+Those are the defaults. `shutdown_timeout` and `ingest_concurrency` are read but nothing uses them yet. `recovery_interval` and `stalled_after` drive [recovery](/docs/subsystems/ingestion#recovery): every 5 minutes the engine fails documents that have sent no heartbeat for 15 minutes and clears their partial chunks and vectors. Set `recovery_interval` negative if you'd rather run `RecoverStalled` from your own job scheduler. The dashboard flags a document as stalled with the same `stalled_after`. `default_embedding_model` and `default_chunk_strategy` are only recorded on new collections. [Configuration](/docs/concepts/configuration#yaml-configuration) describes every key.
 
 When the file has a weave section, its values win over `WithConfig` and the other programmatic options, which only fill fields the file leaves empty. `WithDisableRoutes` and `WithDisableMigrate` always turn their flag on.
 

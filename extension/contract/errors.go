@@ -41,6 +41,10 @@ func mapError(err error) error {
 		return conflict(duplicateDocumentMessage)
 	case errors.Is(err, weave.ErrCollectionAlreadyExists):
 		return conflict("a collection with this name already exists")
+	case errors.Is(err, weave.ErrIngestInterrupted):
+		// Recovery failed the document, or it was deleted, while the ingest
+		// ran. Ingesting again starts over.
+		return &contract.Error{Code: contract.CodeConflict, Message: "the ingest was interrupted before it finished; ingest the document again", Retryable: true}
 	case errors.Is(err, weave.ErrEmptyContent):
 		return badRequest("content is empty")
 	case errors.Is(err, weave.ErrInvalidArgument):

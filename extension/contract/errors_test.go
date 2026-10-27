@@ -23,6 +23,7 @@ func TestMapError(t *testing.T) {
 		{weave.ErrChunkNotFound, dashcontract.CodeNotFound},
 		{weave.ErrDuplicateDocument, dashcontract.CodeConflict},
 		{weave.ErrCollectionAlreadyExists, dashcontract.CodeConflict},
+		{weave.ErrIngestInterrupted, dashcontract.CodeConflict},
 		{weave.ErrEmptyContent, dashcontract.CodeBadRequest},
 		{fmt.Errorf("%w: list chunks needs a document or a collection", weave.ErrInvalidArgument), dashcontract.CodeBadRequest},
 		{weave.ErrNoEmbedder, dashcontract.CodeUnavailable},

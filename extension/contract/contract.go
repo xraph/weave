@@ -29,11 +29,13 @@ var manifestYAML []byte
 // plugin with no error anywhere.
 const ContributorName = "weave"
 
-// StalledAfter is how long a document may sit in processing before the
-// dashboard flags it. Ingest runs inside one request and Weave has no
-// heartbeat, so a document still processing this long after its last
-// update almost certainly died with its process.
-const StalledAfter = 15 * time.Minute
+// StalledAfter is the default stalled_after: how long a document may sit in
+// processing without a heartbeat before recovery fails it and the dashboard
+// flags it. An ingest sends a heartbeat after each step, so a document this
+// far behind its last update has almost certainly died with its process.
+// The dashboard uses the engine's own setting (engine.RecoveryConfig), and
+// this value only when the engine has none.
+const StalledAfter = engine.DefaultStalledAfter
 
 // Deps bundles what the handlers need.
 type Deps struct {
@@ -59,6 +61,18 @@ func (d Deps) now() time.Time {
 		return d.Now()
 	}
 	return time.Now()
+}
+
+// stalledAfter is the age past which the dashboard calls a processing
+// document stalled: the engine's StalledAfter, so the dashboard and
+// recovery agree, or StalledAfter when that is zero or less.
+func (d Deps) stalledAfter() time.Duration {
+	if d.Engine != nil {
+		if after := d.Engine.RecoveryConfig().StalledAfter; after > 0 {
+			return after
+		}
+	}
+	return StalledAfter
 }
 
 // noTenantMessage answers a request the dashboard can't place in a tenant.

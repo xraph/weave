@@ -1,13 +1,18 @@
 package extension
 
 import (
+	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/xraph/forge"
 
 	"github.com/xraph/weave"
+	"github.com/xraph/weave/document"
+	"github.com/xraph/weave/engine"
+	"github.com/xraph/weave/extension/contract"
 	"github.com/xraph/weave/store/memory"
 )
 
@@ -74,5 +79,71 @@ func TestRegister_RefusesOverlapSetInCode(t *testing.T) {
 	err := ext.Register(forge.New(forge.WithAppName("t")))
 	if err == nil || !strings.Contains(err.Error(), "default_chunk_overlap 50 must be smaller than default_chunk_size 32") {
 		t.Fatalf("Register: %v", err)
+	}
+}
+
+// listCounter is a memory store that counts stalled listings, the recovery
+// loop's first call on every sweep.
+type listCounter struct {
+	*memory.Store
+	listings atomic.Int64
+}
+
+func (s *listCounter) ListStalledDocuments(ctx context.Context, before time.Time, limit int) ([]*document.Document, error) {
+	s.listings.Add(1)
+	return s.Store.ListStalledDocuments(ctx, before, limit)
+}
+
+func TestRecoveryConfigReachesTheEngine(t *testing.T) {
+	cases := []struct {
+		name string
+		keys map[string]any
+		want engine.RecoveryConfig
+	}{
+		{"set in YAML", map[string]any{"recovery_interval": "1m", "stalled_after": "20m"}, engine.RecoveryConfig{Interval: time.Minute, StalledAfter: 20 * time.Minute}},
+		{"unset", map[string]any{"base_path": "/weave"}, engine.RecoveryConfig{Interval: 5 * time.Minute, StalledAfter: contract.StalledAfter}},
+		{"loop off", map[string]any{"recovery_interval": "-1s"}, engine.RecoveryConfig{Interval: -time.Second, StalledAfter: contract.StalledAfter}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cm := forge.NewManager()
+			cm.Set("extensions.weave", tc.keys)
+			counter := &listCounter{Store: memory.New()}
+			ext := New(WithStore(counter), WithDisableRoutes())
+			if err := ext.Register(forge.New(forge.WithAppName("t"), forge.WithAppConfigManager(cm))); err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+			if got := ext.Engine().RecoveryConfig(); got != tc.want {
+				t.Errorf("engine RecoveryConfig: %+v, want %+v", got, tc.want)
+			}
+			if tc.want.Interval > 0 {
+				return
+			}
+			if err := ext.Start(context.Background()); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			time.Sleep(30 * time.Millisecond)
+			if err := ext.Stop(context.Background()); err != nil {
+				t.Fatalf("Stop: %v", err)
+			}
+			if n := counter.listings.Load(); n != 0 {
+				t.Errorf("store: %d stalled listings with the loop off, want 0", n)
+			}
+		})
+	}
+}
+
+// A negative stalled_after would fail every ingest in progress, so Register
+// refuses it before it builds an engine.
+func TestRegister_RefusesNegativeStalledAfter(t *testing.T) {
+	cm := forge.NewManager()
+	cm.Set("extensions.weave", map[string]any{"stalled_after": "-1m"})
+	ext := New(WithStore(memory.New()), WithDisableRoutes())
+	err := ext.Register(forge.New(forge.WithAppName("t"), forge.WithAppConfigManager(cm)))
+	if err == nil || !strings.Contains(err.Error(), "stalled_after -1m0s must not be negative") {
+		t.Fatalf("Register: %v, want the negative stalled_after refused", err)
+	}
+	if ext.Engine() != nil {
+		t.Error("a refused config still left an engine behind")
 	}
 }

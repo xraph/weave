@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/xraph/weave"
+	"github.com/xraph/weave/engine"
 )
 
 // Config holds the Weave extension configuration.
@@ -41,6 +42,17 @@ type Config struct {
 	// IngestConcurrency controls how many ingest operations can run in parallel.
 	IngestConcurrency int `json:"ingest_concurrency" mapstructure:"ingest_concurrency" yaml:"ingest_concurrency"`
 
+	// RecoveryInterval is how often the engine sweeps for documents a crash
+	// left pending, processing or superseded, and recovers them. Zero means
+	// the default; a negative value turns the loop off, for a host that runs
+	// engine.RecoverStalled from its own scheduler.
+	RecoveryInterval time.Duration `json:"recovery_interval" mapstructure:"recovery_interval" yaml:"recovery_interval"` // default 5m; negative disables
+
+	// StalledAfter is how long a pending or processing document may go
+	// without a heartbeat before recovery fails it and a keyed ingest of the
+	// same content may claim it. Keep it well above the longest embed call.
+	StalledAfter time.Duration `json:"stalled_after" mapstructure:"stalled_after" yaml:"stalled_after"` // default 15m (contract.StalledAfter)
+
 	// GroveDatabase is the name of a grove.DB registered in the DI container.
 	// When set, the extension resolves this named database and auto-constructs
 	// the appropriate store based on the driver type (pg/sqlite/mongo).
@@ -62,7 +74,28 @@ func DefaultConfig() Config {
 		DefaultTopK:           10,
 		ShutdownTimeout:       30 * time.Second,
 		IngestConcurrency:     4,
+		RecoveryInterval:      DefaultRecoveryInterval,
+		StalledAfter:          engine.DefaultStalledAfter,
 	}
+}
+
+// DefaultRecoveryInterval is how often the recovery loop sweeps when
+// recovery_interval is unset.
+const DefaultRecoveryInterval = 5 * time.Minute
+
+// recoveryConfig is the engine's recovery setting for this configuration.
+// A negative RecoveryInterval reaches the engine as it is and means no loop.
+func (c Config) recoveryConfig() engine.RecoveryConfig {
+	return engine.RecoveryConfig{Interval: c.RecoveryInterval, StalledAfter: c.StalledAfter}
+}
+
+// checkStalledAfter refuses a negative stalled_after, which would put the
+// recovery cutoff in the future and fail every ingest in progress.
+func checkStalledAfter(c Config) error {
+	if c.StalledAfter < 0 {
+		return fmt.Errorf("weave: stalled_after %s must not be negative", c.StalledAfter)
+	}
+	return nil
 }
 
 // engineConfig is the part of the extension's configuration the engine

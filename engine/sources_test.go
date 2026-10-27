@@ -437,15 +437,17 @@ func TestConcurrentSameSourceIngestKeepsOneReadyDocument(t *testing.T) {
 		return ready
 	}
 
+	// One ingest embeds; the rest find its document in flight, or ready
+	// once it finished.
 	results := ingestAll(func(int) string { return versionOne })
-	unchanged := 0
+	others := 0
 	for _, res := range results {
-		if res != nil && res.Unchanged {
-			unchanged++
+		if res != nil && (res.Unchanged || res.State == document.StateProcessing) {
+			others++
 		}
 	}
-	if unchanged != n-1 {
-		t.Errorf("same content: %d results Unchanged, want %d", unchanged, n-1)
+	if others != n-1 {
+		t.Errorf("same content: %d results Unchanged or in flight, want %d", others, n-1)
 	}
 	if ready := readyDocs(); len(ready) != 1 {
 		t.Errorf("same content: %d ready documents, want 1", len(ready))
@@ -578,6 +580,30 @@ func (c ctxStore) UpdateDocument(ctx context.Context, doc *document.Document) er
 	return c.Store.UpdateDocument(ctx, doc)
 }
 
+func (c ctxStore) FailDocument(ctx context.Context, docID id.DocumentID, errText string, staleBefore time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.Store.FailDocument(ctx, docID, errText, staleBefore)
+}
+
+// ingestHooks counts the ingest start and end hooks it receives.
+type ingestHooks struct{ started, completed, failed atomic.Int64 }
+
+func (h *ingestHooks) Name() string { return "ingest-hooks" }
+func (h *ingestHooks) OnIngestStarted(context.Context, id.CollectionID, []*document.Document) error {
+	h.started.Add(1)
+	return nil
+}
+func (h *ingestHooks) OnIngestCompleted(context.Context, id.CollectionID, int, int, time.Duration) error {
+	h.completed.Add(1)
+	return nil
+}
+func (h *ingestHooks) OnIngestFailed(context.Context, id.CollectionID, error) error {
+	h.failed.Add(1)
+	return nil
+}
+
 func TestRetryAfterCancelledIngestEmbedsAgain(t *testing.T) {
 	stall := &stallingEmbedder{Hash: embedtest.New(256), entered: make(chan struct{})}
 	r := newRig(t, withOpt(engine.WithEmbedder(stall)),
@@ -622,18 +648,27 @@ func TestRetryAfterCancelledIngestEmbedsAgain(t *testing.T) {
 	}
 }
 
-func TestStaleProcessingDocumentIsClaimed(t *testing.T) {
-	r := newRig(t)
-	col := mustTestCollection(t, r.Engine, "docs")
-	// What a process killed mid-ingest leaves behind.
-	stale := &document.Document{
-		Entity: weave.NewEntity(), ID: id.NewDocumentID(), CollectionID: col.ID, TenantID: "t1",
+// plantProcessing creates, through the store, the processing document of
+// versionOne under source "a" that a process killed mid-ingest leaves.
+func plantProcessing(t *testing.T, r *testRig, colID id.CollectionID) *document.Document {
+	t.Helper()
+	doc := &document.Document{
+		Entity: weave.NewEntity(), ID: id.NewDocumentID(), CollectionID: colID, TenantID: "t1",
 		ContentHash: fmt.Sprintf("%x", sha256.Sum256([]byte(versionOne))), ContentLength: len(versionOne),
 		SourceKey: "a", State: document.StateProcessing,
 	}
-	if err := r.Store.CreateDocument(tenantCtx("t1"), stale); err != nil {
-		t.Fatalf("create stale document: %v", err)
+	if err := r.Store.CreateDocument(tenantCtx("t1"), doc); err != nil {
+		t.Fatalf("plant a processing document: %v", err)
 	}
+	return doc
+}
+
+func TestStaleProcessingDocumentIsClaimed(t *testing.T) {
+	const stalledAfter = 20 * time.Millisecond
+	r := newRig(t, withOpt(engine.WithRecovery(engine.RecoveryConfig{StalledAfter: stalledAfter})))
+	col := mustTestCollection(t, r.Engine, "docs")
+	stale := plantProcessing(t, r, col.ID)
+	time.Sleep(2 * stalledAfter)
 
 	res := ingestSource(t, r.Engine, col.ID, "a", versionOne)
 	if res.Unchanged || res.State != document.StateReady || res.DocumentID.String() != stale.ID.String() {
@@ -650,94 +685,173 @@ func TestStaleProcessingDocumentIsClaimed(t *testing.T) {
 	}
 }
 
-// barrierEmbedder is a hash embedder whose first n calls all wait until n
-// calls have arrived, so n ingests are inside their embed at once.
-type barrierEmbedder struct {
+func TestFreshProcessingDocumentIsLeftToItsIngest(t *testing.T) {
+	hooks := &ingestHooks{}
+	r := newRig(t, withOpt(engine.WithExtension(hooks)))
+	col := mustTestCollection(t, r.Engine, "docs")
+	// Another replica is chunking and embedding this content right now.
+	inFlight := plantProcessing(t, r, col.ID)
+
+	res := ingestSource(t, r.Engine, col.ID, "a", versionOne)
+	if res.DocumentID.String() != inFlight.ID.String() || res.State != document.StateProcessing || res.Unchanged {
+		t.Errorf("ingest over a fresh processing document: %+v, want %s still processing", res, inFlight.ID)
+	}
+	if n := r.Embed.Calls(); n != 0 {
+		t.Errorf("embedder: %d calls, want 0", n)
+	}
+	if started := hooks.started.Load(); started != 0 {
+		t.Errorf("hooks: %d ingests started, want 0", started)
+	}
+	if docs := sourceDocs(t, r.Engine, col.ID, "a"); len(docs) != 1 || docs[0].State != document.StateProcessing {
+		t.Errorf("source after the ingest: %+v, want the one processing document", docs)
+	}
+}
+
+// gateEmbedder is a hash embedder whose first call waits until release is
+// closed, after closing entered.
+type gateEmbedder struct {
 	*embedtest.Hash
+	first   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newGateEmbedder() *gateEmbedder {
+	return &gateEmbedder{Hash: embedtest.New(256), entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *gateEmbedder) Embed(ctx context.Context, texts []string) ([]embedder.EmbedResult, error) {
+	// Only the first call waits; later ones go straight through.
+	if g.first.CompareAndSwap(false, true) {
+		close(g.entered)
+		<-g.release
+	}
+	return g.Hash.Embed(ctx, texts)
+}
+
+// ingestConcurrently runs n keyed ingests of versionOne at once. The first
+// to embed is held in its embed call until the other n-1 have returned, so
+// none of them can find the document ready. It returns every result.
+func ingestConcurrently(t *testing.T, r *testRig, gate *gateEmbedder, colID id.CollectionID, n int) []*engine.IngestResult {
+	t.Helper()
+	results := make(chan *engine.IngestResult, n)
+	for i := range n {
+		go func() {
+			res, err := r.Engine.Ingest(tenantCtx("t1"), &engine.IngestInput{CollectionID: colID, SourceKey: "a", Content: versionOne})
+			if err != nil {
+				t.Errorf("ingest %d: %v", i, err)
+			}
+			results <- res
+		}()
+	}
+	all := make([]*engine.IngestResult, 0, n)
+	for range n - 1 {
+		all = append(all, <-results)
+	}
+	select {
+	case <-gate.entered:
+	case <-time.After(5 * time.Second):
+		t.Error("no ingest reached the embedder")
+	}
+	close(gate.release)
+	return append(all, <-results)
+}
+
+func TestConcurrentFreshSourceIngestEmbedsOnce(t *testing.T) {
+	const n = 8
+	gate := newGateEmbedder()
+	hooks := &ingestHooks{}
+	r := newRig(t, withOpt(engine.WithEmbedder(gate)), withOpt(engine.WithExtension(hooks)))
+	col := mustTestCollection(t, r.Engine, "docs")
+
+	results := ingestConcurrently(t, r, gate, col.ID, n)
+	if n := gate.Calls(); n != 1 {
+		t.Errorf("embedder: %d calls for %d replicas, want 1", n, len(results))
+	}
+	checkSourceIngestedOnce(t, r, hooks, col.ID, results, "")
+}
+
+// listBarrier is a memory store whose first n listings of a source wait
+// until all n have arrived, so n ingests all see the source as it was
+// before any of them writes.
+type listBarrier struct {
+	*memory.Store
 	n       int64
 	arrived atomic.Int64
 	all     chan struct{}
 }
 
-func (b *barrierEmbedder) Embed(ctx context.Context, texts []string) ([]embedder.EmbedResult, error) {
-	if c := b.arrived.Add(1); c <= b.n {
-		if c == b.n {
-			close(b.all)
+func (b *listBarrier) ListDocuments(ctx context.Context, filter *document.ListFilter) ([]*document.Document, error) {
+	docs, err := b.Store.ListDocuments(ctx, filter)
+	if filter != nil && filter.SourceKey != "" {
+		if c := b.arrived.Add(1); c <= b.n {
+			if c == b.n {
+				close(b.all)
+			}
+			<-b.all
 		}
-		<-b.all
 	}
-	return b.Hash.Embed(ctx, texts)
+	return docs, err
 }
 
-// ingestHooks counts the ingest start and end hooks it receives.
-type ingestHooks struct{ started, completed, failed atomic.Int64 }
-
-func (h *ingestHooks) Name() string { return "ingest-hooks" }
-func (h *ingestHooks) OnIngestStarted(context.Context, id.CollectionID, []*document.Document) error {
-	h.started.Add(1)
-	return nil
-}
-func (h *ingestHooks) OnIngestCompleted(context.Context, id.CollectionID, int, int, time.Duration) error {
-	h.completed.Add(1)
-	return nil
-}
-func (h *ingestHooks) OnIngestFailed(context.Context, id.CollectionID, error) error {
-	h.failed.Add(1)
-	return nil
-}
-
-func TestConcurrentClaimsLeaveOneSetOfVectors(t *testing.T) {
+func TestConcurrentClaimsOfAStalledDocumentEmbedOnce(t *testing.T) {
 	const n = 8
-	barrier := &barrierEmbedder{Hash: embedtest.New(256), n: n, all: make(chan struct{})}
+	// Long enough that a claim's heartbeat is fresh to the other ingests,
+	// even under the race detector.
+	const stalledAfter = 300 * time.Millisecond
+	gate := newGateEmbedder()
 	hooks := &ingestHooks{}
-	r := newRig(t, withOpt(engine.WithEmbedder(barrier)), withOpt(engine.WithExtension(hooks)))
+	// Every ingest reads the stalled document before any claims it, so only
+	// the store's guarded claim keeps them from all embedding.
+	lists := &listBarrier{n: n, all: make(chan struct{})}
+	r := newRig(t, withOpt(engine.WithEmbedder(gate)), withOpt(engine.WithExtension(hooks)),
+		withOpt(engine.WithRecovery(engine.RecoveryConfig{StalledAfter: stalledAfter})),
+		func(r *testRig) engine.Option { lists.Store = r.Store; return engine.WithStore(lists) })
 	col := mustTestCollection(t, r.Engine, "docs")
-	stale := &document.Document{
-		Entity: weave.NewEntity(), ID: id.NewDocumentID(), CollectionID: col.ID, TenantID: "t1",
-		ContentHash: fmt.Sprintf("%x", sha256.Sum256([]byte(versionOne))), ContentLength: len(versionOne),
-		SourceKey: "a", State: document.StateProcessing,
-	}
-	if err := r.Store.CreateDocument(tenantCtx("t1"), stale); err != nil {
-		t.Fatalf("create stale document: %v", err)
-	}
+	stale := plantProcessing(t, r, col.ID)
+	time.Sleep(stalledAfter + 50*time.Millisecond)
 
-	// Every ingest claims the stale document and embeds; one swap wins.
-	var unchanged atomic.Int64
-	var wg sync.WaitGroup
-	for i := range n {
-		wg.Go(func() {
-			res, err := r.Engine.Ingest(tenantCtx("t1"), &engine.IngestInput{CollectionID: col.ID, SourceKey: "a", Content: versionOne})
-			if err != nil {
-				t.Errorf("ingest %d: %v", i, err)
-				return
-			}
-			if res.DocumentID.String() != stale.ID.String() || res.State != document.StateReady {
-				t.Errorf("ingest %d: %+v, want %s ready", i, res, stale.ID)
-			}
-			if res.Unchanged {
-				unchanged.Add(1)
-			}
-		})
+	results := ingestConcurrently(t, r, gate, col.ID, n)
+	if n := gate.Calls(); n != 1 {
+		t.Errorf("embedder: %d calls for %d claims, want 1", n, len(results))
 	}
-	wg.Wait()
+	checkSourceIngestedOnce(t, r, hooks, col.ID, results, stale.ID.String())
+}
 
-	if got := unchanged.Load(); got != n-1 {
-		t.Errorf("%d results Unchanged, want %d", got, n-1)
-	}
-	if started, ended := hooks.started.Load(), hooks.completed.Load()+hooks.failed.Load(); started != n || ended != started || hooks.failed.Load() != 0 {
-		t.Errorf("hooks: %d started, %d completed, %d failed; want %d started, each completed", started, hooks.completed.Load(), hooks.failed.Load(), n)
-	}
-	doc, err := r.Engine.GetDocument(tenantCtx("t1"), stale.ID)
-	if err != nil || doc.State != document.StateReady {
-		t.Fatalf("claimed document: %+v, %v; want ready", doc, err)
-	}
-	if v := r.Vectors.Len(); v != doc.ChunkCount {
-		t.Errorf("vectors: %d, want the winning attempt's %d", v, doc.ChunkCount)
-	}
-	for _, d := range retrieveDocs(t, r.Engine, col.ID) {
-		if d != stale.ID.String() {
-			t.Errorf("retrieve: hit from %s, want %s", d, stale.ID)
+// checkSourceIngestedOnce checks that of results exactly one made the
+// source's document ready and the rest found it in flight, that one ingest
+// ran start to end, and that the vectors are that document's alone. A
+// non-empty docID names the document all of them must report.
+func checkSourceIngestedOnce(t *testing.T, r *testRig, hooks *ingestHooks, colID id.CollectionID, results []*engine.IngestResult, docID string) {
+	t.Helper()
+	ready, inFlight := 0, 0
+	for _, res := range results {
+		switch {
+		case res == nil:
+			continue
+		case res.State == document.StateReady && !res.Unchanged:
+			ready++
+		case res.State == document.StateProcessing && !res.Unchanged:
+			inFlight++
+		default:
+			t.Errorf("result %+v, want ready or in flight", res)
 		}
+		if docID != "" && res.DocumentID.String() != docID {
+			t.Errorf("result for %s, want %s", res.DocumentID, docID)
+		}
+	}
+	if ready != 1 || inFlight != len(results)-1 {
+		t.Errorf("%d ready and %d in flight, want 1 and %d", ready, inFlight, len(results)-1)
+	}
+	if started, completed := hooks.started.Load(), hooks.completed.Load(); started != 1 || completed != 1 || hooks.failed.Load() != 0 {
+		t.Errorf("hooks: %d started, %d completed, %d failed; want one ingest start to end", started, completed, hooks.failed.Load())
+	}
+	docs := sourceDocs(t, r.Engine, colID, "a")
+	if len(docs) != 1 || docs[0].State != document.StateReady {
+		t.Fatalf("source: %+v, want one ready document", docs)
+	}
+	if v := r.Vectors.Len(); v != docs[0].ChunkCount || v == 0 {
+		t.Errorf("vectors: %d, want the ready document's %d", v, docs[0].ChunkCount)
 	}
 }
 

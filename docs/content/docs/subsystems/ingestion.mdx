@@ -47,22 +47,24 @@ result, err := eng.Ingest(ctx, &engine.IngestInput{
 2. Read the collection, for its `ChunkSize`, `ChunkOverlap` and `ChunkStrategy`. A missing one returns `weave.ErrCollectionNotFound`.
 3. Hash the raw content with SHA-256.
 4. Create the document with `State=pending`, stamped with the tenant from the context.
-5. Fire `OnIngestStarted`, then update the document to `State=processing`.
+5. Fire `OnIngestStarted`, then send the first heartbeat, which moves the document to `State=processing`.
 6. If a loader is configured and supports `SourceType`, replace the content with the loader's output.
-7. Chunk the content and fire `OnIngestChunked`.
-8. Embed all chunk texts in one `Embed` call and fire `OnIngestEmbedded`.
+7. Chunk the content, fire `OnIngestChunked` and send a heartbeat.
+8. Embed all chunk texts in one `Embed` call, fire `OnIngestEmbedded` and send a heartbeat.
 9. Write the chunks to the metadata store.
 10. Upsert one vector per chunk, with `collection_id`, `document_id`, `tenant_id` and `chunk_index` in its metadata.
-11. Update the document to `State=ready` with its `ChunkCount`.
+11. Send a last heartbeat, then update the document to `State=ready` with its `ChunkCount`.
 12. Fire `OnIngestCompleted` with the elapsed time.
+
+A heartbeat is the store's `TouchDocument`: it bumps the document's `UpdatedAt`, but only while the document is still `pending` or `processing`. If [recovery](#recovery) has marked it `failed` in the meantime, or someone deleted it, the heartbeat is refused and `Ingest` stops with `weave.ErrIngestInterrupted`. It deletes the chunk rows and vectors it already wrote and leaves the document as it found it. The last heartbeat sits right before the move to `ready` for exactly that reason: a document recovery has given up on never turns `ready` with half its chunks.
 
 That's the path for an input without a `SourceKey`. A keyed ingest runs a different order, covered in [Upsert by source](#upsert-by-source).
 
-If step 6 or anything after it fails, the document is set to `State=failed`, the error text goes in `Document.Error`, `OnIngestFailed` fires, and `Ingest` returns an `IngestResult` with the document ID and `State=failed` alongside an error wrapped as `weave: ingest failed: ...`. That write ignores your context's cancellation (it gets 30 seconds of its own), so a request that gives up mid-embed still leaves the document `failed`, not stuck in `processing`.
+If step 6 or anything after it fails, the document is set to `State=failed`, the error text goes in `Document.Error`, `OnIngestFailed` fires, and `Ingest` returns an `IngestResult` with the document ID and `State=failed` alongside an error wrapped as `weave: ingest failed: ...`. That write ignores your context's cancellation (it gets 30 seconds of its own), so a request that gives up mid-embed still leaves the document `failed`, not stuck in `processing`. It's the store's guarded `FailDocument`, which only moves a `pending` or `processing` document, so it can't overwrite a version another attempt has just made `ready`.
 
 A failed ingest doesn't clean up after itself. The document row stays, and if the failure came after step 9 the chunks stay too. Delete it with `DeleteDocument` before you retry, because the leftover row holds the same content hash. A keyed ingest clears its own failed copy, see [Upsert by source](#upsert-by-source).
 
-The state updates in steps 5 and 11 are best effort: if the store write fails, `Ingest` doesn't notice.
+A heartbeat that fails for any other reason (the database is down, say) fails the ingest like any other step. The `ready` update in step 11 is still best effort: if that store write fails, `Ingest` doesn't notice, and the document stays `processing` until recovery fails it.
 
 ## Duplicate content
 
@@ -109,18 +111,18 @@ The tenant and the collection are checked before anything else, so a keyed inges
 Here's the keyed order. It differs from the plain one so a search never returns two versions of one source:
 
 1. Purge any document of the source left `superseded` by a replace that stopped before it finished.
-2. Look for a document of the source with this content hash. A `ready` one is the `Unchanged` answer. A `failed` one is purged, so the retry can go ahead. A `pending` or `processing` one is claimed: the ingest that started it may have died with its request or its process, so this one does the work again on that same document, from step 4.
-3. Otherwise create the new document with the key, already `processing`. Nothing writes its state again until step 6. If the insert hits the content hash rule, the source is listed again: a concurrent ingest of the same content won the insert, and its document is the `Unchanged` answer when it's `ready` or gets claimed when it isn't yet. With no such document the error is `weave.ErrDuplicateDocument`.
-4. Load, chunk and embed as usual, with chunk IDs of this attempt's own. (A claimed document that is still `pending` is moved to `processing` first.) Every vector's metadata also carries `source_key`.
+2. Look for a document of the source with this content hash. A `ready` one is the `Unchanged` answer. A `failed` one is purged, so the retry can go ahead. A `pending` or `processing` one with a heartbeat younger than `stalled_after` belongs to an ingest that's still running, so you get that document back in its current state, with a nil error and nothing embedded. One that has gone quiet for longer is claimed: its ingest most likely died with its process, so this one does the work again on that same document, from step 4. The claim is a guarded `TouchDocument` that only succeeds on a document still older than the cutoff, so when several ingests find the same stalled document, exactly one of them claims it and the rest see a fresh heartbeat.
+3. Otherwise create the new document with the key, already `processing`. Nothing but heartbeats writes it until step 6. If the insert hits the content hash rule, the source is listed again and step 2 decides: a concurrent ingest of the same content won the insert, so you get its document. With no such document the error is `weave.ErrDuplicateDocument`.
+4. Load, chunk and embed as usual, with chunk IDs of this attempt's own, sending a heartbeat after chunking and after embedding. Every vector's metadata also carries `source_key`.
 5. Upsert the vectors. No chunk rows are written yet, and retrieval drops a source-keyed vector without a chunk row, so the new version stays invisible.
-6. Call the store's `ReplaceSourceDocument`. In one step it marks the old `ready` and `failed` versions `superseded`, deletes their chunks, writes the new chunks and makes the new document `ready`. From here the old vectors have no rows and are the ones retrieval drops.
+6. Call the store's `ReplaceSourceDocument`. In one step it marks the old `ready` and `failed` versions `superseded`, deletes their chunks, writes the new chunks and makes the new document `ready`. From here the old vectors have no rows and are the ones retrieval drops. It refuses a document that is no longer `processing` with `weave.ErrInvalidState`, which `Ingest` turns into `weave.ErrIngestInterrupted` after deleting its vectors.
 7. Purge each superseded version's vectors and row.
 
 Step 6 only moves a `processing` document to `ready`, once. So when two attempts work on the same document (a claim racing the ingest it claimed from), the first to get there wins, and the other one finds the document `ready`, deletes the vectors it wrote and answers `Unchanged`. It fires `OnIngestCompleted`, so every `OnIngestStarted` you see gets an end. The document is always read back before anything is deleted: if the swap went through but still reported an error (a reply lost after the commit), the rows are this attempt's own and its vectors stay.
 
-If anything from step 4 on fails, the vectors this attempt wrote are deleted and the old version keeps answering searches. The attempt that created the document marks it `failed`; a claim that fails leaves the state alone, since the ingest it claimed from may still finish. All of that runs on a context your cancellation can't stop, bounded at 30 seconds. Ingest the same content again and step 2 clears the failed copy. A purge that fails in step 7 is only logged at warn level; the next ingest of the source finishes it in step 1.
+If anything from step 4 on fails, the vectors this attempt wrote are deleted and the old version keeps answering searches. The document is marked `failed` with the guarded `FailDocument`, unless it already moved on under the attempt (recovery failed it, or it was deleted), in which case the answer is `weave.ErrIngestInterrupted` and the state is left alone. All of that runs on a context your cancellation can't stop, bounded at 30 seconds. Ingest the same content again and step 2 clears the failed copy. A purge that fails in step 7 is only logged at warn level; the next ingest of the source finishes it in step 1.
 
-Several replicas can run the same keyed ingest at once. With the same content, every call returns the same `ready` document. Those that arrive while it's still being ingested claim it and embed too, so you can pay for more than one embedding on a cold start, but only one set of vectors is kept and all but one call come back `Unchanged`. With different content, every call succeeds and the source ends with one `ready` document, whichever finished last. That's the rule even when you re-ingest the current content while a different version is in flight: you get `Unchanged`, and the in-flight version replaces it when it finishes. On MongoDB this needs a replica set, see [MongoDB](/docs/stores/mongo).
+Several replicas can run the same keyed ingest at once. With the same content, one of them creates the document and embeds it. The others get that document back while it's still `processing`, or `Unchanged` once it's `ready`, and none of them embeds anything. A fleet booting together pays for one embedding per page. With different content, every call succeeds and the source ends with one `ready` document, whichever finished last. That's the rule even when you re-ingest the current content while a different version is in flight: you get `Unchanged`, and the in-flight version replaces it when it finishes. On MongoDB this needs a replica set, see [MongoDB](/docs/stores/mongo).
 
 To remove a source, use `DeleteBySource`:
 
@@ -129,6 +131,44 @@ err := eng.DeleteBySource(ctx, colID, "docs/getting-started.md")
 ```
 
 It deletes every document of the key in the collection, in any state, with their chunks and vectors. A key with nothing under it returns nil. Another tenant's collection is `weave.ErrCollectionNotFound`, and an empty or blank key is `weave.ErrInvalidArgument`.
+
+## Recovery
+
+A deploy that kills the process mid-ingest leaves the document `pending` or `processing`, possibly with some chunk rows and vectors already written. A replace that died between its swap and its purge leaves a `superseded` row with vectors. Recovery cleans both up.
+
+With the Forge extension it runs on its own: every `recovery_interval` (5 minutes by default) the engine sweeps for documents whose last heartbeat is older than `stalled_after` (15 minutes by default). Without the extension, pass `engine.WithRecovery`:
+
+```go
+eng, err := engine.New(
+    engine.WithStore(s),
+    // ...
+    engine.WithRecovery(engine.RecoveryConfig{
+        Interval:     5 * time.Minute,
+        StalledAfter: 15 * time.Minute,
+    }),
+)
+```
+
+`Start` launches the loop and `Stop` cancels it and waits for a sweep in progress before it closes the store. If your host has its own scheduler, turn the loop off (a negative `recovery_interval`, or no `Interval`) and call one sweep yourself:
+
+```go
+res, err := eng.RecoverStalled(ctx, 15*time.Minute)
+// res.Failed, res.Purged, res.SkippedNoTenant
+```
+
+The context needs no tenant. A sweep lists up to `BatchSize` stalled documents (100 by default) across every tenant, oldest first, and then handles each one under that document's own tenant, so every read and delete after the listing is tenant scoped like any other call:
+
+- its vectors and chunk rows are deleted, so a search never returns half a document;
+- a `superseded` row is then deleted;
+- a `pending` or `processing` row is marked `failed`, with `weave.ErrIngestInterrupted`'s message in `Error`, and `OnIngestFailed` fires with `weave.ErrIngestInterrupted`.
+
+Marking it failed is the guarded `FailDocument` with the sweep's cutoff, so it's safe on every replica. When two sweeps list the same document, only one of them counts it and fires the hook. When the ingest turns out to be alive and sends a heartbeat before the sweep gets to it, the document stays `processing`, and that ingest carries on. A document that fails to recover (a vector store that's down) stays as it was, and the next sweep tries again.
+
+After recovery, ingesting the same source again just works: step 2 of the keyed order purges the failed copy and starts over. A plain ingest of the same content still needs a `DeleteDocument` of the failed row first, as with any failed ingest.
+
+Rows written before v1.9 can have an empty tenant. Recovery can't scope those, so it leaves them alone, counts them in `SkippedNoTenant` and logs one warning per sweep. Give them a tenant and the next sweep picks them up.
+
+Pick `stalled_after` well above the longest single chunk or embed call you expect. Heartbeats only go out between steps, so an embed call that takes longer than `stalled_after` gets its document failed under it, and that ingest ends with `weave.ErrIngestInterrupted`.
 
 ## Batch ingestion
 

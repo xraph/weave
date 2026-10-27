@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -46,13 +47,19 @@ type Engine struct {
 	metricsSink gometrics.Metrics
 	metrics     engineMetrics
 	kinds       kinds
+
+	recovery     RecoveryConfig
+	recoveryMu   sync.Mutex
+	recoveryStop context.CancelFunc // nil while no recovery loop runs
+	recoveryDone chan struct{}      // closed when the loop returns
 }
 
 // New creates a new Engine with the given options.
 func New(opts ...Option) (*Engine, error) {
 	e := &Engine{
-		config: weave.DefaultConfig(),
-		logger: log.NewNoopLogger(),
+		config:   weave.DefaultConfig(),
+		logger:   log.NewNoopLogger(),
+		recovery: RecoveryConfig{StalledAfter: DefaultStalledAfter},
 	}
 	for _, opt := range opts {
 		if err := opt(e); err != nil {
@@ -82,14 +89,19 @@ func (e *Engine) Health(ctx context.Context) error {
 	return nil
 }
 
-// Start initialises the engine. Currently a no-op but reserved for
-// future background processes (e.g. ingest workers).
-func (e *Engine) Start(_ context.Context) error {
+// Start starts the engine's background work: with a RecoveryConfig
+// Interval above zero and a store, the recovery loop, which runs
+// RecoverStalled every Interval until Stop. Calling it again while the loop
+// runs does nothing.
+func (e *Engine) Start(ctx context.Context) error {
+	e.startRecovery(ctx)
 	return nil
 }
 
-// Stop gracefully shuts down the engine.
+// Stop gracefully shuts down the engine. It stops the recovery loop and
+// waits for a sweep in progress to return before it closes the store.
 func (e *Engine) Stop(ctx context.Context) error {
+	e.stopRecovery()
 	if e.extensions != nil {
 		e.extensions.EmitShutdown(ctx)
 	}
@@ -341,6 +353,13 @@ type IngestResult struct {
 // SourceKey it is an upsert of that source (see IngestInput.SourceKey): the
 // same content again embeds nothing and answers Unchanged, and new content
 // replaces the source's current document, whose ID is then in Replaced.
+// Content another ingest is still working on is answered with that document
+// in its current state, pending or processing, and nothing embedded.
+//
+// The ingest sends a heartbeat as it goes (see RecoveryConfig). When its
+// document stops being pending or processing under it, because recovery
+// failed it or it was deleted, Ingest deletes what it wrote and returns
+// weave.ErrIngestInterrupted.
 func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult, error) {
 	if e.store == nil {
 		return nil, weave.ErrNoStore
@@ -427,26 +446,33 @@ func (e *Engine) ingest(ctx context.Context, span trace.Span, tenantID string, i
 
 	e.extensions.EmitIngestStarted(ctx, input.CollectionID, []*document.Document{doc})
 
-	// Mark processing.
-	doc.State = document.StateProcessing
-	_ = e.store.UpdateDocument(ctx, doc) //nolint:errcheck // best-effort status update
+	// The first heartbeat marks the document processing.
+	beat := func() error { return e.heartbeat(ctx, doc.ID) }
+	if beatErr := beat(); beatErr != nil {
+		return e.endIngest(ctx, doc, nil, false, beatErr)
+	}
 
-	chunks, entries, err := e.embedChunks(ctx, span, col, doc, input)
+	chunks, entries, err := e.embedChunks(ctx, span, col, doc, input, beat)
 	if err != nil {
-		return e.failIngest(ctx, doc, input.CollectionID, err)
+		return e.endIngest(ctx, doc, nil, false, err)
 	}
 
 	// Store chunks in metadata store.
-	if err := e.store.CreateChunkBatch(ctx, chunks); err != nil {
-		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("store chunks: %w", err))
+	if storeErr := e.store.CreateChunkBatch(ctx, chunks); storeErr != nil {
+		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("store chunks: %w", storeErr))
 	}
 
 	// Upsert vector entries.
-	if err := e.upsertVectors(ctx, entries); err != nil {
-		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("upsert vectors: %w", err))
+	if upsertErr := e.upsertVectors(ctx, entries); upsertErr != nil {
+		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("upsert vectors: %w", upsertErr))
 	}
 
-	// Mark document as ready.
+	// The last heartbeat, right before the move to ready, is the final
+	// check: a document recovery failed meanwhile never turns ready, and
+	// this ingest takes back the chunks and vectors it wrote.
+	if beatErr := beat(); beatErr != nil {
+		return e.endIngest(ctx, doc, entries, true, beatErr)
+	}
 	doc.State = document.StateReady
 	doc.ChunkCount = len(chunks)
 	_ = e.store.UpdateDocument(ctx, doc) //nolint:errcheck // best-effort status update
@@ -487,8 +513,10 @@ func newDocument(tenantID string, input *IngestInput, hash string) *document.Doc
 // embedChunks loads, chunks and embeds input's content for doc, and returns
 // the chunk rows and their vector entries, which carry doc's source key. It
 // sets weave.chunk.count on span once the content is chunked and fires the
-// chunked and embedded hooks. Its error is ready for failIngest.
-func (e *Engine) embedChunks(ctx context.Context, span trace.Span, col *collection.Collection, doc *document.Document, input *IngestInput) ([]*chunk.Chunk, []vectorstore.Entry, error) {
+// chunked and embedded hooks. It calls beat after chunking and after
+// embedding and stops with beat's error, weave.ErrIngestInterrupted when
+// the document has moved on. Any other error is ready for failIngest.
+func (e *Engine) embedChunks(ctx context.Context, span trace.Span, col *collection.Collection, doc *document.Document, input *IngestInput, beat func() error) ([]*chunk.Chunk, []vectorstore.Entry, error) {
 	// Optionally load/extract text.
 	content := input.Content
 	if e.loader != nil && input.SourceType != "" && e.loader.Supports(input.SourceType) {
@@ -530,6 +558,9 @@ func (e *Engine) embedChunks(ctx context.Context, span trace.Span, col *collecti
 	}
 
 	e.extensions.EmitIngestChunked(ctx, chunks)
+	if beatErr := beat(); beatErr != nil {
+		return nil, nil, beatErr
+	}
 
 	// Embed the chunks.
 	texts := make([]string, len(chunks))
@@ -543,6 +574,9 @@ func (e *Engine) embedChunks(ctx context.Context, span trace.Span, col *collecti
 	}
 
 	e.extensions.EmitIngestEmbedded(ctx, chunks)
+	if beatErr := beat(); beatErr != nil {
+		return nil, nil, beatErr
+	}
 
 	// Build vector entries.
 	entries := make([]vectorstore.Entry, len(chunks))
@@ -588,16 +622,13 @@ func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 
 // failIngest marks a document as failed and emits the failure event. The
 // write runs on a cleanup context (see cleanupContext), so a cancelled
-// request can't leave the document processing. It writes a copy of doc, so
-// a store that keeps the pointer it was handed (the memory store does)
-// never sees the caller's value change under it.
+// request can't leave the document processing. It is the store's guarded
+// FailDocument, so it never overwrites a document another attempt has made
+// ready or recovery has already failed.
 func (e *Engine) failIngest(ctx context.Context, doc *document.Document, colID id.CollectionID, ingestErr error) (*IngestResult, error) {
-	failed := *doc
-	failed.State = document.StateFailed
-	failed.Error = ingestErr.Error()
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
-	_ = e.store.UpdateDocument(cleanup, &failed) //nolint:errcheck // best-effort status update
+	_ = e.store.FailDocument(cleanup, doc.ID, ingestErr.Error(), time.Time{}) //nolint:errcheck // best-effort; refused only when the document already moved on
 
 	e.extensions.EmitIngestFailed(ctx, colID, ingestErr)
 
@@ -605,6 +636,39 @@ func (e *Engine) failIngest(ctx context.Context, doc *document.Document, colID i
 		DocumentID: doc.ID,
 		State:      document.StateFailed,
 	}, fmt.Errorf("weave: ingest failed: %w", ingestErr)
+}
+
+// endIngest ends an unkeyed ingest that stopped with err: a document that
+// moved on under it (weave.ErrIngestInterrupted) is abandoned, anything else
+// goes through failIngest. entries are the vectors it upserted, and
+// chunksWritten says whether its chunk rows are in the store.
+func (e *Engine) endIngest(ctx context.Context, doc *document.Document, entries []vectorstore.Entry, chunksWritten bool, err error) (*IngestResult, error) {
+	if errors.Is(err, weave.ErrIngestInterrupted) {
+		return e.abandonIngest(ctx, doc, entries, chunksWritten)
+	}
+	return e.failIngest(ctx, doc, doc.CollectionID, err)
+}
+
+// abandonIngest clears what an interrupted ingest wrote and returns
+// weave.ErrIngestInterrupted. The document's state is left as it is: it was
+// failed, finished or deleted by someone else. The vectors go by their own
+// IDs; chunk rows, when written, by document, since an unkeyed document has
+// one attempt. The deletes run on a cleanup context, and a failure is only
+// logged, as recovery clears a failed document's leftovers too.
+func (e *Engine) abandonIngest(ctx context.Context, doc *document.Document, entries []vectorstore.Entry, chunksWritten bool) (*IngestResult, error) {
+	cleanup, cancel := cleanupContext(ctx)
+	defer cancel()
+	e.dropAttemptVectors(cleanup, entries)
+	if chunksWritten {
+		if err := e.store.DeleteChunksByDocument(cleanup, doc.ID); err != nil {
+			e.logger.Warn("failed to delete the chunks of an interrupted ingest",
+				log.String("document_id", doc.ID.String()),
+				log.String("error_type", telemetry.ErrorType(err)),
+			)
+		}
+	}
+	e.extensions.EmitIngestFailed(ctx, doc.CollectionID, weave.ErrIngestInterrupted)
+	return &IngestResult{DocumentID: doc.ID, State: document.StateFailed}, weave.ErrIngestInterrupted
 }
 
 // ──────────────────────────────────────────────────

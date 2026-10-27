@@ -25,7 +25,7 @@ case errors.Is(err, weave.ErrDuplicateDocument):
 
 | Error | Returned when |
 |-------|---------------|
-| `weave.ErrTenantRequired` | The context has no tenant (see [multi-tenancy](/docs/concepts/multi-tenancy)). Every engine call that touches data, every store call but `Migrate`, `Ping` and `Close`, every vector store `Search` without a `TenantKey` and `Upsert` of an entry without `tenant_id`, and the pipeline's embed step return it before touching anything. The HTTP routes answer it with a 403 |
+| `weave.ErrTenantRequired` | The context has no tenant (see [multi-tenancy](/docs/concepts/multi-tenancy)). Every engine call that touches data, every store call but `Migrate`, `Ping`, `Close` and `ListStalledDocuments`, every vector store `Search` without a `TenantKey` and `Upsert` of an entry without `tenant_id`, and the pipeline's embed step return it before touching anything. The HTTP routes answer it with a 403 |
 | `weave.ErrNoStore` | An operation needs the metadata store and none is configured |
 | `weave.ErrNoVectorStore` | `Ingest` or `ReindexCollection` without a vector store |
 | `weave.ErrNoEmbedder` | `Ingest` or `ReindexCollection` without an embedder |
@@ -38,9 +38,11 @@ case errors.Is(err, weave.ErrDuplicateDocument):
 | `weave.ErrDuplicateDocument` | A document with the same content hash is already in the collection |
 | `weave.ErrDocumentAlreadyExists` | A document with that ID already exists (in-memory store) |
 | `weave.ErrMigrationFailed` | A store's `Migrate` failed |
+| `weave.ErrIngestInterrupted` | `Ingest` found its document no longer `processing` partway through: [recovery](/docs/subsystems/ingestion#recovery) failed it after its heartbeat went quiet, or someone deleted it. The ingest has already removed what it wrote, so ingest the content again. Recovered documents carry its message in `Error`. The dashboard answers it with a retryable conflict |
+| `weave.ErrInvalidState` | A store's `ReplaceSourceDocument`, `TouchDocument` or `FailDocument` on a document in the wrong state, or one updated since the cutoff it was given. `Ingest` turns the ones it hits into `ErrIngestInterrupted` |
 | `weave.ErrInvalidArgument` | `UpdateCollection` with a blank name, `ListChunks` with neither a document nor a collection ID, a list or count filter whose deprecated `Tenant` differs from the context tenant, a create whose `TenantID` differs from it, a chunk whose collection isn't its document's, `GetCollectionByName` on a store naming another tenant, a deprecated retrieval tenant option (`WithTenantID`, `WithTenantFilter`, `CompareParams.Tenant`) naming another tenant than the context's, or a vector store `DeleteByMetadata` with an empty filter |
 
-`ErrStoreClosed`, `ErrIngestJobNotFound`, `ErrInvalidState`, `ErrDimensionMismatch` and `ErrIngestInterrupted` are declared but nothing returns them yet.
+`ErrStoreClosed`, `ErrIngestJobNotFound` and `ErrDimensionMismatch` are declared but nothing returns them yet.
 
 `Retrieve` with neither a retriever nor an embedder and vector store returns a plain error (`weave: no retriever or embedder+vectorstore configured`), not a sentinel.
 

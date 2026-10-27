@@ -187,7 +187,8 @@ import "github.com/xraph/weave/store"
 // - collection.Store (CreateCollection, GetCollection, ListCollections, DeleteCollection, ...)
 // - document.Store (CreateDocument, GetDocument, UpdateDocument, ListDocuments, DeleteDocument, ...)
 // - chunk.Store (CreateChunkBatch, ListChunksByDocument, DeleteChunksByDocument, ...)
-// - store.Store (Migrate, Ping, Close)
+// - store.Store (ReplaceSourceDocument, TouchDocument, FailDocument,
+//   ListStalledDocuments, Migrate, Ping, Close)
 
 type MyStore struct{ /* ... */ }
 
@@ -202,7 +203,8 @@ See [store/store.go](https://github.com/xraph/weave/blob/main/store/store.go) fo
 
 Weave relies on the store to keep tenants apart, so your store has to do what the built-in ones do. Go through this list before you ship one:
 
-- Every method except `Migrate`, `Ping` and `Close` reads the tenant from the context first, with `weave.RequireTenant(ctx)`. No tenant means `weave.ErrTenantRequired`, returned before any query runs.
+- Every method except `Migrate`, `Ping`, `Close` and `ListStalledDocuments` reads the tenant from the context first, with `weave.RequireTenant(ctx)`. No tenant means `weave.ErrTenantRequired`, returned before any query runs.
+- `ListStalledDocuments` is the one exception, and it's deliberate. Recovery is an operator's sweep, so it needs one read across tenants to find what a crash left behind. It works with no tenant on the context and returns each row with its `TenantID`, and the engine then handles each document under that tenant, so every later call is scoped as usual. Don't add a second method like it.
 - Get, update and delete by ID match on the tenant as well as the ID (`WHERE id = $1 AND tenant_id = $2` in SQL, a `tenant_id` key in a Mongo filter). A row that belongs to another tenant returns `ErrCollectionNotFound`, `ErrDocumentNotFound` or `ErrChunkNotFound`, the same as an ID that doesn't exist. Never a different error, or IDs leak what exists.
 - An update checks the stored row's tenant, not just the `TenantID` on the struct it's given, so a caller can't move a row into its own tenant by relabelling it.
 - `DeleteChunksByDocument`, `DeleteChunksByCollection`, `DeleteDocumentsByCollection`, `ListChunksByDocument` and every list and count add the tenant predicate too. Pointed at another tenant's collection or document, the deletes succeed and remove nothing.
@@ -228,6 +230,17 @@ Treat `""` as no tenant everywhere. Rows a v1.8 install wrote with an empty tena
 
 A unique index on `(collection_id, source_key)` over ready, keyed rows is a good backstop. The built-in SQL and Mongo stores have one.
 
+### Heartbeats and recovery
+
+Two methods let ingest and [recovery](/docs/subsystems/ingestion#recovery) move a document's state without stepping on each other, and a third finds the documents recovery should look at. Each move is a single guarded write, a compare-and-set on the stored state. A read followed by an update leaves a gap another replica can land in.
+
+- `TouchDocument(ctx, docID, staleBefore)` moves a `pending` or `processing` document to `processing` and sets `UpdatedAt` to now. With a non-zero `staleBefore` it only does that when the stored `UpdatedAt` is older than `staleBefore`. That's what makes a claim safe: when eight replicas find one stalled document, exactly one touch matches and the other seven get `ErrInvalidState`.
+- `FailDocument(ctx, docID, errText, staleBefore)` moves a `pending` or `processing` document to `failed` with `Error` set to `errText`, under the same `staleBefore` rule. It must never touch a `ready` document, because that's how a failing attempt is kept from overwriting a version another attempt has just finished.
+- Both answer `ErrInvalidState` for a document in any other state, or one updated since `staleBefore`, and `ErrDocumentNotFound` for a missing document or another tenant's. Neither writes anything when it refuses.
+- `ListStalledDocuments(ctx, before, limit)` returns `pending`, `processing` and `superseded` documents with `UpdatedAt` before `before`, from every tenant, oldest first by `UpdatedAt` then ID. A `limit` of zero or less means 100. An index on `(state, updated_at)` keeps it cheap; the built-in stores add one in migration `20261024000200`.
+
+In SQL each of the two moves is one `UPDATE ... WHERE id = $1 AND tenant_id = $2 AND state IN ('pending', 'processing') AND updated_at < $3`, and zero rows affected means you read the row once to tell not-found from the wrong state. In Mongo it's one `UpdateOne` with the same filter.
+
 ### Testing a custom store
 
 `store/storetest` is the conformance suite the built-in stores run. Point it at yours from a test:
@@ -240,4 +253,4 @@ func TestMyStore(t *testing.T) {
 }
 ```
 
-It checks filters, ordering, duplicates, timestamps and nil metadata handling, every rule in the list above, and the replace contract, concurrent replaces included. The tenant cases call every method with no tenant, and try each read, update and delete as one tenant with another tenant's IDs. When `store.Store` gains a method, the tenant case fails until it covers that method too.
+It checks filters, ordering, duplicates, timestamps and nil metadata handling, every rule in the list above, the replace contract, concurrent replaces included, and the heartbeat and recovery methods, with concurrent claims of one document. The tenant cases call every method with no tenant, and try each read, update and delete as one tenant with another tenant's IDs. When `store.Store` gains a method, the tenant case fails until it covers that method too.

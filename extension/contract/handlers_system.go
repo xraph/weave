@@ -33,7 +33,7 @@ func systemOverviewHandler(deps Deps) func(context.Context, tenantInput, contrac
 	return func(ctx context.Context, _ tenantInput, _ contract.Principal) (overviewOutput, error) {
 		const intent = "system.overview"
 		e := deps.Engine
-		out := overviewOutput{StalledAfterSeconds: int(StalledAfter.Seconds()), Scope: "tenant", NewestDocuments: []documentRow{}, Components: e.Components()}
+		out := overviewOutput{StalledAfterSeconds: int(deps.stalledAfter().Seconds()), Scope: "tenant", NewestDocuments: []documentRow{}, Components: e.Components()}
 		var err error
 		if out.Collections, err = e.CountCollections(ctx, &collection.CountFilter{}); err != nil {
 			return overviewOutput{}, deps.mapError(intent, err)
@@ -48,7 +48,7 @@ func systemOverviewHandler(deps Deps) func(context.Context, tenantInput, contrac
 			return overviewOutput{}, deps.mapError(intent, err)
 		}
 		if out.Stalled, err = e.CountDocuments(ctx, &document.CountFilter{
-			State: document.StateProcessing, UpdatedBefore: deps.now().Add(-StalledAfter),
+			State: document.StateProcessing, UpdatedBefore: deps.now().Add(-deps.stalledAfter()),
 		}); err != nil {
 			return overviewOutput{}, deps.mapError(intent, err)
 		}
