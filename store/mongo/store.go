@@ -235,16 +235,31 @@ func (s *Store) CountCollections(ctx context.Context, filter *collection.CountFi
 // Document operations
 // ──────────────────────────────────────────────────
 
+// CreateDocument persists a new document. Its collection must belong to the
+// context tenant, else ErrCollectionNotFound. The check runs before the
+// insert, outside a transaction: a collection's tenant never changes, and
+// Mongo has no cascade, so a race with a delete can only leave this tenant's
+// document without its collection.
 func (s *Store) CreateDocument(ctx context.Context, doc *document.Document) error {
-	if _, err := tenancy.Owner(ctx, "document", doc.TenantID); err != nil {
+	tenant, err := tenancy.Owner(ctx, "document", doc.TenantID)
+	if err != nil {
 		return err
+	}
+	n, err := s.mdb.NewFind((*collectionModel)(nil)).
+		Filter(bson.M{"_id": doc.CollectionID.String(), "tenant_id": tenant}).
+		Count(ctx)
+	if err != nil {
+		return fmt.Errorf("weave: create document: %w", err)
+	}
+	if n == 0 {
+		return weave.ErrCollectionNotFound
 	}
 	now := time.Now().UTC()
 	doc.CreatedAt = now
 	doc.UpdatedAt = now
 	m := documentToModel(doc)
 
-	_, err := s.mdb.NewInsert(m).Exec(ctx)
+	_, err = s.mdb.NewInsert(m).Exec(ctx)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("weave: create document: %w", weave.ErrDuplicateDocument)
@@ -281,7 +296,9 @@ func (s *Store) UpdateDocument(ctx context.Context, doc *document.Document) erro
 	doc.UpdatedAt = time.Now().UTC()
 	m := documentToModel(doc)
 
-	res, err := s.mdb.NewUpdate(m).Filter(bson.M{"_id": m.ID, "tenant_id": tenant}).Exec(ctx)
+	res, err := s.mdb.NewUpdate(m).
+		Filter(bson.M{"_id": m.ID, "tenant_id": tenant, "collection_id": m.CollectionID}).
+		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: update document: %w", err)
 	}
@@ -403,17 +420,30 @@ func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.Collec
 // Chunk operations
 // ──────────────────────────────────────────────────
 
+// CreateChunkBatch persists a batch of chunks. Each chunk's document must
+// belong to the context tenant and sit in the chunk's collection; that is
+// checked for the whole batch before the insert, as CreateDocument checks
+// its collection.
 func (s *Store) CreateChunkBatch(ctx context.Context, chunks []*chunk.Chunk) error {
-	if _, err := weave.RequireTenant(ctx); err != nil {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
 		return err
 	}
 	for _, ch := range chunks {
-		if _, err := tenancy.Owner(ctx, "chunk", ch.TenantID); err != nil {
+		if _, err = tenancy.Owner(ctx, "chunk", ch.TenantID); err != nil {
 			return err
 		}
 	}
 	if len(chunks) == 0 {
 		return nil
+	}
+	err = s.checkChunkParents(ctx, tenant, chunks)
+	if err != nil {
+		return err
+	}
+	err = s.checkChunkIDs(ctx, chunks)
+	if err != nil {
+		return err
 	}
 
 	now := time.Now().UTC()
@@ -423,9 +453,61 @@ func (s *Store) CreateChunkBatch(ctx context.Context, chunks []*chunk.Chunk) err
 		models[i] = *chunkToModel(ch)
 	}
 
-	_, err := s.mdb.NewInsert(&models).Exec(ctx)
+	_, err = s.mdb.NewInsert(&models).Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: create chunk batch: %w", err)
+	}
+	return nil
+}
+
+// checkChunkIDs refuses a batch that repeats a chunk ID or reuses one already
+// stored, under any tenant, so a batch never half-lands on a duplicate key.
+// The store has no transaction here, so a concurrent insert of the same ID
+// can still slip between this check and the insert.
+func (s *Store) checkChunkIDs(ctx context.Context, chunks []*chunk.Chunk) error {
+	ids := make([]string, 0, len(chunks))
+	seen := make(map[string]bool, len(chunks))
+	for _, ch := range chunks {
+		key := ch.ID.String()
+		if seen[key] {
+			return fmt.Errorf("weave: create chunk batch: chunk %s appears twice", key)
+		}
+		seen[key] = true
+		ids = append(ids, key)
+	}
+	n, err := s.mdb.NewFind((*chunkModel)(nil)).Filter(bson.M{"_id": bson.M{"$in": ids}}).Count(ctx)
+	if err != nil {
+		return fmt.Errorf("weave: create chunk batch: %w", err)
+	}
+	if n > 0 {
+		return errors.New("weave: create chunk batch: a chunk with one of these IDs already exists")
+	}
+	return nil
+}
+
+// checkChunkParents reads each distinct document the chunks name, within
+// tenant. A missing document, or another tenant's, is ErrDocumentNotFound; a
+// chunk whose collection is not its document's is ErrInvalidArgument.
+func (s *Store) checkChunkParents(ctx context.Context, tenant string, chunks []*chunk.Chunk) error {
+	collectionOf := make(map[string]string, 1)
+	for _, ch := range chunks {
+		docID := ch.DocumentID.String()
+		colID, ok := collectionOf[docID]
+		if !ok {
+			m := new(documentModel)
+			err := s.mdb.NewFind(m).Filter(bson.M{"_id": docID, "tenant_id": tenant}).Scan(ctx)
+			if err != nil {
+				if isNotFound(err) {
+					return weave.ErrDocumentNotFound
+				}
+				return fmt.Errorf("weave: create chunk batch: %w", err)
+			}
+			colID = m.CollectionID
+			collectionOf[docID] = colID
+		}
+		if colID != ch.CollectionID.String() {
+			return fmt.Errorf("%w: chunk collection does not match its document's", weave.ErrInvalidArgument)
+		}
 	}
 	return nil
 }

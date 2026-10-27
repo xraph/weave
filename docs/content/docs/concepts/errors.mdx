@@ -31,14 +31,14 @@ case errors.Is(err, weave.ErrDuplicateDocument):
 | `weave.ErrNoEmbedder` | `Ingest` or `ReindexCollection` without an embedder |
 | `weave.ErrNoChunker` | `Ingest` without a chunker |
 | `weave.ErrEmptyContent` | `Ingest` with empty `Content` |
-| `weave.ErrCollectionNotFound` | No collection with that ID in the context tenant (from get, update, delete, stats and ingest). Another tenant's collection gets this too |
-| `weave.ErrDocumentNotFound` | No document with that ID in the context tenant |
+| `weave.ErrCollectionNotFound` | No collection with that ID in the context tenant (from get, update, delete, stats, ingest, and creating a document in it). Another tenant's collection gets this too |
+| `weave.ErrDocumentNotFound` | No document with that ID in the context tenant, including when you create chunks on it |
 | `weave.ErrChunkNotFound` | No chunk with that ID in the context tenant |
 | `weave.ErrCollectionAlreadyExists` | A collection with that name already exists for the tenant, on create or rename |
 | `weave.ErrDuplicateDocument` | A document with the same content hash is already in the collection |
 | `weave.ErrDocumentAlreadyExists` | A document with that ID already exists (in-memory store) |
 | `weave.ErrMigrationFailed` | A store's `Migrate` failed |
-| `weave.ErrInvalidArgument` | `UpdateCollection` with a blank name, `ListChunks` with neither a document nor a collection ID, a list or count filter whose deprecated `Tenant` differs from the context tenant, a create whose `TenantID` differs from it, or `GetCollectionByName` on a store naming another tenant |
+| `weave.ErrInvalidArgument` | `UpdateCollection` with a blank name, `ListChunks` with neither a document nor a collection ID, a list or count filter whose deprecated `Tenant` differs from the context tenant, a create whose `TenantID` differs from it, a chunk whose collection isn't its document's, or `GetCollectionByName` on a store naming another tenant |
 
 `ErrStoreClosed`, `ErrIngestJobNotFound`, `ErrInvalidState`, `ErrDimensionMismatch` and `ErrIngestInterrupted` are declared but nothing returns them yet.
 

@@ -24,6 +24,7 @@ func Run(t *testing.T, open Opener) {
 	t.Run("TenantScoping", func(t *testing.T) { testTenantScoping(t, open(t)) })
 	t.Run("TenantRequired", func(t *testing.T) { testTenantRequired(t, open(t)) })
 	t.Run("TenantFilterMustMatch", func(t *testing.T) { testTenantFilterMustMatch(t, open(t)) })
+	t.Run("TenantParents", func(t *testing.T) { testTenantParents(t, open(t)) })
 	t.Run("Stalled", func(t *testing.T) { testStalled(t, open(t)) })
 	t.Run("Chunks", func(t *testing.T) { testChunks(t, open(t)) })
 	t.Run("NilMetadata", func(t *testing.T) { testNilMetadata(t, open(t)) })

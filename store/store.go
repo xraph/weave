@@ -21,7 +21,10 @@ import (
 // row returns the same not-found sentinel as an unknown ID, bulk deletes and
 // every list and count see only the context tenant's rows, and a create
 // whose TenantID differs from the context tenant is weave.ErrInvalidArgument.
-// store/storetest checks all of it.
+// A document's collection and a chunk's document must belong to the context
+// tenant (else the parent's not-found sentinel), a chunk sits in its
+// document's collection, a document never changes collection, and a chunk ID
+// is never reused. store/storetest checks all of it.
 type Store interface {
 	document.Store
 	collection.Store

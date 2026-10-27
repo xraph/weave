@@ -204,6 +204,9 @@ Weave relies on the store to keep tenants apart, so your store has to do what th
 - An update checks the stored row's tenant, not just the `TenantID` on the struct it's given, so a caller can't move a row into its own tenant by relabelling it.
 - `DeleteChunksByDocument`, `DeleteChunksByCollection`, `DeleteDocumentsByCollection`, `ListChunksByDocument` and every list and count add the tenant predicate too. Pointed at another tenant's collection or document, the deletes succeed and remove nothing.
 - `CreateCollection`, `CreateDocument` and `CreateChunkBatch` refuse an entity whose `TenantID` isn't the context tenant with `weave.ErrInvalidArgument`. For a batch, check every chunk before you write any of them.
+- A row only hangs off a parent of its own tenant. `CreateDocument` checks that the document's collection belongs to the context tenant, and `CreateChunkBatch` does the same for each chunk's document. Another tenant's parent and an unknown ID both get `ErrCollectionNotFound` or `ErrDocumentNotFound`, checked before anything else, so a create can't tell you which IDs exist or what content they hold. Do the check in the same transaction as the insert if your database has them. Without it, a collection delete that cascades would take another tenant's rows with it.
+- A chunk's `CollectionID` must be its document's, else `ErrInvalidArgument`, and `UpdateDocument` never moves a document to another collection: match on `collection_id` as well and answer not-found when it differs.
+- A batch that reuses a chunk ID already stored, by any tenant, or repeats one, fails as a whole. Never upsert a chunk.
 - `GetCollectionByName(ctx, tenantID, name)` refuses a `tenantID` that isn't the context tenant with `weave.ErrInvalidArgument`.
 - The deprecated `Tenant *string` on list and count filters must equal the context tenant when it's set. Anything else, `""` included, is `weave.ErrInvalidArgument`.
 

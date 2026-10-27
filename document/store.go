@@ -49,13 +49,15 @@ type CountFilter struct {
 // scoped to the context tenant; see store.Store for the rules.
 type Store interface {
 	// CreateDocument persists a new document. Its TenantID must be the
-	// context tenant.
+	// context tenant, and its collection must belong to that tenant, else
+	// weave.ErrCollectionNotFound.
 	CreateDocument(ctx context.Context, doc *Document) error
 
 	// GetDocument retrieves a document by ID.
 	GetDocument(ctx context.Context, docID id.DocumentID) (*Document, error)
 
-	// UpdateDocument persists changes to an existing document.
+	// UpdateDocument persists changes to an existing document. A document
+	// never changes collection: a different CollectionID is not-found.
 	UpdateDocument(ctx context.Context, doc *Document) error
 
 	// DeleteDocument removes a document by ID.

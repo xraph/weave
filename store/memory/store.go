@@ -4,6 +4,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -245,13 +246,19 @@ func (s *Store) CountCollections(ctx context.Context, filter *collection.CountFi
 // Document operations
 // ──────────────────────────────────────────────────
 
-// CreateDocument persists a new document.
+// CreateDocument persists a new document. Its collection must belong to the
+// context tenant, else ErrCollectionNotFound.
 func (s *Store) CreateDocument(ctx context.Context, doc *document.Document) error {
-	if _, err := tenancy.Owner(ctx, "document", doc.TenantID); err != nil {
+	tenant, err := tenancy.Owner(ctx, "document", doc.TenantID)
+	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if col, ok := s.collections[doc.CollectionID.String()]; !ok || col.TenantID != tenant {
+		return weave.ErrCollectionNotFound
+	}
 
 	key := doc.ID.String()
 	if _, exists := s.documents[key]; exists {
@@ -298,7 +305,9 @@ func (s *Store) UpdateDocument(ctx context.Context, doc *document.Document) erro
 	defer s.mu.Unlock()
 
 	key := doc.ID.String()
-	if existing, exists := s.documents[key]; !exists || existing.TenantID != tenant || doc.TenantID != tenant {
+	existing, exists := s.documents[key]
+	if !exists || existing.TenantID != tenant || doc.TenantID != tenant ||
+		existing.CollectionID.String() != doc.CollectionID.String() {
 		return weave.ErrDocumentNotFound
 	}
 
@@ -448,9 +457,12 @@ func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.Collec
 // ──────────────────────────────────────────────────
 
 // CreateChunkBatch persists a batch of chunks. Every chunk must belong to
-// the context tenant; one that doesn't refuses the whole batch.
+// the context tenant and to a document of that tenant, with the document's
+// collection, and its ID must be new. Any chunk that fails refuses the whole
+// batch before anything is written, as the SQL backends' single INSERT does.
 func (s *Store) CreateChunkBatch(ctx context.Context, chunks []*chunk.Chunk) error {
-	if _, err := weave.RequireTenant(ctx); err != nil {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
 		return err
 	}
 	for _, ch := range chunks {
@@ -460,6 +472,22 @@ func (s *Store) CreateChunkBatch(ctx context.Context, chunks []*chunk.Chunk) err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	seen := make(map[string]bool, len(chunks))
+	for _, ch := range chunks {
+		key := ch.ID.String()
+		if _, exists := s.chunks[key]; exists || seen[key] {
+			return fmt.Errorf("weave: create chunk batch: chunk %s already exists", key)
+		}
+		seen[key] = true
+		doc, ok := s.documents[ch.DocumentID.String()]
+		if !ok || doc.TenantID != tenant {
+			return weave.ErrDocumentNotFound
+		}
+		if doc.CollectionID.String() != ch.CollectionID.String() {
+			return fmt.Errorf("%w: chunk collection does not match its document's", weave.ErrInvalidArgument)
+		}
+	}
 
 	now := time.Now().UTC()
 	for _, ch := range chunks {

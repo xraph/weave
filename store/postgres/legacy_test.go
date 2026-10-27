@@ -82,6 +82,39 @@ VALUES ($1, $2, $3, '', 'legacy chunk', 0)`, []any{chunkID.String(), docID.Strin
 		t.Errorf("t1 gets the legacy chunk: got %v, want ErrChunkNotFound", err)
 	}
 
+	// Writes as t1 can't reach them either: updates relabelled to t1 and
+	// deletes by ID are not-found, and bulk deletes remove nothing.
+	legacyCol := &collection.Collection{ID: colID, Name: "taken", TenantID: "t1", Metadata: map[string]string{}}
+	if err := s.UpdateCollection(t1, legacyCol); !errors.Is(err, weave.ErrCollectionNotFound) {
+		t.Errorf("t1 updates the legacy collection: got %v, want ErrCollectionNotFound", err)
+	}
+	legacyDoc := &document.Document{ID: docID, CollectionID: colID, TenantID: "t1", Title: "taken", ContentHash: "sha-legacy", Metadata: map[string]string{}}
+	if err := s.UpdateDocument(t1, legacyDoc); !errors.Is(err, weave.ErrDocumentNotFound) {
+		t.Errorf("t1 updates the legacy document: got %v, want ErrDocumentNotFound", err)
+	}
+	if err := s.DeleteDocument(t1, docID); !errors.Is(err, weave.ErrDocumentNotFound) {
+		t.Errorf("t1 deletes the legacy document: got %v, want ErrDocumentNotFound", err)
+	}
+	if err := s.DeleteCollection(t1, colID); !errors.Is(err, weave.ErrCollectionNotFound) {
+		t.Errorf("t1 deletes the legacy collection: got %v, want ErrCollectionNotFound", err)
+	}
+	for name, del := range map[string]func() error{
+		"DeleteChunksByDocument":      func() error { return s.DeleteChunksByDocument(t1, docID) },
+		"DeleteChunksByCollection":    func() error { return s.DeleteChunksByCollection(t1, colID) },
+		"DeleteDocumentsByCollection": func() error { return s.DeleteDocumentsByCollection(t1, colID) },
+	} {
+		if err := del(); err != nil {
+			t.Errorf("t1 %s on the legacy rows: %v", name, err)
+		}
+	}
+	// Nor can t1 attach rows to them.
+	if err := s.CreateDocument(t1, &document.Document{ID: id.NewDocumentID(), CollectionID: colID, TenantID: "t1", ContentHash: "sha-new", State: document.StatePending}); !errors.Is(err, weave.ErrCollectionNotFound) {
+		t.Errorf("t1 creates a document in the legacy collection: got %v, want ErrCollectionNotFound", err)
+	}
+	if err := s.CreateChunkBatch(t1, []*chunk.Chunk{{ID: id.NewChunkID(), DocumentID: docID, CollectionID: colID, TenantID: "t1", Content: "x"}}); !errors.Is(err, weave.ErrDocumentNotFound) {
+		t.Errorf("t1 creates a chunk on the legacy document: got %v, want ErrDocumentNotFound", err)
+	}
+
 	// With no tenant at all, nothing answers, so "" can't be used to reach
 	// the legacy rows either.
 	untenanted := []struct {
@@ -98,6 +131,24 @@ VALUES ($1, $2, $3, '', 'legacy chunk', 0)`, []any{chunkID.String(), docID.Strin
 		{"GetChunk", func() error { _, err := s.GetChunk(ctx, chunkID); return err }},
 		{"DeleteCollection", func() error { return s.DeleteCollection(ctx, colID) }},
 		{"DeleteDocument", func() error { return s.DeleteDocument(ctx, docID) }},
+		{"DeleteDocumentsByCollection", func() error { return s.DeleteDocumentsByCollection(ctx, colID) }},
+		{"DeleteChunksByDocument", func() error { return s.DeleteChunksByDocument(ctx, docID) }},
+		{"DeleteChunksByCollection", func() error { return s.DeleteChunksByCollection(ctx, colID) }},
+		{"UpdateCollection", func() error {
+			return s.UpdateCollection(ctx, &collection.Collection{ID: colID, Name: "legacy", Metadata: map[string]string{}})
+		}},
+		{"UpdateDocument", func() error {
+			return s.UpdateDocument(ctx, &document.Document{ID: docID, CollectionID: colID, ContentHash: "sha-legacy", Metadata: map[string]string{}})
+		}},
+		{"CreateCollection", func() error {
+			return s.CreateCollection(ctx, &collection.Collection{ID: id.NewCollectionID(), Name: "legacy-2", Metadata: map[string]string{}})
+		}},
+		{"CreateDocument", func() error {
+			return s.CreateDocument(ctx, &document.Document{ID: id.NewDocumentID(), CollectionID: colID, ContentHash: "sha-2", Metadata: map[string]string{}})
+		}},
+		{"CreateChunkBatch", func() error {
+			return s.CreateChunkBatch(ctx, []*chunk.Chunk{{ID: id.NewChunkID(), DocumentID: docID, CollectionID: colID, Content: "x"}})
+		}},
 	}
 	for _, c := range untenanted {
 		if err := c.call(); !errors.Is(err, weave.ErrTenantRequired) {
@@ -105,12 +156,28 @@ VALUES ($1, $2, $3, '', 'legacy chunk', 0)`, []any{chunkID.String(), docID.Strin
 		}
 	}
 
-	// The rows are still there for an operator to reassign.
-	var n int
-	if err := pg.QueryRow(ctx, `SELECT count(*) FROM weave_chunks WHERE tenant_id = ''`).Scan(&n); err != nil {
-		t.Fatalf("count legacy chunks: %v", err)
+	// The rows are still there, unchanged, for an operator to reassign, and
+	// nothing else was written.
+	for _, q := range []string{
+		`SELECT count(*) FROM weave_collections WHERE tenant_id = '' AND name = 'legacy'`,
+		`SELECT count(*) FROM weave_documents WHERE tenant_id = '' AND title = 'legacy doc'`,
+		`SELECT count(*) FROM weave_chunks WHERE tenant_id = '' AND content = 'legacy chunk'`,
+	} {
+		var n int
+		if err := pg.QueryRow(ctx, q).Scan(&n); err != nil {
+			t.Fatalf("count legacy rows: %v", err)
+		}
+		if n != 1 {
+			t.Errorf("%s: %d, want 1", q, n)
+		}
 	}
-	if n != 1 {
-		t.Errorf("legacy chunks left in the table: %d, want 1", n)
+	for _, table := range []string{"weave_collections", "weave_documents", "weave_chunks"} {
+		var n int
+		if err := pg.QueryRow(ctx, `SELECT count(*) FROM `+table).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if n != 1 {
+			t.Errorf("%s holds %d rows, want only the legacy one", table, n)
+		}
 	}
 }

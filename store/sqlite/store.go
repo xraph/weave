@@ -233,7 +233,8 @@ func (s *Store) CountCollections(ctx context.Context, filter *collection.CountFi
 // ──────────────────────────────────────────────────
 
 func (s *Store) CreateDocument(ctx context.Context, doc *document.Document) error {
-	if _, err := tenancy.Owner(ctx, "document", doc.TenantID); err != nil {
+	tenant, err := tenancy.Owner(ctx, "document", doc.TenantID)
+	if err != nil {
 		return err
 	}
 	now := time.Now().UTC()
@@ -241,11 +242,30 @@ func (s *Store) CreateDocument(ctx context.Context, doc *document.Document) erro
 	doc.UpdatedAt = now
 	m := documentToModel(doc)
 
-	_, err := s.sdb.NewInsert(m).Exec(ctx)
+	// The collection is checked in the same transaction as the insert, so a
+	// document never hangs off another tenant's collection.
+	tx, err := s.sdb.BeginTxQuery(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("weave: create document: %w", err)
+	}
+	defer rollback(tx)
+	n, err := tx.NewSelect((*collectionModel)(nil)).
+		Where("id = ?", doc.CollectionID.String()).
+		Where("tenant_id = ?", tenant).
+		Count(ctx)
+	if err != nil {
+		return fmt.Errorf("weave: create document: %w", err)
+	}
+	if n == 0 {
+		return weave.ErrCollectionNotFound
+	}
+	if _, err = tx.NewInsert(m).Exec(ctx); err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("weave: create document: %w", weave.ErrDuplicateDocument)
 		}
+		return fmt.Errorf("weave: create document: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("weave: create document: %w", err)
 	}
 	return nil
@@ -278,7 +298,10 @@ func (s *Store) UpdateDocument(ctx context.Context, doc *document.Document) erro
 	doc.UpdatedAt = time.Now().UTC()
 	m := documentToModel(doc)
 
-	res, err := s.sdb.NewUpdate(m).WherePK().Where("tenant_id = ?", tenant).Exec(ctx)
+	res, err := s.sdb.NewUpdate(m).WherePK().
+		Where("tenant_id = ?", tenant).
+		Where("collection_id = ?", doc.CollectionID.String()).
+		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: update document: %w", err)
 	}
@@ -403,11 +426,12 @@ func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.Collec
 // ──────────────────────────────────────────────────
 
 func (s *Store) CreateChunkBatch(ctx context.Context, chunks []*chunk.Chunk) error {
-	if _, err := weave.RequireTenant(ctx); err != nil {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
 		return err
 	}
 	for _, ch := range chunks {
-		if _, err := tenancy.Owner(ctx, "chunk", ch.TenantID); err != nil {
+		if _, err = tenancy.Owner(ctx, "chunk", ch.TenantID); err != nil {
 			return err
 		}
 	}
@@ -422,11 +446,58 @@ func (s *Store) CreateChunkBatch(ctx context.Context, chunks []*chunk.Chunk) err
 		models[i] = *chunkToModel(ch)
 	}
 
-	_, err := s.sdb.NewInsert(&models).Exec(ctx)
+	// Every chunk's document is checked in the same transaction as the
+	// insert: it must belong to the context tenant and sit in the chunk's
+	// collection.
+	tx, err := s.sdb.BeginTxQuery(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("weave: create chunk batch: %w", err)
 	}
+	defer rollback(tx)
+	err = checkChunkParents(ctx, tx, tenant, chunks)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.NewInsert(&models).Exec(ctx); err != nil {
+		return fmt.Errorf("weave: create chunk batch: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("weave: create chunk batch: %w", err)
+	}
 	return nil
+}
+
+// checkChunkParents reads each distinct document the chunks name, within
+// tenant and inside tx. A missing document, or another tenant's, is
+// ErrDocumentNotFound; a chunk whose collection is not its document's is
+// ErrInvalidArgument.
+func checkChunkParents(ctx context.Context, tx *sqlitedriver.SqliteTx, tenant string, chunks []*chunk.Chunk) error {
+	collectionOf := make(map[string]string, 1)
+	for _, ch := range chunks {
+		docID := ch.DocumentID.String()
+		colID, ok := collectionOf[docID]
+		if !ok {
+			m := new(documentModel)
+			err := tx.NewSelect(m).Where("id = ?", docID).Where("tenant_id = ?", tenant).Scan(ctx)
+			if err != nil {
+				if isNoRows(err) {
+					return weave.ErrDocumentNotFound
+				}
+				return fmt.Errorf("weave: create chunk batch: %w", err)
+			}
+			colID = m.CollectionID
+			collectionOf[docID] = colID
+		}
+		if colID != ch.CollectionID.String() {
+			return fmt.Errorf("%w: chunk collection does not match its document's", weave.ErrInvalidArgument)
+		}
+	}
+	return nil
+}
+
+// rollback ends tx when it was not committed. After Commit it does nothing.
+func rollback(tx interface{ Rollback() error }) {
+	_ = tx.Rollback() //nolint:errcheck // nothing to undo after Commit; a failed rollback leaves the server to drop the transaction
 }
 
 func (s *Store) GetChunk(ctx context.Context, chunkID id.ChunkID) (*chunk.Chunk, error) {

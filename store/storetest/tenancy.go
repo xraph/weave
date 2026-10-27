@@ -123,6 +123,32 @@ func testTenantScoping(t *testing.T, s store.Store) {
 		t.Errorf("delete t2's documents by collection: %v", err)
 	}
 
+	// A batch reusing t2's chunk ID is refused whole, never an upsert.
+	reuse := &chunk.Chunk{
+		ID: ch2[0].ID, DocumentID: d1.ID, CollectionID: c1.ID, TenantID: "t1",
+		Content: "taken over", Index: 7, Metadata: map[string]string{},
+	}
+	fresh := &chunk.Chunk{
+		ID: id.NewChunkID(), DocumentID: d1.ID, CollectionID: c1.ID, TenantID: "t1",
+		Content: "fresh", Index: 8, Metadata: map[string]string{},
+	}
+	if err = s.CreateChunkBatch(t1, []*chunk.Chunk{fresh, reuse}); err == nil {
+		t.Errorf("batch reusing t2's chunk ID as t1: got nil, want an error")
+	}
+	if _, err = s.GetChunk(t1, fresh.ID); !errors.Is(err, weave.ErrChunkNotFound) {
+		t.Errorf("rest of the refused batch: got %v, want ErrChunkNotFound", err)
+	}
+	if _, err = s.GetChunk(t1, ch2[0].ID); !errors.Is(err, weave.ErrChunkNotFound) {
+		t.Errorf("t1 reads t2's chunk after the refused batch: got %v, want ErrChunkNotFound", err)
+	}
+	gotChunk, err := s.GetChunk(t2, ch2[0].ID)
+	if err != nil {
+		t.Fatalf("t2 reads its chunk after the refused batch: %v", err)
+	}
+	if gotChunk.Content != ch2[0].Content || gotChunk.TenantID != "t2" || gotChunk.DocumentID.String() != d2.ID.String() {
+		t.Errorf("t2's chunk changed: %+v", gotChunk)
+	}
+
 	// t2 still has everything, unchanged.
 	gotCol, err := s.GetCollection(t2, c2.ID)
 	if err != nil {
@@ -148,7 +174,9 @@ func testTenantScoping(t *testing.T, s store.Store) {
 }
 
 // notScoped are the store.Store methods that take no tenant. Every other
-// method must be in testTenantRequired's table.
+// method must be in testTenantRequired's table. An entry here is a hole in
+// tenant isolation: add one only with a recorded ruling, and give it a case
+// that shows it works with no tenant.
 var notScoped = []string{"Migrate", "Ping", "Close"}
 
 // testTenantRequired calls every tenant-scoped store.Store method with no
@@ -417,5 +445,104 @@ func testStalled(t *testing.T, s store.Store) {
 		if n != tc.want {
 			t.Errorf("%s: count stalled: got %d, want %d", tc.name, n, tc.want)
 		}
+	}
+}
+
+// testTenantParents pins that a row can only hang off a parent of its own
+// tenant. A document's collection and a chunk's document must belong to the
+// context tenant, and another tenant's parent gets the same not-found error
+// as an unknown ID, so creates reveal neither which IDs exist nor what
+// content they hold. A chunk must sit in its document's collection, and an
+// update never moves a document to another collection. Without this, a
+// collection delete would cascade into another tenant's rows.
+func testTenantParents(t *testing.T, s store.Store) {
+	t1, t2 := as("t1"), as("t2")
+	c1 := mustCollection(t, s, "t1-col", "t1")
+	other := mustCollection(t, s, "t1-other", "t1")
+	d1 := mustDocument(t, s, c1, "t1 doc", document.StateReady)
+	ch1 := mustChunks(t, s, d1, 2)
+	c2 := mustCollection(t, s, "t2-col", "t2")
+	d2 := mustDocument(t, s, c2, "t2 doc", document.StateReady)
+
+	docIn := func(colID id.CollectionID, hash string) *document.Document {
+		return &document.Document{
+			ID: id.NewDocumentID(), CollectionID: colID, TenantID: "t2", Title: "t2 into t1",
+			ContentHash: hash, State: document.StatePending, Metadata: map[string]string{},
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		doc  *document.Document
+	}{
+		{"t1's collection", docIn(c1.ID, "sha-new")},
+		{"t1's collection, t1's content hash", docIn(c1.ID, d1.ContentHash)},
+		{"an unknown collection", docIn(id.NewCollectionID(), "sha-new")},
+	} {
+		if err := s.CreateDocument(t2, tc.doc); !errors.Is(err, weave.ErrCollectionNotFound) {
+			t.Errorf("t2 creates a document in %s: got %v, want ErrCollectionNotFound", tc.name, err)
+		}
+	}
+
+	chunkOn := func(docID id.DocumentID, colID id.CollectionID) *chunk.Chunk {
+		return &chunk.Chunk{
+			ID: id.NewChunkID(), DocumentID: docID, CollectionID: colID, TenantID: "t2",
+			Content: "t2 chunk", Metadata: map[string]string{},
+		}
+	}
+	valid := chunkOn(d2.ID, c2.ID)
+	for _, tc := range []struct {
+		name  string
+		batch []*chunk.Chunk
+		want  error
+	}{
+		{"on t1's document", []*chunk.Chunk{chunkOn(d1.ID, c1.ID)}, weave.ErrDocumentNotFound},
+		{"on an unknown document", []*chunk.Chunk{chunkOn(id.NewDocumentID(), c2.ID)}, weave.ErrDocumentNotFound},
+		{"valid, then one on t1's document", []*chunk.Chunk{valid, chunkOn(d1.ID, c1.ID)}, weave.ErrDocumentNotFound},
+		{"on t2's document in t1's collection", []*chunk.Chunk{chunkOn(d2.ID, c1.ID)}, weave.ErrInvalidArgument},
+	} {
+		if err := s.CreateChunkBatch(t2, tc.batch); !errors.Is(err, tc.want) {
+			t.Errorf("t2 creates chunks %s: got %v, want %v", tc.name, err, tc.want)
+		}
+	}
+	assertCount(t, "t2 chunks after refused batches", 0)(s.CountChunks(t2, &chunk.CountFilter{}))
+	assertCount(t, "t2 documents after refused creates", 1)(s.CountDocuments(t2, &document.CountFilter{}))
+
+	// Documents never move, to another tenant's collection or to their own.
+	for _, tc := range []struct {
+		name  string
+		colID id.CollectionID
+	}{{"t2's collection", c2.ID}, {"another t1 collection", other.ID}} {
+		moved := *d1
+		moved.CollectionID = tc.colID
+		if err := s.UpdateDocument(t1, &moved); !errors.Is(err, weave.ErrDocumentNotFound) {
+			t.Errorf("t1 moves its document to %s: got %v, want ErrDocumentNotFound", tc.name, err)
+		}
+	}
+	got, err := s.GetDocument(t1, d1.ID)
+	if err != nil {
+		t.Fatalf("t1 reads its document back: %v", err)
+	}
+	if got.CollectionID.String() != c1.ID.String() {
+		t.Errorf("t1's document moved to %s", got.CollectionID)
+	}
+
+	// Nothing of t2's hangs off c1, so deleting it leaves t2 whole.
+	if err := s.DeleteChunksByCollection(t1, c1.ID); err != nil {
+		t.Fatalf("t1 deletes its chunks: %v", err)
+	}
+	if err := s.DeleteDocumentsByCollection(t1, c1.ID); err != nil {
+		t.Fatalf("t1 deletes its documents: %v", err)
+	}
+	if err := s.DeleteCollection(t1, c1.ID); err != nil {
+		t.Fatalf("t1 deletes its collection: %v", err)
+	}
+	if _, err := s.GetChunk(t1, ch1[0].ID); !errors.Is(err, weave.ErrChunkNotFound) {
+		t.Errorf("t1's chunk after its delete: got %v, want ErrChunkNotFound", err)
+	}
+	if _, err := s.GetDocument(t2, d2.ID); err != nil {
+		t.Errorf("t2's document after t1's delete: %v", err)
+	}
+	if _, err := s.GetCollection(t2, c2.ID); err != nil {
+		t.Errorf("t2's collection after t1's delete: %v", err)
 	}
 }

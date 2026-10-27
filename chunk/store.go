@@ -39,7 +39,9 @@ type ListFilter struct {
 // to the context tenant; see store.Store for the rules.
 type Store interface {
 	// CreateChunkBatch persists a batch of chunks. Every chunk's TenantID
-	// must be the context tenant; one that isn't refuses the whole batch.
+	// must be the context tenant, its document must belong to that tenant
+	// (else weave.ErrDocumentNotFound) and sit in the chunk's collection, and
+	// its ID must be new. One chunk that fails refuses the whole batch.
 	CreateChunkBatch(ctx context.Context, chunks []*Chunk) error
 
 	// GetChunk retrieves a chunk by ID.
