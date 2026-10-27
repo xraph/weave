@@ -74,7 +74,7 @@ Both options, and `CompareParams.Tenant` on `RetrieveCompare`, are deprecated an
 
 A hit whose vector is labelled with another tenant is dropped, and so is an orphaned hit (its chunk row is gone) whose vector isn't labelled with `t`. So an `Orphaned` hit never carries another tenant's text. The built-in vector stores never return such a hit in the first place; the check is there for a custom store or retriever that ignores the filter.
 
-Every built-in vector store refuses a `Search` with an empty `TenantKey` and an `Upsert` of an entry without `metadata["tenant_id"]`, both with `ErrTenantRequired`, and a `DeleteByMetadata` with an empty filter with `ErrInvalidArgument`. The in-memory and pgvector stores match `tenant_id` exactly. The Fabriq store also sets Fabriq's own tenant scope, from `TenantKey` on a search and from each entry's `tenant_id` on an upsert.
+Every built-in vector store refuses a `Search` with an empty `TenantKey` and an `Upsert` of an entry without `metadata["tenant_id"]`, both with `ErrTenantRequired`, and a `DeleteByMetadata` with an empty filter with `ErrInvalidArgument`. The in-memory and pgvector stores match `tenant_id` exactly. The Fabriq store also sets Fabriq's own tenant scope, from `TenantKey` on a search, from each entry's `tenant_id` on an upsert and from the filter's `tenant_id` on a delete by metadata.
 
 Nothing searches across tenants. To search a collection that several tenants share, keep it under a tenant of its own, call `Retrieve` a second time under that tenant's context and merge the two result lists.
 

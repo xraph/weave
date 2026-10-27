@@ -16,9 +16,16 @@ func (s *Store) Describe() weave.ComponentInfo {
 		Kind:         "pgvector",
 		Score:        weave.ScoreCosine,
 		TenantFilter: "verified",
-		Params: map[string]string{
-			"table":      s.tableName,
-			"dimensions": strconv.Itoa(s.dimensions),
-		},
+		Params:       s.describeParams(),
 	}
+}
+
+// describeParams names the table, and the dimensions when WithDimensions set
+// them.
+func (s *Store) describeParams() map[string]string {
+	p := map[string]string{"table": s.tableName}
+	if s.dimensions > 0 {
+		p["dimensions"] = strconv.Itoa(s.dimensions)
+	}
+	return p
 }

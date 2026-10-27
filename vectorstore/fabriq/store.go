@@ -12,6 +12,7 @@ import (
 	"github.com/xraph/fabriq/core/query"
 	"github.com/xraph/fabriq/core/tenant"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/internal/tenancy"
 	"github.com/xraph/weave/vectorstore"
 )
@@ -162,10 +163,17 @@ func (s *Store) Search(ctx context.Context, vector []float32, opts *vectorstore.
 	return results, nil
 }
 
-// Delete removes entries by their IDs.
+// Delete removes entries by their IDs, under the Fabriq tenant of the weave
+// tenant on ctx (weave.WithTenant), as the engine calls it. Without one it
+// uses a Fabriq tenant already on ctx, and with neither it is
+// ErrTenantRequired.
 func (s *Store) Delete(ctx context.Context, ids []string) error {
+	tctx, err := deleteScope(ctx)
+	if err != nil {
+		return err
+	}
 	for _, id := range ids {
-		if err := s.vq.Delete(ctx, s.entity, id); err != nil {
+		if err := s.vq.Delete(tctx, s.entity, id); err != nil {
 			return fmt.Errorf("fabriqvec: delete %q: %w", id, err)
 		}
 	}
@@ -173,14 +181,39 @@ func (s *Store) Delete(ctx context.Context, ids []string) error {
 }
 
 // DeleteByMetadata removes entries whose meta matches all key/value pairs in
-// filter. Delegates to fabriq's DeleteByMeta (AND-of-equals semantics). An
-// empty filter is ErrInvalidArgument.
+// filter. Delegates to fabriq's DeleteByMeta (AND-of-equals semantics) under
+// the Fabriq tenant filter["tenant_id"] names, which the engine always sends.
+// An empty filter is ErrInvalidArgument and a filter without tenant_id is
+// ErrTenantRequired.
 func (s *Store) DeleteByMetadata(ctx context.Context, filter map[string]string) error {
 	if err := tenancy.VectorDeleteFilter(filter); err != nil {
 		return err
 	}
-	if err := s.vq.DeleteByMeta(ctx, s.entity, filter); err != nil {
+	tenantID := filter["tenant_id"]
+	if tenantID == "" {
+		return fmt.Errorf("fabriqvec: delete by meta: %w", weave.ErrTenantRequired)
+	}
+	tctx, err := tenant.WithTenant(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("fabriqvec: delete by meta: set tenant: %w", err)
+	}
+	if err := s.vq.DeleteByMeta(tctx, s.entity, filter); err != nil {
 		return fmt.Errorf("fabriqvec: delete by meta: %w", err)
 	}
 	return nil
+}
+
+// deleteScope returns ctx stamped with the Fabriq tenant Delete runs under.
+func deleteScope(ctx context.Context) (context.Context, error) {
+	if weaveTenant := weave.TenantFromContext(ctx); weaveTenant != "" {
+		tctx, err := tenant.WithTenant(ctx, weaveTenant)
+		if err != nil {
+			return nil, fmt.Errorf("fabriqvec: delete: set tenant: %w", err)
+		}
+		return tctx, nil
+	}
+	if _, err := tenant.FromContext(ctx); err != nil {
+		return nil, fmt.Errorf("fabriqvec: delete: %w", weave.ErrTenantRequired)
+	}
+	return ctx, nil
 }

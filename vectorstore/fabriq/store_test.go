@@ -188,7 +188,7 @@ func TestDeleteByMetadata(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	if err := s.DeleteByMetadata(ctx, map[string]string{"group": "old"}); err != nil {
+	if err := s.DeleteByMetadata(ctx, map[string]string{"group": "old", "tenant_id": "acme"}); err != nil {
 		t.Fatalf("DeleteByMetadata: %v", err)
 	}
 
@@ -293,5 +293,57 @@ func TestUpsertSetsFabriqTenantFromEntries(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Errorf("acme holds %d vectors after the refused batch, want 1", len(results))
+	}
+}
+
+// TestDeletesTakeTheTenantTheEngineSends deletes on a context with no Fabriq
+// tenant, the way the engine calls it: DeleteByMetadata scopes by the
+// filter's tenant_id and Delete by the weave tenant on ctx.
+func TestDeletesTakeTheTenantTheEngineSends(t *testing.T) {
+	s := fabriqvec.New(fabriqtest.NewWorld(registry.New()).Vector)
+	if err := s.Upsert(context.Background(), []vectorstore.Entry{
+		{ID: "a1", Vector: []float32{1, 0, 0}, Metadata: map[string]string{"tenant_id": "acme", "document_id": "d1"}},
+		{ID: "a2", Vector: []float32{1, 0, 0}, Metadata: map[string]string{"tenant_id": "acme", "document_id": "d2"}},
+		{ID: "g1", Vector: []float32{1, 0, 0}, Metadata: map[string]string{"tenant_id": "globex", "document_id": "d1"}},
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	ids := func(tenantID string) []string {
+		t.Helper()
+		res, err := s.Search(context.Background(), []float32{1, 0, 0}, &vectorstore.SearchOptions{TopK: 10, TenantKey: tenantID})
+		if err != nil {
+			t.Fatalf("Search %s: %v", tenantID, err)
+		}
+		out := make([]string, 0, len(res))
+		for _, r := range res {
+			out = append(out, r.ID)
+		}
+		return out
+	}
+
+	if err := s.DeleteByMetadata(context.Background(), map[string]string{"document_id": "d1"}); !errors.Is(err, weave.ErrTenantRequired) {
+		t.Errorf("DeleteByMetadata without tenant_id: %v, want ErrTenantRequired", err)
+	}
+	if err := s.DeleteByMetadata(context.Background(), map[string]string{"document_id": "d1", "tenant_id": "acme"}); err != nil {
+		t.Fatalf("DeleteByMetadata: %v", err)
+	}
+	if got := ids("acme"); len(got) != 1 || got[0] != "a2" {
+		t.Errorf("acme after DeleteByMetadata: %v, want [a2]", got)
+	}
+	if got := ids("globex"); len(got) != 1 || got[0] != "g1" {
+		t.Errorf("globex after acme's DeleteByMetadata: %v, want [g1]", got)
+	}
+
+	if err := s.Delete(context.Background(), []string{"a2"}); !errors.Is(err, weave.ErrTenantRequired) {
+		t.Errorf("Delete with no tenant on ctx: %v, want ErrTenantRequired", err)
+	}
+	if err := s.Delete(weave.WithTenant(context.Background(), "acme"), []string{"a2", "g1"}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if got := ids("acme"); len(got) != 0 {
+		t.Errorf("acme after Delete: %v, want none", got)
+	}
+	if got := ids("globex"); len(got) != 1 {
+		t.Errorf("globex after acme's Delete of g1: %v, want g1 kept", got)
 	}
 }

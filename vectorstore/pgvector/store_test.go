@@ -106,6 +106,9 @@ func TestStoreRefusesUnscopedCalls(t *testing.T) {
 	if err := pgvector.Migrate(ctx, db, 8); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	if _, set := pgvector.New(db).Describe().Params["dimensions"]; set {
+		t.Error("Describe without WithDimensions reports dimensions, want the key left out")
+	}
 	s := pgvector.New(db, pgvector.WithDimensions(8))
 	if err := s.Upsert(ctx, []vectorstore.Entry{{ID: "a", Vector: unit(0), Metadata: map[string]string{"tenant_id": "t1"}}}); err != nil {
 		t.Fatalf("upsert: %v", err)

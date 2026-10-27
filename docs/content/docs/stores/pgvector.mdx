@@ -35,7 +35,7 @@ You'll need pgvector 0.5.0 or later on the server, and 0.8.0 or later if small t
 
 ## Checking for pgvector first
 
-`Available(ctx, db)` tells you whether Weave can use pgvector on this database, without changing anything. It answers `true` when the `vector` extension is installed, or when it isn't yet but this role may create it. To find that out it runs `CREATE EXTENSION vector` in a transaction and always rolls it back.
+`Available(ctx, db)` tells you whether Weave can use pgvector on this database, without changing anything. It answers `true` when the `vector` extension is installed, or when it isn't yet but this role may create it. To find that out it runs `CREATE EXTENSION IF NOT EXISTS vector` in a transaction and always rolls it back.
 
 When the answer is `false`, `reason` is one sentence you can show an operator:
 
@@ -46,7 +46,7 @@ When the answer is `false`, `reason` is one sentence you can show an operator:
 | The installed or packaged version is older than 0.5.0 | the vector extension is version 0.4.4; weave needs 0.5.0 or later for HNSW indexes |
 | Anything else the server refuses | CREATE EXTENSION vector failed with SQLSTATE `<code>` |
 
-`err` is only for failing to ask, a dropped connection for example. A plain no always comes back with a nil `err`, so a host that treats knowledge as optional can call it at boot, keep the feature off with `reason` on screen, and still start.
+`err` is only for failing to ask: a dropped connection, a lock or statement timeout, a cancellation or a deadlock. A plain no always comes back with a nil `err`, so a host that treats knowledge as optional can call it at boot, keep the feature off with `reason` on screen, and still start. When replicas boot together, one may ask while another's `Migrate` is creating the extension. The probe loses that race, and `Available` reads the extension the other replica just committed and answers yes.
 
 ## Migrations
 
@@ -80,7 +80,9 @@ _, err = migrate.NewOrchestrator(pgmigrate.New(pgdriver.Unwrap(db)),
     postgres.Migrations, vectors, /* your own groups */).Migrate(ctx)
 ```
 
-Then call `pgvector.New(db, pgvector.WithDimensions(dims)).CheckDimensions(ctx)` yourself, for the reason in the next section.
+Add the group only when `Available` said yes. Its `CREATE EXTENSION` fails on a server without pgvector, or for a role that may not create it, and that failure stops the whole run, so the groups planned after it never apply. Then call `pgvector.New(db, pgvector.WithDimensions(dims)).CheckDimensions(ctx)` yourself, for the reason in the next section.
+
+The extension lands in the first schema on the role's `search_path` that exists, usually `public`.
 
 Replicas booting together on a fresh database race on Grove's own tracking tables, which Grove creates before it takes its lock. `Migrate` retries that race the same way the [PostgreSQL store](/docs/stores/postgres#migrations) does, up to five attempts with a short random pause.
 
@@ -89,7 +91,7 @@ Replicas booting together on a fresh database race on Grove's own tracking table
 A tracked migration runs once. If you change your embedding size after the table exists, the migration won't run again, and every insert would fail one by one. Weave refuses up front instead:
 
 - `Migrate` checks the live table after the run. A table made with another size is `weave.ErrDimensionMismatch`, and the message names both numbers (`weave_vectors.embedding has 1536 dimensions, want 3072`).
-- If `weave_vectors` was already there before the first run (you made it by hand from an older version of these docs, say), the migration reads its size right after the `CREATE TABLE IF NOT EXISTS`. A different size fails the migration and nothing is recorded, so it runs again once you've fixed the table.
+- If `weave_vectors` was already there before the first run (you made it by hand from an older version of these docs, say), the migration reads its size right after the `CREATE TABLE IF NOT EXISTS`. A different size fails the migration and nothing is recorded, so it runs again once you've fixed the table. The old docs also had you create an unnamed HNSW index (`weave_vectors_embedding_idx`). Drop it before you migrate, or the table ends up with two HNSW indexes, and building the second blocks writes while it runs.
 - `CheckDimensions(ctx)` does the same comparison on demand. It returns `weave.ErrDimensionMismatch`, or an error wrapping `weave.ErrNoVectorStore` when the table doesn't exist yet.
 
 To move to a new size you re-embed everything. Drop the table (or create a new one under another name with `WithTableName`), migrate with the new size and re-ingest.
@@ -104,7 +106,7 @@ On pgvector 0.8.0 and later, `Search` runs in a transaction that starts with `SE
 
 On 0.5.x to 0.7.x the search runs without it, and a small tenant in a large table may get short results. Upgrade the extension (`ALTER EXTENSION vector UPDATE`) if that's you.
 
-Postgres doesn't always use the HNSW index. For a tenant with only a handful of rows it often reads them through the `tenant_id` index and sorts, which is exact anyway.
+Postgres doesn't always use the HNSW index. For a tenant with only a handful of rows it often reads them through the `tenant_id` index and sorts, which is exact anyway. Don't count on that, though: after a few runs of the same prepared statement Postgres can switch to a generic plan that ignores how many rows the tenant really has. `hnsw.max_scan_tuples` is the setting that actually protects a tiny tenant in a huge table.
 
 ## Options
 
@@ -117,7 +119,7 @@ pgvector.New(db,
 
 Every statement uses the table `WithTableName` names, quoted as one identifier. The migration only ever creates `weave_vectors`, so a custom table is yours to create, with the same columns and indexes.
 
-`eng.Components()` reports the store as kind `pgvector`, with `table` and `dimensions` in its params.
+`eng.Components()` reports the store as kind `pgvector`, with `table` in its params, and `dimensions` when you set `WithDimensions`.
 
 ## Behaviour
 

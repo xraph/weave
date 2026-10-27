@@ -8,6 +8,10 @@ var (
 	VersionReason = versionReason
 )
 
+// ProbeAnswer exposes how Available sorts a failed probe into a reason or
+// an error.
+var ProbeAnswer = probeAnswer
+
 // SupportsIterativeScan reports whether pgvector version has
 // hnsw.iterative_scan.
 var SupportsIterativeScan = supportsIterativeScan

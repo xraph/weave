@@ -53,8 +53,8 @@ With the Weave Forge extension, pass it as `weaveext.WithEngineOption(fabriqvec.
 |--------------------|--------|
 | `Upsert(entries)` | One Fabriq `Upsert` per entry, under the Fabriq tenant the entry's `tenant_id` names. `Content` goes into the meta map under `content`, and `Metadata` sits alongside it. A batch with an entry lacking `metadata["tenant_id"]` is `ErrTenantRequired` and nothing is written. |
 | `Search(vec, opts)` | Fabriq `Similar` with `opts.Filter` as the metadata filter. `opts.TenantKey` is required (`ErrTenantRequired` without it) and sets Fabriq's tenant scope on the context. `MinScore` filters afterwards. `Content` and `Metadata` are rebuilt from the meta map. |
-| `Delete(ids)` | One Fabriq `Delete` per ID |
-| `DeleteByMetadata(filter)` | Fabriq `DeleteByMeta`, all key/value pairs must match. An empty filter is `ErrInvalidArgument` |
+| `Delete(ids)` | One Fabriq `Delete` per ID, under the context's weave tenant |
+| `DeleteByMetadata(filter)` | Fabriq `DeleteByMeta` under the filter's `tenant_id`, all key/value pairs must match. An empty filter is `ErrInvalidArgument`, one without `tenant_id` is `ErrTenantRequired` |
 
 Differences from the pgvector store:
 
@@ -65,7 +65,7 @@ Differences from the pgvector store:
 ## Requirements
 
 - A started Fabriq facade with its vector storage migrated, using Fabriq's own migrations.
-- Each upserted entry is written under the Fabriq tenant its `metadata["tenant_id"]` names, whatever Fabriq tenant is on the context. That tenant ID has to be one Fabriq accepts (letters, digits, `_` and `-`, up to 64), or the whole batch is refused. `Delete` and `DeleteByMetadata` still run in the caller's context, so call them inside the Fabriq tenant scope that holds the vectors.
+- Each upserted entry is written under the Fabriq tenant its `metadata["tenant_id"]` names, whatever Fabriq tenant is on the context. That tenant ID has to be one Fabriq accepts (letters, digits, `_` and `-`, up to 64), or the whole batch is refused. `DeleteByMetadata` runs under the Fabriq tenant its filter's `tenant_id` names, and a filter without one is `ErrTenantRequired`. `Delete` runs under the weave tenant on the context (`weave.WithTenant`), falling back to a Fabriq tenant already there, and is `ErrTenantRequired` with neither. The engine always sends both.
 
 ## Choosing a vector store
 

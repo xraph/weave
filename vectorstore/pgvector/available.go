@@ -26,31 +26,28 @@ const notInstalled = "the vector extension is not installed on this PostgreSQL s
 // ask (a connection error), never for "no". It changes nothing.
 //
 // To learn whether the role may create the extension, Available runs CREATE
-// EXTENSION vector inside a transaction it always rolls back, so a host can
-// call it at boot to decide whether to turn knowledge on without making
-// pgvector a requirement.
+// EXTENSION IF NOT EXISTS vector inside a transaction it always rolls back,
+// so a host can call it at boot to decide whether to turn knowledge on
+// without making pgvector a requirement. Replicas booting together may run
+// it while another replica's Migrate is creating the extension: the probe
+// then loses on pg_extension's unique index, and Available reads the
+// committed extension instead of reporting a refusal. A lock or statement
+// timeout, a cancellation or a deadlock is an error, not a reason.
 func Available(ctx context.Context, db *grove.DB) (ok bool, reason string, err error) {
 	pg, isPG := db.Driver().(*pgdriver.PgDB)
 	if !isPG {
 		return false, "the database is not PostgreSQL", nil
 	}
 
-	rows, err := pg.Query(ctx, `SELECT extversion FROM pg_extension WHERE extname = 'vector'`)
+	installed, found, err := installedVersion(ctx, pg)
 	if err != nil {
-		return false, "", fmt.Errorf("weave: read the vector extension version: %w", err)
-	}
-	installed, found, err := firstString(rows)
-	if err != nil {
-		return false, "", fmt.Errorf("weave: read the vector extension version: %w", err)
+		return false, "", err
 	}
 	if found {
-		if r := versionReason(installed); r != "" {
-			return false, r, nil
-		}
-		return true, "", nil
+		return versionAnswer(installed)
 	}
 
-	rows, err = pg.Query(ctx, `SELECT default_version FROM pg_available_extensions WHERE name = 'vector'`)
+	rows, err := pg.Query(ctx, `SELECT default_version FROM pg_available_extensions WHERE name = 'vector'`)
 	if err != nil {
 		return false, "", fmt.Errorf("weave: list available extensions: %w", err)
 	}
@@ -65,27 +62,90 @@ func Available(ctx context.Context, db *grove.DB) (ok bool, reason string, err e
 		return false, r, nil
 	}
 
-	return tryCreate(ctx, pg)
+	raced, err := tryCreate(ctx, pg)
+	if err != nil || !raced {
+		return probeAnswer(err)
+	}
+
+	// Another session created the extension while the probe ran. Its
+	// commit is visible now.
+	installed, found, err = installedVersion(ctx, pg)
+	if err != nil {
+		return false, "", err
+	}
+	if !found {
+		return false, "", errors.New("weave: probe the vector extension: another session was creating it; ask again")
+	}
+	return versionAnswer(installed)
 }
 
-// tryCreate runs CREATE EXTENSION vector on one transaction and rolls it
-// back whatever happens. A refusal from the server becomes a reason; a
-// failure to talk to it is an error.
-func tryCreate(ctx context.Context, pg *pgdriver.PgDB) (ok bool, reason string, err error) {
+// versionAnswer is Available's answer for an installed version.
+func versionAnswer(version string) (ok bool, reason string, err error) {
+	reason = versionReason(version)
+	return reason == "", reason, nil
+}
+
+// installedVersion reads the installed vector extension's version.
+func installedVersion(ctx context.Context, pg *pgdriver.PgDB) (version string, found bool, err error) {
+	rows, err := pg.Query(ctx, `SELECT extversion FROM pg_extension WHERE extname = 'vector'`)
+	if err != nil {
+		return "", false, fmt.Errorf("weave: read the vector extension version: %w", err)
+	}
+	version, found, err = firstString(rows)
+	if err != nil {
+		return "", false, fmt.Errorf("weave: read the vector extension version: %w", err)
+	}
+	return version, found, nil
+}
+
+// tryCreate runs CREATE EXTENSION IF NOT EXISTS vector on one transaction
+// and rolls it back whatever happens. raced is true when the create lost to
+// another session creating the extension at the same moment (23505, or
+// 42710); any other failure is returned as err for probeAnswer to sort.
+func tryCreate(ctx context.Context, pg *pgdriver.PgDB) (raced bool, err error) {
 	tx, err := pg.BeginTx(ctx, nil)
 	if err != nil {
-		return false, "", fmt.Errorf("weave: probe the vector extension: %w", err)
+		return false, fmt.Errorf("weave: probe the vector extension: %w", err)
 	}
 	defer rollback(tx)
 
-	if _, err = tx.Exec(ctx, `CREATE EXTENSION vector`); err != nil {
+	if _, err = tx.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) {
-			return false, reasonFor(pgErr), nil
+		if errors.As(err, &pgErr) && (pgErr.Code == "23505" || pgErr.Code == "42710") {
+			return true, nil
 		}
-		return false, "", fmt.Errorf("weave: probe the vector extension: %w", err)
+		return false, fmt.Errorf("weave: probe the vector extension: %w", err)
 	}
-	return true, "", nil
+	return false, nil
+}
+
+// probeAnswer turns the probe's outcome into Available's answer. A refusal
+// from the server becomes a reason. A failure to ask, which includes a
+// transient server error that says nothing about pgvector, is an error.
+func probeAnswer(err error) (ok bool, reason string, _ error) {
+	if err == nil {
+		return true, "", nil
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || isTransient(pgErr.Code) {
+		return false, "", err
+	}
+	return false, reasonFor(pgErr), nil
+}
+
+// isTransient reports a SQLSTATE that means the probe could not finish, not
+// that pgvector is unusable: a lost connection (class 08), a serialization
+// failure or deadlock (class 40), lock_not_available from lock_timeout
+// (55P03), and a cancellation, statement timeout or shutdown (class 57).
+func isTransient(code string) bool {
+	if code == "55P03" {
+		return true
+	}
+	switch code[:min(2, len(code))] {
+	case "08", "40", "57":
+		return true
+	}
+	return false
 }
 
 // reasonFor turns the server's refusal of CREATE EXTENSION vector into a
