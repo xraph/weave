@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
@@ -668,10 +669,28 @@ func (b *barrierEmbedder) Embed(ctx context.Context, texts []string) ([]embedder
 	return b.Hash.Embed(ctx, texts)
 }
 
+// ingestHooks counts the ingest start and end hooks it receives.
+type ingestHooks struct{ started, completed, failed atomic.Int64 }
+
+func (h *ingestHooks) Name() string { return "ingest-hooks" }
+func (h *ingestHooks) OnIngestStarted(context.Context, id.CollectionID, []*document.Document) error {
+	h.started.Add(1)
+	return nil
+}
+func (h *ingestHooks) OnIngestCompleted(context.Context, id.CollectionID, int, int, time.Duration) error {
+	h.completed.Add(1)
+	return nil
+}
+func (h *ingestHooks) OnIngestFailed(context.Context, id.CollectionID, error) error {
+	h.failed.Add(1)
+	return nil
+}
+
 func TestConcurrentClaimsLeaveOneSetOfVectors(t *testing.T) {
 	const n = 8
 	barrier := &barrierEmbedder{Hash: embedtest.New(256), n: n, all: make(chan struct{})}
-	r := newRig(t, withOpt(engine.WithEmbedder(barrier)))
+	hooks := &ingestHooks{}
+	r := newRig(t, withOpt(engine.WithEmbedder(barrier)), withOpt(engine.WithExtension(hooks)))
 	col := mustTestCollection(t, r.Engine, "docs")
 	stale := &document.Document{
 		Entity: weave.NewEntity(), ID: id.NewDocumentID(), CollectionID: col.ID, TenantID: "t1",
@@ -704,6 +723,9 @@ func TestConcurrentClaimsLeaveOneSetOfVectors(t *testing.T) {
 
 	if got := unchanged.Load(); got != n-1 {
 		t.Errorf("%d results Unchanged, want %d", got, n-1)
+	}
+	if started, ended := hooks.started.Load(), hooks.completed.Load()+hooks.failed.Load(); started != n || ended != started || hooks.failed.Load() != 0 {
+		t.Errorf("hooks: %d started, %d completed, %d failed; want %d started, each completed", started, hooks.completed.Load(), hooks.failed.Load(), n)
 	}
 	doc, err := r.Engine.GetDocument(tenantCtx("t1"), stale.ID)
 	if err != nil || doc.State != document.StateReady {
@@ -741,5 +763,69 @@ func TestKeyedIngestWritesNoStateBeforeTheSwap(t *testing.T) {
 	ingestSource(t, r.Engine, col.ID, "a", versionTwo)
 	if n := counting.updates.Load(); n != 0 {
 		t.Errorf("UpdateDocument: %d calls during keyed ingests, want 0", n)
+	}
+}
+
+func TestStorelessRetrieveOverTwoVersions(t *testing.T) {
+	vs := vsmemory.New()
+	e, err := engine.New(engine.WithVectorStore(vs), engine.WithEmbedder(embedtest.New(256)))
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	col := id.NewCollectionID().String()
+	emb, _ := embedtest.New(256).Embed(context.Background(), []string{versionOne, versionTwo})
+	entries := make([]vectorstore.Entry, 2)
+	for i, content := range []string{versionOne, versionTwo} {
+		entries[i] = vectorstore.Entry{ID: id.NewChunkID().String(), Vector: emb[i].Vector, Content: content, Metadata: map[string]string{
+			"tenant_id": "t1", "collection_id": col, "document_id": id.NewDocumentID().String(), "chunk_index": "0", "source_key": "a",
+		}}
+	}
+	// Another engine on the same vector store is mid-replace.
+	if err = vs.Upsert(tenantCtx("t1"), entries); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	hits, err := e.Retrieve(tenantCtx("t1"), versionOne, engine.WithTopK(10))
+	if err != nil {
+		t.Fatalf("retrieve without a store: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Errorf("retrieve without a store: %d hits, want both vectors as the vector side returned them", len(hits))
+	}
+	if _, err := e.RetrieveCompare(tenantCtx("t1"), versionOne, engine.CompareParams{TopK: 10}); err != nil {
+		t.Logf("compare without a store: %v", err)
+	}
+}
+
+// ambiguousStore is a memory store whose ReplaceSourceDocument commits and
+// then reports an error anyway, as a commit can whose reply is lost.
+type ambiguousStore struct{ *memory.Store }
+
+func (a ambiguousStore) ReplaceSourceDocument(ctx context.Context, doc *document.Document, chunks []*chunk.Chunk) ([]id.DocumentID, error) {
+	if _, err := a.Store.ReplaceSourceDocument(ctx, doc, chunks); err != nil {
+		return nil, err
+	}
+	return nil, errors.New("connection reset after commit")
+}
+
+func TestAmbiguousSwapKeepsTheReadyVersionsVectors(t *testing.T) {
+	r := newRig(t, func(r *testRig) engine.Option { return engine.WithStore(ambiguousStore{r.Store}) })
+	col := mustTestCollection(t, r.Engine, "docs")
+
+	res, err := r.Engine.Ingest(tenantCtx("t1"), &engine.IngestInput{CollectionID: col.ID, SourceKey: "a", Content: versionOne})
+	if err != nil {
+		t.Fatalf("ingest through a swap that committed: %v", err)
+	}
+	doc, err := r.Engine.GetDocument(tenantCtx("t1"), res.DocumentID)
+	if err != nil || doc.State != document.StateReady {
+		t.Fatalf("document: %+v, %v; want ready", doc, err)
+	}
+	if v := vectorsOf(t, r.Vectors, map[string]string{"document_id": doc.ID.String()}); len(v) != doc.ChunkCount || len(v) == 0 {
+		t.Errorf("vectors of the ready document: %d, want %d", len(v), doc.ChunkCount)
+	}
+	for _, d := range retrieveDocs(t, r.Engine, col.ID) {
+		if d != doc.ID.String() {
+			t.Errorf("retrieve: hit from %s, want %s", d, doc.ID)
+		}
 	}
 }

@@ -128,26 +128,26 @@ func (e *Engine) ingestSource(ctx context.Context, span trace.Span, tenant strin
 		processing := *doc
 		processing.State = document.StateProcessing
 		if err = e.store.UpdateDocument(ctx, &processing); err != nil {
-			return e.failSource(ctx, tenant, doc, owner, nil, fmt.Errorf("mark processing: %w", err))
+			return e.failSource(ctx, start, tenant, doc, owner, nil, fmt.Errorf("mark processing: %w", err))
 		}
 		doc = &processing
 	}
 
 	chunks, entries, err := e.embedChunks(ctx, span, col, doc, input)
 	if err != nil {
-		return e.failSource(ctx, tenant, doc, owner, nil, err)
+		return e.failSource(ctx, start, tenant, doc, owner, nil, err)
 	}
 
 	// The vectors go in before the chunk rows. Until the swap below they
 	// have no rows, so retrieval drops them (see hydrateHit).
 	if err = e.upsertVectors(ctx, entries); err != nil {
-		return e.failSource(ctx, tenant, doc, owner, entries, fmt.Errorf("upsert vectors: %w", err))
+		return e.failSource(ctx, start, tenant, doc, owner, entries, fmt.Errorf("upsert vectors: %w", err))
 	}
 
 	swap := *doc
 	superseded, err := e.store.ReplaceSourceDocument(ctx, &swap, chunks)
 	if err != nil {
-		return e.failSource(ctx, tenant, doc, owner, entries, fmt.Errorf("replace source document: %w", err))
+		return e.failSource(ctx, start, tenant, doc, owner, entries, fmt.Errorf("replace source document: %w", err))
 	}
 
 	// The superseded versions have no chunk rows left, so their vectors are
@@ -171,29 +171,54 @@ func (e *Engine) ingestSource(ctx context.Context, span trace.Span, tenant strin
 	}, nil
 }
 
-// failSource ends a keyed ingest attempt that failed with cause. It runs on
-// a context the request's cancellation can't stop, so a client that gives
-// up mid-embed still leaves the document failed and its vectors gone, and a
-// retry of the same content embeds again. It deletes the vectors this
-// attempt wrote, by their own IDs, since another attempt at the same
-// document may have written some too. When another attempt has made the
-// document ready meanwhile, the content is indexed and the answer is
-// Unchanged. Otherwise the owner (the attempt that created the document)
-// marks it failed through failIngest; a claimer leaves its state alone, so
-// it never writes failed over a version another attempt is finishing.
-func (e *Engine) failSource(ctx context.Context, tenant string, doc *document.Document, owner bool, entries []vectorstore.Entry, cause error) (*IngestResult, error) {
+// failSource ends a keyed ingest attempt that started at start and failed
+// with cause. It runs on a context the request's cancellation can't stop,
+// so a client that gives up mid-embed still leaves the document failed and
+// its vectors gone, and a retry of the same content embeds again.
+//
+// It reads the document back before it deletes anything. When the document
+// is ready, the content is indexed and the answer is Unchanged, with the
+// completion hook fired to match the start this attempt fired. If the ready
+// rows are this attempt's own chunks (a swap that committed but reported an
+// error), its vectors are the document's and stay; otherwise another
+// attempt won, and the vectors this one wrote are deleted by their own IDs,
+// since attempts on one document share its document ID. A document that
+// isn't ready loses this attempt's vectors, and the owner (the attempt that
+// created it) marks it failed through failIngest; a claimer leaves its
+// state alone, so it never writes failed over a version another attempt is
+// finishing.
+func (e *Engine) failSource(ctx context.Context, start time.Time, tenant string, doc *document.Document, owner bool, entries []vectorstore.Entry, cause error) (*IngestResult, error) {
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
-	e.dropAttemptVectors(cleanup, entries)
 
 	if now, err := e.getDocument(cleanup, tenant, doc.ID); err == nil && now.State == document.StateReady {
+		if !e.attemptCommitted(cleanup, tenant, entries) {
+			e.dropAttemptVectors(cleanup, entries)
+		}
+		e.extensions.EmitIngestCompleted(ctx, doc.CollectionID, 1, now.ChunkCount, time.Since(start))
 		return unchanged(now), nil
 	}
+	e.dropAttemptVectors(cleanup, entries)
 	if owner {
 		return e.failIngest(ctx, doc, doc.CollectionID, cause)
 	}
 	e.extensions.EmitIngestFailed(ctx, doc.CollectionID, cause)
 	return &IngestResult{DocumentID: doc.ID, State: doc.State}, fmt.Errorf("weave: ingest failed: %w", cause)
+}
+
+// attemptCommitted reports whether the chunk rows of this attempt's vectors
+// exist, which means its swap went through. The swap writes every row or
+// none, so the first entry answers for all of them.
+func (e *Engine) attemptCommitted(ctx context.Context, tenant string, entries []vectorstore.Entry) bool {
+	if len(entries) == 0 {
+		return false
+	}
+	chunkID, err := id.ParseChunkID(entries[0].ID)
+	if err != nil {
+		return false
+	}
+	row, err := e.store.GetChunk(ctx, chunkID)
+	return err == nil && row.TenantID == tenant
 }
 
 // sameContent returns the document in docs with hash, or nil. A collection
@@ -361,8 +386,14 @@ func chunkSource(ch *chunk.Chunk) (ref sourceRef, docID string, ok bool) {
 
 // currentVersions returns a filter over chunks that, for each source whose
 // chunks come from more than one document, keeps only the chunks of the
-// current version. The store is read only for such contested sources.
+// current version. The store is read only for such contested sources, and
+// an engine without one keeps every chunk.
 func (e *Engine) currentVersions(ctx context.Context, tenant string, chunks []*chunk.Chunk) (func(*chunk.Chunk) bool, error) {
+	if e.store == nil {
+		// Without a metadata store there is no version to read, and no row
+		// either, so hits pass through as the vector side returned them.
+		return func(*chunk.Chunk) bool { return true }, nil
+	}
 	versions := map[sourceRef][]string{}
 	for _, ch := range chunks {
 		ref, docID, ok := chunkSource(ch)
