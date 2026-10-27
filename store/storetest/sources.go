@@ -154,7 +154,10 @@ func testSourceReplace(t *testing.T, s store.Store) {
 // testSourceReplaceRefuses pins what ReplaceSourceDocument turns away, each
 // before it writes anything: a document that isn't processing
 // (ErrInvalidState), another tenant's document (ErrDocumentNotFound, as for
-// an unknown ID) and a document with no source key (ErrInvalidArgument).
+// an unknown ID), a document whose stored collection differs from the one
+// passed (ErrDocumentNotFound), a stored source key that differs from the
+// one passed (ErrInvalidArgument) and a document with no source key
+// (ErrInvalidArgument).
 func testSourceReplaceRefuses(t *testing.T, s store.Store) {
 	t1 := as("t1")
 	col := mustCollection(t, s, "refuses", "t1")
@@ -203,6 +206,29 @@ func testSourceReplaceRefuses(t *testing.T, s store.Store) {
 	}, nil); !errors.Is(err, weave.ErrDocumentNotFound) {
 		t.Errorf("replace an unknown document: got %v, want ErrDocumentNotFound", err)
 	}
+
+	// A processing version whose copy names another of the tenant's
+	// collections is not found there, and one whose copy names another
+	// source key is refused, both before anything is written: the stored
+	// row decides, not the struct the caller passes.
+	const key = "docs/v2.md"
+	live := mustSourceDocument(t, s, col, key, document.StateProcessing)
+	liveChunks := chunksFor(live, 2)
+	mustReplace(t, s, live, liveChunks)
+	v2 := mustSourceDocument(t, s, col, key, document.StateProcessing)
+	other := mustCollection(t, s, "refuses-other", "t1")
+	moved := *v2
+	moved.CollectionID = other.ID
+	if _, err := s.ReplaceSourceDocument(t1, &moved, chunksFor(&moved, 1)); !errors.Is(err, weave.ErrDocumentNotFound) {
+		t.Errorf("replace with the document moved to another collection: got %v, want ErrDocumentNotFound", err)
+	}
+	rekeyed := *v2
+	rekeyed.SourceKey = "docs/other.md"
+	if _, err := s.ReplaceSourceDocument(t1, &rekeyed, chunksFor(&rekeyed, 1)); !errors.Is(err, weave.ErrInvalidArgument) {
+		t.Errorf("replace with another source key: got %v, want ErrInvalidArgument", err)
+	}
+	assertDocument(t, s, "t1", v2.ID, document.StateProcessing, nil)
+	assertDocument(t, s, "t1", live.ID, document.StateReady, liveChunks)
 
 	// A document with no source key is not source-managed.
 	plain := mustDocument(t, s, col, "plain", document.StateProcessing)
