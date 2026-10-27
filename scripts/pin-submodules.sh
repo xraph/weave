@@ -40,10 +40,15 @@ for mod in "${SUBMODULES[@]}"; do
 done
 
 # A require the proxy cannot resolve is the whole failure this guards
-# against, so fail loudly rather than tagging something broken.
+# against, so fail loudly rather than tagging something broken. Read the
+# result back the way the go command does: every sub-module must require the
+# root exactly once, at exactly VERSION. That also catches a go.mod with no
+# require to pin, which the loop above passes over without a word.
 for mod in "${SUBMODULES[@]}"; do
-	if grep -n "github.com/xraph/weave v0\.0\.0" "$mod/go.mod"; then
-		echo "error: $mod still requires v0.0.0" >&2
+	got=$(go mod edit -json "$mod/go.mod" \
+		| jq -r '[.Require[]? | select(.Path == "github.com/xraph/weave") | .Version] | join(" ")')
+	if [ "$got" != "$VERSION" ]; then
+		echo "error: $mod/go.mod requires github.com/xraph/weave at '${got:-nothing}', want $VERSION" >&2
 		exit 1
 	fi
 done
