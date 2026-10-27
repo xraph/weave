@@ -12,3 +12,13 @@ func PlantDocument(ctx context.Context, s *Store, doc *document.Document) error 
 	_, err := s.sdb.NewInsert(documentToModel(doc)).Exec(ctx)
 	return err
 }
+
+// BeginWrite opens a store write transaction and returns the function that
+// rolls it back.
+func BeginWrite(ctx context.Context, s *Store) (func(), error) {
+	tx, err := s.beginWrite(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return func() { rollback(tx) }, nil
+}

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"sync"
 	"time"
 
 	"github.com/xraph/grove"
@@ -28,15 +27,25 @@ var _ store.Store = (*Store)(nil)
 
 // Store is a SQLite implementation of the composite Weave store
 // using Grove ORM with the sqlitedriver backend.
+//
+// SQLite lets one writer in at a time. Every write the store makes runs in a
+// transaction that takes the write lock with its first statement and waits
+// up to five seconds for it (see beginWrite), so concurrent writers in one
+// process, or in several processes sharing the file, queue instead of
+// failing with SQLITE_BUSY.
 type Store struct {
 	db  *grove.DB
 	sdb *sqlitedriver.SqliteDB
-
-	// replaceMu serialises ReplaceSourceDocument, TouchDocument and
-	// FailDocument within this process, so concurrent claims of one document
-	// queue instead of failing with SQLITE_BUSY.
-	replaceMu sync.Mutex
 }
+
+// busyTimeoutPragma makes the connection wait up to five seconds for the
+// write lock instead of failing at once with SQLITE_BUSY.
+const busyTimeoutPragma = "PRAGMA busy_timeout = 5000"
+
+// takeWriteLock changes no row, but as a write statement it takes SQLite's
+// write lock, so a transaction that runs it first behaves as BEGIN
+// IMMEDIATE does.
+const takeWriteLock = "UPDATE weave_documents SET id = id WHERE 0"
 
 // New creates a new SQLite store backed by Grove ORM.
 func New(db *grove.DB) *Store {
@@ -85,14 +94,15 @@ func (s *Store) CreateCollection(ctx context.Context, col *collection.Collection
 	col.UpdatedAt = now
 	m := collectionToModel(col)
 
-	_, err := s.sdb.NewInsert(m).Exec(ctx)
-	if err != nil {
-		if isUniqueViolation(err) {
-			return fmt.Errorf("weave: create collection: %w", weave.ErrCollectionAlreadyExists)
+	return s.inWriteTx(ctx, "create collection", func(tx *sqlitedriver.SqliteTx) error {
+		if _, err := tx.NewInsert(m).Exec(ctx); err != nil {
+			if isUniqueViolation(err) {
+				return fmt.Errorf("weave: create collection: %w", weave.ErrCollectionAlreadyExists)
+			}
+			return fmt.Errorf("weave: create collection: %w", err)
 		}
-		return fmt.Errorf("weave: create collection: %w", err)
-	}
-	return nil
+		return nil
+	})
 }
 
 func (s *Store) GetCollection(ctx context.Context, colID id.CollectionID) (*collection.Collection, error) {
@@ -141,21 +151,23 @@ func (s *Store) UpdateCollection(ctx context.Context, col *collection.Collection
 	col.UpdatedAt = time.Now().UTC()
 	m := collectionToModel(col)
 
-	res, err := s.sdb.NewUpdate(m).WherePK().Where("tenant_id = ?", tenant).Exec(ctx)
-	if err != nil {
-		if isUniqueViolation(err) {
-			return fmt.Errorf("weave: update collection: %w", weave.ErrCollectionAlreadyExists)
+	return s.inWriteTx(ctx, "update collection", func(tx *sqlitedriver.SqliteTx) error {
+		res, execErr := tx.NewUpdate(m).WherePK().Where("tenant_id = ?", tenant).Exec(ctx)
+		if execErr != nil {
+			if isUniqueViolation(execErr) {
+				return fmt.Errorf("weave: update collection: %w", weave.ErrCollectionAlreadyExists)
+			}
+			return fmt.Errorf("weave: update collection: %w", execErr)
 		}
-		return fmt.Errorf("weave: update collection: %w", err)
-	}
-	n, rowsErr := res.RowsAffected()
-	if rowsErr != nil {
-		return fmt.Errorf("weave: update collection rows affected: %w", rowsErr)
-	}
-	if n == 0 {
-		return weave.ErrCollectionNotFound
-	}
-	return nil
+		n, rowsErr := res.RowsAffected()
+		if rowsErr != nil {
+			return fmt.Errorf("weave: update collection rows affected: %w", rowsErr)
+		}
+		if n == 0 {
+			return weave.ErrCollectionNotFound
+		}
+		return nil
+	})
 }
 
 func (s *Store) DeleteCollection(ctx context.Context, colID id.CollectionID) error {
@@ -163,21 +175,23 @@ func (s *Store) DeleteCollection(ctx context.Context, colID id.CollectionID) err
 	if err != nil {
 		return err
 	}
-	res, err := s.sdb.NewDelete((*collectionModel)(nil)).
-		Where("id = ?", colID.String()).
-		Where("tenant_id = ?", tenant).
-		Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("weave: delete collection: %w", err)
-	}
-	n, rowsErr := res.RowsAffected()
-	if rowsErr != nil {
-		return fmt.Errorf("weave: delete collection rows affected: %w", rowsErr)
-	}
-	if n == 0 {
-		return weave.ErrCollectionNotFound
-	}
-	return nil
+	return s.inWriteTx(ctx, "delete collection", func(tx *sqlitedriver.SqliteTx) error {
+		res, execErr := tx.NewDelete((*collectionModel)(nil)).
+			Where("id = ?", colID.String()).
+			Where("tenant_id = ?", tenant).
+			Exec(ctx)
+		if execErr != nil {
+			return fmt.Errorf("weave: delete collection: %w", execErr)
+		}
+		n, rowsErr := res.RowsAffected()
+		if rowsErr != nil {
+			return fmt.Errorf("weave: delete collection rows affected: %w", rowsErr)
+		}
+		if n == 0 {
+			return weave.ErrCollectionNotFound
+		}
+		return nil
+	})
 }
 
 func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilter) ([]*collection.Collection, error) {
@@ -250,7 +264,7 @@ func (s *Store) CreateDocument(ctx context.Context, doc *document.Document) erro
 
 	// The collection is checked in the same transaction as the insert, so a
 	// document never hangs off another tenant's collection.
-	tx, err := s.sdb.BeginTxQuery(ctx, nil)
+	tx, err := s.beginWrite(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: create document: %w", err)
 	}
@@ -304,21 +318,23 @@ func (s *Store) UpdateDocument(ctx context.Context, doc *document.Document) erro
 	doc.UpdatedAt = time.Now().UTC()
 	m := documentToModel(doc)
 
-	res, err := s.sdb.NewUpdate(m).WherePK().
-		Where("tenant_id = ?", tenant).
-		Where("collection_id = ?", doc.CollectionID.String()).
-		Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("weave: update document: %w", err)
-	}
-	n, rowsErr := res.RowsAffected()
-	if rowsErr != nil {
-		return fmt.Errorf("weave: update document rows affected: %w", rowsErr)
-	}
-	if n == 0 {
-		return weave.ErrDocumentNotFound
-	}
-	return nil
+	return s.inWriteTx(ctx, "update document", func(tx *sqlitedriver.SqliteTx) error {
+		res, execErr := tx.NewUpdate(m).WherePK().
+			Where("tenant_id = ?", tenant).
+			Where("collection_id = ?", doc.CollectionID.String()).
+			Exec(ctx)
+		if execErr != nil {
+			return fmt.Errorf("weave: update document: %w", execErr)
+		}
+		n, rowsErr := res.RowsAffected()
+		if rowsErr != nil {
+			return fmt.Errorf("weave: update document rows affected: %w", rowsErr)
+		}
+		if n == 0 {
+			return weave.ErrDocumentNotFound
+		}
+		return nil
+	})
 }
 
 func (s *Store) DeleteDocument(ctx context.Context, docID id.DocumentID) error {
@@ -326,21 +342,23 @@ func (s *Store) DeleteDocument(ctx context.Context, docID id.DocumentID) error {
 	if err != nil {
 		return err
 	}
-	res, err := s.sdb.NewDelete((*documentModel)(nil)).
-		Where("id = ?", docID.String()).
-		Where("tenant_id = ?", tenant).
-		Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("weave: delete document: %w", err)
-	}
-	n, rowsErr := res.RowsAffected()
-	if rowsErr != nil {
-		return fmt.Errorf("weave: delete document rows affected: %w", rowsErr)
-	}
-	if n == 0 {
-		return weave.ErrDocumentNotFound
-	}
-	return nil
+	return s.inWriteTx(ctx, "delete document", func(tx *sqlitedriver.SqliteTx) error {
+		res, execErr := tx.NewDelete((*documentModel)(nil)).
+			Where("id = ?", docID.String()).
+			Where("tenant_id = ?", tenant).
+			Exec(ctx)
+		if execErr != nil {
+			return fmt.Errorf("weave: delete document: %w", execErr)
+		}
+		n, rowsErr := res.RowsAffected()
+		if rowsErr != nil {
+			return fmt.Errorf("weave: delete document rows affected: %w", rowsErr)
+		}
+		if n == 0 {
+			return weave.ErrDocumentNotFound
+		}
+		return nil
+	})
 }
 
 func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) ([]*document.Document, error) {
@@ -420,14 +438,16 @@ func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.Collec
 	if err != nil {
 		return err
 	}
-	_, err = s.sdb.NewDelete((*documentModel)(nil)).
-		Where("collection_id = ?", colID.String()).
-		Where("tenant_id = ?", tenant).
-		Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("weave: delete documents by collection: %w", err)
-	}
-	return nil
+	return s.inWriteTx(ctx, "delete documents by collection", func(tx *sqlitedriver.SqliteTx) error {
+		_, execErr := tx.NewDelete((*documentModel)(nil)).
+			Where("collection_id = ?", colID.String()).
+			Where("tenant_id = ?", tenant).
+			Exec(ctx)
+		if execErr != nil {
+			return fmt.Errorf("weave: delete documents by collection: %w", execErr)
+		}
+		return nil
+	})
 }
 
 // TouchDocument records an ingest's heartbeat with one guarded UPDATE, so
@@ -437,8 +457,10 @@ func (s *Store) TouchDocument(ctx context.Context, docID id.DocumentID, staleBef
 	if err != nil {
 		return err
 	}
-	q := s.sdb.NewUpdate((*documentModel)(nil)).Set("state = ?", string(document.StateProcessing))
-	return s.transition(ctx, "touch document", tenant, docID, staleBefore, q)
+	set := func(q *sqlitedriver.UpdateQuery) *sqlitedriver.UpdateQuery {
+		return q.Set("state = ?", string(document.StateProcessing))
+	}
+	return s.transition(ctx, "touch document", tenant, docID, staleBefore, set)
 }
 
 // FailDocument marks a pending or processing document failed with one
@@ -448,48 +470,50 @@ func (s *Store) FailDocument(ctx context.Context, docID id.DocumentID, errText s
 	if err != nil {
 		return err
 	}
-	q := s.sdb.NewUpdate((*documentModel)(nil)).
-		Set("state = ?", string(document.StateFailed)).
-		Set("error = ?", errText)
-	return s.transition(ctx, "fail document", tenant, docID, staleBefore, q)
+	set := func(q *sqlitedriver.UpdateQuery) *sqlitedriver.UpdateQuery {
+		return q.Set("state = ?", string(document.StateFailed)).Set("error = ?", errText)
+	}
+	return s.transition(ctx, "fail document", tenant, docID, staleBefore, set)
 }
 
-// transition runs q, an UPDATE that already sets the new state, on docID
-// within tenant, but only while the row is pending or processing and, when
+// transition runs an UPDATE of docID within tenant, with set adding the new
+// state, but only while the row is pending or processing and, when
 // staleBefore is set, last updated before it. When no row matches, it reads
-// the row to tell a missing document from one in the wrong state.
-func (s *Store) transition(ctx context.Context, op, tenant string, docID id.DocumentID, staleBefore time.Time, q *sqlitedriver.UpdateQuery) error {
-	q = q.Set("updated_at = ?", time.Now().UTC()).
-		Where("id = ?", docID.String()).
-		Where("tenant_id = ?", tenant).
-		Where("state IN (?, ?)", string(document.StatePending), string(document.StateProcessing))
-	if !staleBefore.IsZero() {
-		q = q.Where("updated_at < ?", staleBefore.UTC())
-	}
-	s.replaceMu.Lock()
-	defer s.replaceMu.Unlock()
-	res, err := q.Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("weave: %s: %w", op, err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("weave: %s rows affected: %w", op, err)
-	}
-	if n > 0 {
-		return nil
-	}
-	stored := new(documentModel)
-	err = s.sdb.NewSelect(stored).Where("id = ?", docID.String()).Where("tenant_id = ?", tenant).Scan(ctx)
-	switch {
-	case err != nil && isNoRows(err):
-		return weave.ErrDocumentNotFound
-	case err != nil:
-		return fmt.Errorf("weave: %s: %w", op, err)
-	case stored.State != string(document.StatePending) && stored.State != string(document.StateProcessing):
-		return fmt.Errorf("%w: document is %s", weave.ErrInvalidState, stored.State)
-	}
-	return fmt.Errorf("%w: document was updated since it stalled", weave.ErrInvalidState)
+// the row in the same transaction to tell a missing document from one in the
+// wrong state.
+func (s *Store) transition(ctx context.Context, op, tenant string, docID id.DocumentID, staleBefore time.Time, set func(*sqlitedriver.UpdateQuery) *sqlitedriver.UpdateQuery) error {
+	return s.inWriteTx(ctx, op, func(tx *sqlitedriver.SqliteTx) error {
+		q := set(tx.NewUpdate((*documentModel)(nil))).
+			Set("updated_at = ?", time.Now().UTC()).
+			Where("id = ?", docID.String()).
+			Where("tenant_id = ?", tenant).
+			Where("state IN (?, ?)", string(document.StatePending), string(document.StateProcessing))
+		if !staleBefore.IsZero() {
+			q = q.Where("updated_at < ?", staleBefore.UTC())
+		}
+		res, err := q.Exec(ctx)
+		if err != nil {
+			return fmt.Errorf("weave: %s: %w", op, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("weave: %s rows affected: %w", op, err)
+		}
+		if n > 0 {
+			return nil
+		}
+		stored := new(documentModel)
+		err = tx.NewSelect(stored).Where("id = ?", docID.String()).Where("tenant_id = ?", tenant).Scan(ctx)
+		switch {
+		case err != nil && isNoRows(err):
+			return weave.ErrDocumentNotFound
+		case err != nil:
+			return fmt.Errorf("weave: %s: %w", op, err)
+		case stored.State != string(document.StatePending) && stored.State != string(document.StateProcessing):
+			return fmt.Errorf("%w: document is %s", weave.ErrInvalidState, stored.State)
+		}
+		return fmt.Errorf("%w: document was updated since it stalled", weave.ErrInvalidState)
+	})
 }
 
 // ListStalledDocuments reads across tenants on the (state, updated_at)
@@ -535,11 +559,10 @@ func (s *Store) CountStalledUntenanted(ctx context.Context, before time.Time) (i
 	return n, nil
 }
 
-// ReplaceSourceDocument runs in one transaction. SQLite lets one writer in
-// at a time, and the store's replace mutex keeps this process's replaces
-// from opening competing write transactions, so concurrent replaces of one
-// source run one after another. Every refusal happens before the first
-// write; any later failure rolls the whole replace back.
+// ReplaceSourceDocument runs in one write transaction from beginWrite.
+// SQLite lets one writer in at a time, so concurrent replaces of one source
+// run one after another. Every refusal happens before the first write; any
+// later failure rolls the whole replace back.
 func (s *Store) ReplaceSourceDocument(ctx context.Context, doc *document.Document, chunks []*chunk.Chunk) ([]id.DocumentID, error) {
 	tenant, err := tenancy.SourceReplace(ctx, doc, chunks)
 	if err != nil {
@@ -553,9 +576,7 @@ func (s *Store) ReplaceSourceDocument(ctx context.Context, doc *document.Documen
 	}
 	colID := doc.CollectionID.String()
 
-	s.replaceMu.Lock()
-	defer s.replaceMu.Unlock()
-	tx, err := s.sdb.BeginTxQuery(ctx, nil)
+	tx, err := s.beginWrite(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("weave: replace source document: %w", err)
 	}
@@ -690,7 +711,7 @@ func (s *Store) CreateChunkBatch(ctx context.Context, chunks []*chunk.Chunk) err
 	// Every chunk's document is checked in the same transaction as the
 	// insert: it must belong to the context tenant and sit in the chunk's
 	// collection.
-	tx, err := s.sdb.BeginTxQuery(ctx, nil)
+	tx, err := s.beginWrite(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: create chunk batch: %w", err)
 	}
@@ -739,6 +760,47 @@ func checkChunkParents(ctx context.Context, tx *sqlitedriver.SqliteTx, tenant st
 // rollback ends tx when it was not committed. After Commit it does nothing.
 func rollback(tx interface{ Rollback() error }) {
 	_ = tx.Rollback() //nolint:errcheck // nothing to undo after Commit; a failed rollback leaves the server to drop the transaction
+}
+
+// beginWrite opens a write transaction that holds SQLite's write lock from
+// its first statement, as BEGIN IMMEDIATE does, waiting for it under the
+// busy timeout. A deferred transaction that reads first can only fail when
+// it later tries to write after another writer committed (SQLITE_BUSY_SNAPSHOT),
+// and the busy timeout never helps it. grove's driver opens transactions
+// with a plain BEGIN and the store doesn't own the DSN, so the timeout and
+// the lock are set here, on the transaction's own connection.
+func (s *Store) beginWrite(ctx context.Context) (*sqlitedriver.SqliteTx, error) {
+	tx, err := s.sdb.BeginTxQuery(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = tx.NewRaw(busyTimeoutPragma).Exec(ctx); err != nil {
+		rollback(tx)
+		return nil, err
+	}
+	if _, err = tx.NewRaw(takeWriteLock).Exec(ctx); err != nil {
+		rollback(tx)
+		return nil, err
+	}
+	return tx, nil
+}
+
+// inWriteTx runs fn in a transaction from beginWrite and commits it when fn
+// returns nil. Errors from fn come back as they are; a failure to begin or
+// commit is wrapped with op.
+func (s *Store) inWriteTx(ctx context.Context, op string, fn func(tx *sqlitedriver.SqliteTx) error) error {
+	tx, err := s.beginWrite(ctx)
+	if err != nil {
+		return fmt.Errorf("weave: %s: %w", op, err)
+	}
+	defer rollback(tx)
+	if fnErr := fn(tx); fnErr != nil {
+		return fnErr
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("weave: %s: %w", op, err)
+	}
+	return nil
 }
 
 func (s *Store) GetChunk(ctx context.Context, chunkID id.ChunkID) (*chunk.Chunk, error) {
@@ -818,14 +880,16 @@ func (s *Store) DeleteChunksByDocument(ctx context.Context, docID id.DocumentID)
 	if err != nil {
 		return err
 	}
-	_, err = s.sdb.NewDelete((*chunkModel)(nil)).
-		Where("document_id = ?", docID.String()).
-		Where("tenant_id = ?", tenant).
-		Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("weave: delete chunks by document: %w", err)
-	}
-	return nil
+	return s.inWriteTx(ctx, "delete chunks by document", func(tx *sqlitedriver.SqliteTx) error {
+		_, execErr := tx.NewDelete((*chunkModel)(nil)).
+			Where("document_id = ?", docID.String()).
+			Where("tenant_id = ?", tenant).
+			Exec(ctx)
+		if execErr != nil {
+			return fmt.Errorf("weave: delete chunks by document: %w", execErr)
+		}
+		return nil
+	})
 }
 
 func (s *Store) DeleteChunksByCollection(ctx context.Context, colID id.CollectionID) error {
@@ -833,14 +897,16 @@ func (s *Store) DeleteChunksByCollection(ctx context.Context, colID id.Collectio
 	if err != nil {
 		return err
 	}
-	_, err = s.sdb.NewDelete((*chunkModel)(nil)).
-		Where("collection_id = ?", colID.String()).
-		Where("tenant_id = ?", tenant).
-		Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("weave: delete chunks by collection: %w", err)
-	}
-	return nil
+	return s.inWriteTx(ctx, "delete chunks by collection", func(tx *sqlitedriver.SqliteTx) error {
+		_, execErr := tx.NewDelete((*chunkModel)(nil)).
+			Where("collection_id = ?", colID.String()).
+			Where("tenant_id = ?", tenant).
+			Exec(ctx)
+		if execErr != nil {
+			return fmt.Errorf("weave: delete chunks by collection: %w", execErr)
+		}
+		return nil
+	})
 }
 
 func (s *Store) CountChunks(ctx context.Context, filter *chunk.CountFilter) (int64, error) {
