@@ -199,6 +199,14 @@ things that were wrong, and that the templ pages had been hiding.
   `tenant` in the request can only repeat the resolved one. Another tenant's ID
   is not found, and ingest into another tenant's collection writes nothing. The
   Overview's `scope` reads `"tenant"` now.
+- Route registration errors used to vanish. The API threw away the error from
+  every route it registered, so a route forge refused just didn't exist, and you
+  found out from a 404. `api.API.RegisterRoutes` and `Extension.RegisterRoutes`
+  now return an `error` naming each refused route, and `Extension.Register`
+  fails with it. Check it wherever you call them yourself. A call written as a
+  bare statement still compiles, but it drops the error, which is the old
+  behaviour. `api.API.Handler()` has no error to return, so it panics when a
+  route fails to register.
 
 One finding carries into the open list below: `pipeline/steps.go` omits
 `tenant_id` from the vector metadata for untenanted rows.
