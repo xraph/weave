@@ -29,6 +29,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunker"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/embedder"
@@ -38,7 +39,8 @@ import (
 )
 
 func main() {
-	ctx := context.Background()
+	// Every call runs inside a tenant, so put one on the context first.
+	ctx := weave.WithTenant(context.Background(), "acme")
 
 	eng, err := engine.New(
 		engine.WithStore(memory.New()),
@@ -103,11 +105,13 @@ A RAG feature looks small until you build it: you need a chunking strategy, an e
 | --- | --- |
 | Text out of files | Loaders for plain text, Markdown, HTML, CSV, JSON, URLs and whole directories |
 | Chunks that fit an embedding model | Recursive, fixed-size, sliding-window, sentence-based semantic and code-aware chunkers, with size and overlap per collection |
-| Embeddings | An OpenAI embedder (any OpenAI-compatible endpoint through `WithOpenAIBaseURL`), or your own `embedder.Embedder` |
-| Vector search | In-memory, PostgreSQL with pgvector, or [Fabriq](https://github.com/xraph/fabriq)'s vector plane |
+| Embeddings | An OpenAI embedder (any OpenAI-compatible endpoint through `WithOpenAIBaseURL`), a [nexus](https://github.com/xraph/nexus) embedder in its own module, or your own `embedder.Embedder` |
+| Vector search | In-memory, PostgreSQL with pgvector (its table migrated by `pgvector.Migrate`, or as the `weave_pgvector` group in your own run), or [Fabriq](https://github.com/xraph/fabriq)'s vector plane |
 | Better ranking than plain similarity | MMR for diversity, hybrid retrieval with Reciprocal Rank Fusion, and a reranker wrapper |
 | Prompt context that fits | Token-budgeted assembly with `[n]` citation markers |
-| One index per customer | Tenant and app IDs on the context, carried into every store and vector query |
+| One index per customer | A tenant on the context that every call requires, carried into every store and vector query, so nothing reads or searches across customers |
+| Re-ingesting the same page on every deploy | `SourceKey` on `IngestInput`: the same content embeds nothing, new content replaces the old version in one swap, and replicas ingesting at once end with one ready document |
+| Surviving a deploy mid-ingest | Recovery fails documents whose ingest went quiet and deletes their partial chunks and vectors, safely on every replica |
 | Hooks into your own systems | 14 lifecycle hooks, a [Chronicle](https://github.com/xraph/chronicle) audit bridge and a metrics extension |
 | Seeing what it does | OpenTelemetry spans for ingest, embedding, vector search, retrieval and reindex, plus duration and GenAI token metrics on your Forge app's `/_/metrics` |
 | An API without writing handlers | Forge routes for collections, documents, retrieval and search, with OpenAPI metadata |
@@ -120,7 +124,7 @@ A RAG feature looks small until you build it: you need a chunking strategy, an e
 | --- | --- | --- |
 | Metadata store | `engine.WithStore` | `store/memory`, `store/postgres`, `store/sqlite`, `store/mongo` |
 | Vector store | `engine.WithVectorStore` | `vectorstore/memory`, `vectorstore/pgvector`, `vectorstore/fabriq` |
-| Embedder | `engine.WithEmbedder` | `embedder.NewOpenAIEmbedder(apiKey, opts...)` |
+| Embedder | `engine.WithEmbedder` | `embedder.NewOpenAIEmbedder(apiKey, opts...)`, and `nexus.New(gateway, model, dims, opts...)` from `github.com/xraph/weave/embedder/nexus` |
 | Chunker | `engine.WithChunker` | `NewRecursiveChunker`, `NewFixedChunker`, `NewSlidingChunker`, `NewSemanticChunker`, `NewCodeChunker` |
 | Loader | `engine.WithLoader` | `NewTextLoader`, `NewMarkdownLoader`, `NewHTMLLoader`, `NewCSVLoader`, `NewJSONLoader(fields...)`, `NewURLLoader(delegate)`, `NewDirectoryLoader(loaders...)` |
 | Retriever | `engine.WithRetriever` | `NewSimilarityRetriever`, `NewMMRRetriever`, `NewHybridRetriever`, `NewRerankerRetriever` |
@@ -155,7 +159,7 @@ eng, err := engine.New(
 )
 ```
 
-`Retrieve` takes `WithCollection`, `WithTopK`, `WithMinScore`, `WithTenantID` and `WithTenantFilter`. For a query across several collections, use `eng.HybridSearch(ctx, query, &engine.HybridSearchParams{...})`. `eng.RetrieveCompare` puts your configured ranking next to the raw vector ranking for the same query, so you can see what a reranker or MMR actually moved.
+`Retrieve` takes `WithCollection`, `WithTopK` and `WithMinScore`, and searches the tenant on the context. (`WithTenantID` and `WithTenantFilter` are deprecated and can only repeat that tenant.) For a query across several collections, use `eng.HybridSearch(ctx, query, &engine.HybridSearchParams{...})`. `eng.RetrieveCompare` puts your configured ranking next to the raw vector ranking for the same query, so you can see what a reranker or MMR actually moved.
 
 ### Context assembly
 
@@ -169,7 +173,7 @@ You configure two stores. The metadata store holds collections, documents and ch
 | --- | --- | --- |
 | PostgreSQL | `store/postgres`, `postgres.New(db *grove.DB)` | Grove migrations, run by `Migrate` |
 | SQLite | `store/sqlite`, `sqlite.New(db *grove.DB)` | Single node, pair it with the in-memory vector store |
-| MongoDB | `store/mongo`, `mongo.New(db *grove.DB)` | |
+| MongoDB | `store/mongo`, `mongo.New(db *grove.DB)` | Source-keyed ingest needs a replica set |
 | Memory | `store/memory`, `memory.New()` | Tests and prototypes |
 
 | Vector store | Package | Notes |
@@ -178,7 +182,7 @@ You configure two stores. The metadata store holds collections, documents and ch
 | Fabriq | `vectorstore/fabriq` (package `fabriqvec`), `fabriqvec.New(vq, opts...)` | Embeddings live in Fabriq next to the rest of your data |
 | Memory | `vectorstore/memory`, `memory.New()` | Tests and prototypes |
 
-Call `Migrate(ctx)` on the metadata store before first use (the Forge extension does it for you on start). The pgvector store has no migration of its own, so create the `vector` extension and the `weave_vectors` table in your own schema migrations before the first ingest.
+Call `Migrate(ctx)` on the metadata store before first use (the Forge extension does it for you on start). Postgres, SQLite and Mongo record each version in `grove_migrations`, so a second call applies nothing. The pgvector table has its own group, `weave_pgvector`, which the extension leaves alone: call `pgvector.Migrate(ctx, db, dims)` yourself, or add `pgvector.Migrations(dims)` to your own orchestrator. It refuses a table made with a different size, naming both numbers, so you find out at boot and not on the first insert.
 
 All stores are built on [Grove](https://github.com/xraph/grove), so you open one `*grove.DB` and share it between the metadata store and pgvector.
 
@@ -191,7 +195,9 @@ ctx = weave.WithTenant(ctx, "acme")
 ctx = weave.WithApp(ctx, "support-bot")
 ```
 
-A collection created under that context belongs to `acme`, and `Retrieve` filters the vector search by the same tenant. If you need to query one tenant explicitly from a context that has none, pass `engine.WithTenantFilter("acme")`. Unlike `WithTenantID`, an empty string there means rows with no tenant, not everyone.
+A collection created under that context belongs to `acme`, and `Retrieve` filters the vector search by the same tenant. The tenant isn't optional. A call without one fails with `weave.ErrTenantRequired` before it reads, writes or embeds anything, the HTTP routes answer 403 and the dashboard answers `PERMISSION_DENIED`. A background job builds its own context with the tenant it means.
+
+If you're upgrading from v1.8, the rows it wrote without a tenant are unreachable until you give them one, and [MIGRATION.md](MIGRATION.md) has the SQL and Mongo statements for that, plus everything else that changed in v1.9.0.
 
 ## Use it with Forge
 
@@ -239,6 +245,8 @@ extensions:
     default_top_k: 10
     ingest_concurrency: 4
     shutdown_timeout: 30s
+    recovery_interval: 5m   # how often to sweep for stalled ingests; negative turns it off
+    stalled_after: 15m      # how long an ingest can go quiet before recovery fails it
     grove_database: ""      # a named grove.DB; empty uses the default one
     disable_routes: false
     disable_migrate: false
@@ -289,10 +297,11 @@ You don't need a hook for tracing. The engine starts OpenTelemetry spans for its
 | First pipeline | [Getting started](https://www.xraph.com/docs/weave/getting-started), [architecture](https://www.xraph.com/docs/weave/architecture), [end-to-end example](https://www.xraph.com/docs/weave/guides/full-example) |
 | Ingestion | [Document ingestion](https://www.xraph.com/docs/weave/subsystems/ingestion), [loaders](https://www.xraph.com/docs/weave/subsystems/loader), [chunkers](https://www.xraph.com/docs/weave/subsystems/chunker), [embedders](https://www.xraph.com/docs/weave/subsystems/embedder) |
 | Retrieval and context | [Semantic retrieval](https://www.xraph.com/docs/weave/subsystems/retrieval), [context assembler](https://www.xraph.com/docs/weave/subsystems/assembler) |
-| Storage | [PostgreSQL](https://www.xraph.com/docs/weave/stores/postgres), [SQLite](https://www.xraph.com/docs/weave/stores/sqlite), [MongoDB](https://www.xraph.com/docs/weave/stores/mongo), [Fabriq vectors](https://www.xraph.com/docs/weave/stores/fabriq) |
+| Storage | [PostgreSQL](https://www.xraph.com/docs/weave/stores/postgres), [pgvector](https://www.xraph.com/docs/weave/stores/pgvector), [SQLite](https://www.xraph.com/docs/weave/stores/sqlite), [MongoDB](https://www.xraph.com/docs/weave/stores/mongo), [Fabriq vectors](https://www.xraph.com/docs/weave/stores/fabriq) |
 | Tenants and config | [Multi-tenancy](https://www.xraph.com/docs/weave/concepts/multi-tenancy), [configuration](https://www.xraph.com/docs/weave/concepts/configuration) |
 | Forge and HTTP | [Forge extension](https://www.xraph.com/docs/weave/guides/forge-extension), [HTTP API](https://www.xraph.com/docs/weave/api-reference/http-api) |
 | Extending it | [Extension system](https://www.xraph.com/docs/weave/subsystems/plugins), [custom components](https://www.xraph.com/docs/weave/guides/custom-store) |
+| Upgrading | [MIGRATION.md](MIGRATION.md), starting with "Upgrading to v1.9.0" |
 
 The Go API is on [pkg.go.dev](https://pkg.go.dev/github.com/xraph/weave).
 
@@ -304,7 +313,7 @@ Create an `engine.Engine` with a store, a vector store, an embedder and a chunke
 
 ### Does Weave work with pgvector?
 
-Yes. `vectorstore/pgvector` stores embeddings in a Postgres table through Grove and searches by vector distance. Create the `vector` extension and the `weave_vectors` table yourself, since Weave doesn't migrate it.
+Yes. `vectorstore/pgvector` stores embeddings in a Postgres table through Grove and searches by vector distance. `pgvector.Migrate` creates the `vector` extension and the `weave_vectors` table, and `pgvector.Available` tells you first whether the server has pgvector at all.
 
 ### Can I use Weave without Forge?
 
@@ -316,7 +325,7 @@ The built-in embedder calls OpenAI's embeddings API, `text-embedding-3-small` by
 
 ### How do I keep one customer's documents out of another's results?
 
-Set the tenant on the context with `weave.WithTenant`. Collections, documents and chunks are stored under it, and retrieval filters the vector search to it.
+Set the tenant on the context with `weave.WithTenant`. Every call requires one. Collections, documents and chunks are stored under it, another tenant's IDs come back not found, and retrieval filters the vector search to it.
 
 ## Contributing
 
