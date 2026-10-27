@@ -29,6 +29,8 @@ func mapError(err error) error {
 	switch {
 	case errors.As(err, &ce):
 		return ce
+	case errors.Is(err, weave.ErrTenantRequired):
+		return permissionDenied(noTenantMessage)
 	case errors.Is(err, weave.ErrCollectionNotFound):
 		return notFound("collection not found")
 	case errors.Is(err, weave.ErrDocumentNotFound):
@@ -39,6 +41,10 @@ func mapError(err error) error {
 		return conflict(duplicateDocumentMessage)
 	case errors.Is(err, weave.ErrCollectionAlreadyExists):
 		return conflict("a collection with this name already exists")
+	case errors.Is(err, weave.ErrIngestInterrupted):
+		// Recovery failed the document, or it was deleted, while the ingest
+		// ran. Ingesting again starts over.
+		return &contract.Error{Code: contract.CodeConflict, Message: "the ingest was interrupted before it finished; ingest the document again", Retryable: true}
 	case errors.Is(err, weave.ErrEmptyContent):
 		return badRequest("content is empty")
 	case errors.Is(err, weave.ErrInvalidArgument):
@@ -84,6 +90,9 @@ func (d Deps) mapError(intent string, err error) error {
 
 func badRequest(msg string) error {
 	return &contract.Error{Code: contract.CodeBadRequest, Message: msg}
+}
+func permissionDenied(msg string) error {
+	return &contract.Error{Code: contract.CodePermissionDenied, Message: msg}
 }
 func notFound(msg string) error { return &contract.Error{Code: contract.CodeNotFound, Message: msg} }
 func conflict(msg string) error { return &contract.Error{Code: contract.CodeConflict, Message: msg} }

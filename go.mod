@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/xraph/fabriq/core v1.9.0
+	github.com/xraph/fabriq/core v1.10.0
 	github.com/xraph/forge v1.13.1
 	github.com/xraph/go-utils v1.5.0
 	github.com/xraph/grove v1.10.0

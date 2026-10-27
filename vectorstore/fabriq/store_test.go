@@ -2,6 +2,7 @@ package fabriqvec_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	fabriqvec "github.com/xraph/weave/vectorstore/fabriq"
@@ -10,8 +11,12 @@ import (
 	"github.com/xraph/fabriq/core/registry"
 	"github.com/xraph/fabriq/core/tenant"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/vectorstore"
 )
+
+// acme labels an entry with the tenant the tests use.
+var acme = map[string]string{"tenant_id": "acme"}
 
 // tctx returns a context with the given tenant id set.
 func tctx(t *testing.T, tenantID string) context.Context {
@@ -28,14 +33,14 @@ func TestUpsertAndSearch(t *testing.T) {
 	ctx := tctx(t, "acme")
 
 	entries := []vectorstore.Entry{
-		{ID: "a", Vector: []float32{1, 0, 0}, Content: "hello", Metadata: map[string]string{"tag": "x"}},
-		{ID: "b", Vector: []float32{0, 1, 0}, Content: "world", Metadata: map[string]string{"tag": "y"}},
+		{ID: "a", Vector: []float32{1, 0, 0}, Content: "hello", Metadata: map[string]string{"tag": "x", "tenant_id": "acme"}},
+		{ID: "b", Vector: []float32{0, 1, 0}, Content: "world", Metadata: map[string]string{"tag": "y", "tenant_id": "acme"}},
 	}
 	if err := s.Upsert(ctx, entries); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	results, err := s.Search(ctx, []float32{1, 0, 0}, &vectorstore.SearchOptions{TopK: 2})
+	results, err := s.Search(ctx, []float32{1, 0, 0}, &vectorstore.SearchOptions{TopK: 2, TenantKey: "acme"})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -62,12 +67,12 @@ func TestSearchWithTenantKey(t *testing.T) {
 
 	// Upsert under tenant "acme".
 	if err := s.Upsert(tctx(t, "acme"), []vectorstore.Entry{
-		{ID: "a1", Vector: []float32{1, 0, 0}, Content: "acme doc"},
+		{ID: "a1", Vector: []float32{1, 0, 0}, Content: "acme doc", Metadata: acme},
 	}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	// Search with TenantKey — should find the entry.
+	// Search with TenantKey: should find the entry.
 	results, err := s.Search(context.Background(), []float32{1, 0, 0}, &vectorstore.SearchOptions{
 		TopK:      5,
 		TenantKey: "acme",
@@ -82,7 +87,7 @@ func TestSearchWithTenantKey(t *testing.T) {
 		t.Errorf("expected id=a1, got %q", results[0].ID)
 	}
 
-	// Negative: a different TenantKey must return zero results — proving tenant isolation.
+	// Negative: a different TenantKey must return zero results, proving tenant isolation.
 	other, err := s.Search(context.Background(), []float32{1, 0, 0}, &vectorstore.SearchOptions{
 		TopK:      5,
 		TenantKey: "other",
@@ -100,16 +105,17 @@ func TestSearchMinScore(t *testing.T) {
 	ctx := tctx(t, "tenant1")
 
 	if err := s.Upsert(ctx, []vectorstore.Entry{
-		{ID: "close", Vector: []float32{1, 0, 0}, Content: "close"},
-		{ID: "far", Vector: []float32{0, 0, 1}, Content: "far"},
+		{ID: "close", Vector: []float32{1, 0, 0}, Content: "close", Metadata: map[string]string{"tenant_id": "tenant1"}},
+		{ID: "far", Vector: []float32{0, 0, 1}, Content: "far", Metadata: map[string]string{"tenant_id": "tenant1"}},
 	}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
 	// Query close to "close"; "far" should be filtered by MinScore.
 	results, err := s.Search(ctx, []float32{1, 0, 0}, &vectorstore.SearchOptions{
-		TopK:     10,
-		MinScore: 0.9,
+		TopK:      10,
+		MinScore:  0.9,
+		TenantKey: "tenant1",
 	})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
@@ -126,15 +132,16 @@ func TestSearchFilter(t *testing.T) {
 	ctx := tctx(t, "acme")
 
 	if err := s.Upsert(ctx, []vectorstore.Entry{
-		{ID: "x", Vector: []float32{1, 0, 0}, Content: "x doc", Metadata: map[string]string{"kind": "A"}},
-		{ID: "y", Vector: []float32{1, 0, 0}, Content: "y doc", Metadata: map[string]string{"kind": "B"}},
+		{ID: "x", Vector: []float32{1, 0, 0}, Content: "x doc", Metadata: map[string]string{"kind": "A", "tenant_id": "acme"}},
+		{ID: "y", Vector: []float32{1, 0, 0}, Content: "y doc", Metadata: map[string]string{"kind": "B", "tenant_id": "acme"}},
 	}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
 	results, err := s.Search(ctx, []float32{1, 0, 0}, &vectorstore.SearchOptions{
-		TopK:   10,
-		Filter: map[string]string{"kind": "A"},
+		TopK:      10,
+		Filter:    map[string]string{"kind": "A"},
+		TenantKey: "acme",
 	})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
@@ -149,8 +156,8 @@ func TestDelete(t *testing.T) {
 	ctx := tctx(t, "acme")
 
 	if err := s.Upsert(ctx, []vectorstore.Entry{
-		{ID: "del1", Vector: []float32{1, 0, 0}, Content: "to delete"},
-		{ID: "keep", Vector: []float32{0, 1, 0}, Content: "to keep"},
+		{ID: "del1", Vector: []float32{1, 0, 0}, Content: "to delete", Metadata: acme},
+		{ID: "keep", Vector: []float32{0, 1, 0}, Content: "to keep", Metadata: acme},
 	}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
@@ -159,7 +166,7 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	results, err := s.Search(ctx, []float32{1, 0, 0}, &vectorstore.SearchOptions{TopK: 10})
+	results, err := s.Search(ctx, []float32{1, 0, 0}, &vectorstore.SearchOptions{TopK: 10, TenantKey: "acme"})
 	if err != nil {
 		t.Fatalf("Search after delete: %v", err)
 	}
@@ -175,17 +182,17 @@ func TestDeleteByMetadata(t *testing.T) {
 	ctx := tctx(t, "acme")
 
 	if err := s.Upsert(ctx, []vectorstore.Entry{
-		{ID: "m1", Vector: []float32{1, 0, 0}, Content: "meta1", Metadata: map[string]string{"group": "old"}},
-		{ID: "m2", Vector: []float32{0, 1, 0}, Content: "meta2", Metadata: map[string]string{"group": "new"}},
+		{ID: "m1", Vector: []float32{1, 0, 0}, Content: "meta1", Metadata: map[string]string{"group": "old", "tenant_id": "acme"}},
+		{ID: "m2", Vector: []float32{0, 1, 0}, Content: "meta2", Metadata: map[string]string{"group": "new", "tenant_id": "acme"}},
 	}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	if err := s.DeleteByMetadata(ctx, map[string]string{"group": "old"}); err != nil {
+	if err := s.DeleteByMetadata(ctx, map[string]string{"group": "old", "tenant_id": "acme"}); err != nil {
 		t.Fatalf("DeleteByMetadata: %v", err)
 	}
 
-	results, err := s.Search(ctx, []float32{1, 0, 0}, &vectorstore.SearchOptions{TopK: 10})
+	results, err := s.Search(ctx, []float32{1, 0, 0}, &vectorstore.SearchOptions{TopK: 10, TenantKey: "acme"})
 	if err != nil {
 		t.Fatalf("Search after DeleteByMetadata: %v", err)
 	}
@@ -211,12 +218,12 @@ func TestWithEntity(t *testing.T) {
 	ctx := tctx(t, "acme")
 
 	if err := s.Upsert(ctx, []vectorstore.Entry{
-		{ID: "e1", Vector: []float32{1, 0, 0}, Content: "custom"},
+		{ID: "e1", Vector: []float32{1, 0, 0}, Content: "custom", Metadata: acme},
 	}); err != nil {
 		t.Fatalf("Upsert with custom entity: %v", err)
 	}
 
-	results, err := s.Search(ctx, []float32{1, 0, 0}, &vectorstore.SearchOptions{TopK: 5})
+	results, err := s.Search(ctx, []float32{1, 0, 0}, &vectorstore.SearchOptions{TopK: 5, TenantKey: "acme"})
 	if err != nil {
 		t.Fatalf("Search with custom entity: %v", err)
 	}
@@ -225,5 +232,118 @@ func TestWithEntity(t *testing.T) {
 	}
 	if results[0].ID != "e1" {
 		t.Errorf("expected id=e1, got %q", results[0].ID)
+	}
+}
+
+func TestTenantGuards(t *testing.T) {
+	s := fabriqvec.New(fabriqtest.NewWorld(registry.New()).Vector)
+	ctx := tctx(t, "acme")
+	if err := s.Upsert(ctx, []vectorstore.Entry{
+		{ID: "ok", Vector: []float32{1, 0, 0}, Metadata: acme},
+		{ID: "unlabelled", Vector: []float32{1, 0, 0}},
+	}); !errors.Is(err, weave.ErrTenantRequired) {
+		t.Errorf("upsert without tenant_id: got %v, want ErrTenantRequired", err)
+	}
+	if _, err := s.Search(ctx, []float32{1, 0, 0}, &vectorstore.SearchOptions{TopK: 5}); !errors.Is(err, weave.ErrTenantRequired) {
+		t.Errorf("search without TenantKey: got %v, want ErrTenantRequired", err)
+	}
+	got, err := s.Search(ctx, []float32{1, 0, 0}, &vectorstore.SearchOptions{TopK: 5, TenantKey: "acme"})
+	if err != nil || len(got) != 0 {
+		t.Errorf("search after a refused upsert: %d results, %v; want none written", len(got), err)
+	}
+	if err := s.DeleteByMetadata(ctx, nil); !errors.Is(err, weave.ErrInvalidArgument) {
+		t.Errorf("delete with no filter: got %v, want ErrInvalidArgument", err)
+	}
+}
+
+// TestUpsertSetsFabriqTenantFromEntries upserts on a context with no Fabriq
+// tenant, the way the engine calls it, and expects each entry written under
+// the Fabriq tenant its tenant_id names.
+func TestUpsertSetsFabriqTenantFromEntries(t *testing.T) {
+	s := fabriqvec.New(fabriqtest.NewWorld(registry.New()).Vector)
+
+	if err := s.Upsert(context.Background(), []vectorstore.Entry{
+		{ID: "a1", Vector: []float32{1, 0, 0}, Content: "acme doc", Metadata: map[string]string{"tenant_id": "acme"}},
+		{ID: "g1", Vector: []float32{1, 0, 0}, Content: "globex doc", Metadata: map[string]string{"tenant_id": "globex"}},
+	}); err != nil {
+		t.Fatalf("Upsert without a Fabriq tenant on ctx: %v", err)
+	}
+
+	for tenantID, want := range map[string]string{"acme": "a1", "globex": "g1"} {
+		results, err := s.Search(context.Background(), []float32{1, 0, 0}, &vectorstore.SearchOptions{TopK: 5, TenantKey: tenantID})
+		if err != nil {
+			t.Fatalf("Search %s: %v", tenantID, err)
+		}
+		if len(results) != 1 || results[0].ID != want {
+			t.Errorf("Search %s: %+v, want only %s", tenantID, results, want)
+		}
+	}
+
+	// A tenant_id Fabriq cannot stamp refuses the batch before anything is written.
+	err := s.Upsert(context.Background(), []vectorstore.Entry{
+		{ID: "a2", Vector: []float32{0, 1, 0}, Metadata: map[string]string{"tenant_id": "acme"}},
+		{ID: "bad", Vector: []float32{0, 1, 0}, Metadata: map[string]string{"tenant_id": "not a tenant"}},
+	})
+	if err == nil {
+		t.Fatal("Upsert with an invalid Fabriq tenant: nil, want an error")
+	}
+	results, err := s.Search(context.Background(), []float32{0, 1, 0}, &vectorstore.SearchOptions{TopK: 5, TenantKey: "acme"})
+	if err != nil {
+		t.Fatalf("Search acme: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("acme holds %d vectors after the refused batch, want 1", len(results))
+	}
+}
+
+// TestDeletesTakeTheTenantTheEngineSends deletes on a context with no Fabriq
+// tenant, the way the engine calls it: DeleteByMetadata scopes by the
+// filter's tenant_id and Delete by the weave tenant on ctx.
+func TestDeletesTakeTheTenantTheEngineSends(t *testing.T) {
+	s := fabriqvec.New(fabriqtest.NewWorld(registry.New()).Vector)
+	if err := s.Upsert(context.Background(), []vectorstore.Entry{
+		{ID: "a1", Vector: []float32{1, 0, 0}, Metadata: map[string]string{"tenant_id": "acme", "document_id": "d1"}},
+		{ID: "a2", Vector: []float32{1, 0, 0}, Metadata: map[string]string{"tenant_id": "acme", "document_id": "d2"}},
+		{ID: "g1", Vector: []float32{1, 0, 0}, Metadata: map[string]string{"tenant_id": "globex", "document_id": "d1"}},
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	ids := func(tenantID string) []string {
+		t.Helper()
+		res, err := s.Search(context.Background(), []float32{1, 0, 0}, &vectorstore.SearchOptions{TopK: 10, TenantKey: tenantID})
+		if err != nil {
+			t.Fatalf("Search %s: %v", tenantID, err)
+		}
+		out := make([]string, 0, len(res))
+		for _, r := range res {
+			out = append(out, r.ID)
+		}
+		return out
+	}
+
+	if err := s.DeleteByMetadata(context.Background(), map[string]string{"document_id": "d1"}); !errors.Is(err, weave.ErrTenantRequired) {
+		t.Errorf("DeleteByMetadata without tenant_id: %v, want ErrTenantRequired", err)
+	}
+	if err := s.DeleteByMetadata(context.Background(), map[string]string{"document_id": "d1", "tenant_id": "acme"}); err != nil {
+		t.Fatalf("DeleteByMetadata: %v", err)
+	}
+	if got := ids("acme"); len(got) != 1 || got[0] != "a2" {
+		t.Errorf("acme after DeleteByMetadata: %v, want [a2]", got)
+	}
+	if got := ids("globex"); len(got) != 1 || got[0] != "g1" {
+		t.Errorf("globex after acme's DeleteByMetadata: %v, want [g1]", got)
+	}
+
+	if err := s.Delete(context.Background(), []string{"a2"}); !errors.Is(err, weave.ErrTenantRequired) {
+		t.Errorf("Delete with no tenant on ctx: %v, want ErrTenantRequired", err)
+	}
+	if err := s.Delete(weave.WithTenant(context.Background(), "acme"), []string{"a2", "g1"}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if got := ids("acme"); len(got) != 0 {
+		t.Errorf("acme after Delete: %v, want none", got)
+	}
+	if got := ids("globex"); len(got) != 1 {
+		t.Errorf("globex after acme's Delete of g1: %v, want g1 kept", got)
 	}
 }

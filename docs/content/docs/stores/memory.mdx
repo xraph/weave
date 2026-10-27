@@ -13,7 +13,7 @@ import "github.com/xraph/weave/store/memory"
 st := memory.New()
 ```
 
-`memory.Store` implements `store.Store`. It keeps entities in Go maps behind a `sync.RWMutex` and follows the same rules as the database stores: collection names are unique per tenant, the same content hash can't appear twice in a collection, and list filters apply `Tenant` only when you set it.
+`memory.Store` implements `store.Store`. It keeps entities in Go maps behind a `sync.RWMutex` and follows the same rules as the database stores: collection names are unique per tenant, the same content hash can't appear twice in a collection, and every call works within the context tenant.
 
 ## Vector store
 
@@ -23,7 +23,7 @@ import vsmemory "github.com/xraph/weave/vectorstore/memory"
 vs := vsmemory.New()
 ```
 
-`vectorstore/memory.Store` implements `vectorstore.VectorStore`. It keeps entries in a map and scores every one on each `Search` with cosine similarity, applying the metadata filter and `tenant_id` as exact matches. Ties are broken by ID, so the order is stable. With no `TopK` it returns 10.
+`vectorstore/memory.Store` implements `vectorstore.VectorStore`. It keeps entries in a map and scores every one on each `Search` with cosine similarity, applying the metadata filter and `tenant_id` as exact matches. Ties are broken by ID, so the order is stable. With no `TopK` it returns 10. Like every built-in vector store, it refuses a search with no `TenantKey`, an entry with no `tenant_id` and a delete with an empty filter. `Len()` says how many entries it holds, which tests use to check nothing was written.
 
 ## Using both together
 
@@ -79,4 +79,4 @@ eng, err = engine.New(
 )
 ```
 
-Remember the extra steps on the production side: call `Migrate` on the Postgres store and create the pgvector table yourself, see [PostgreSQL store](/docs/stores/postgres#pgvector).
+Remember the extra steps on the production side: call `Migrate` on the Postgres store and `pgvector.Migrate` for the vector table, see [pgvector](/docs/stores/pgvector).

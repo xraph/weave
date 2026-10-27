@@ -2,6 +2,10 @@
 package extension
 
 import (
+	"context"
+
+	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
+
 	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/plugins"
 	"github.com/xraph/weave/store"
@@ -47,6 +51,19 @@ func WithConfig(cfg Config) ExtOption {
 // WithDisableRoutes disables HTTP route registration.
 func WithDisableRoutes() ExtOption {
 	return func(e *Extension) { e.config.DisableRoutes = true }
+}
+
+// WithDashboardTenant sets how the dashboard finds the Weave tenant of a
+// request. fn gets the request context and the signed-in principal, and
+// its answer scopes every dashboard intent: lists, counts, gets, writes
+// and retrieval. An empty answer or an error refuses the request with
+// PERMISSION_DENIED, and the error's text never reaches the client.
+//
+// Without it the dashboard reads weave.TenantFromContext, so a host can
+// also set the tenant in its own middleware. A request that has none is
+// refused either way.
+func WithDashboardTenant(fn func(ctx context.Context, p dashcontract.Principal) (string, error)) ExtOption {
+	return func(e *Extension) { e.dashboardTenant = fn }
 }
 
 // WithDisableMigrate disables auto-migration on start.

@@ -17,8 +17,9 @@ type ListFilter struct {
 	// SortDesc lists newest first. The default is oldest first, which API
 	// clients paging by offset already depend on.
 	SortDesc bool
-	// Tenant filters by tenant. Nil means every tenant. A non-nil value is
-	// an exact match, so a pointer to "" means rows written with no tenant.
+	// Tenant is the old explicit tenant filter.
+	//
+	// Deprecated: the tenant comes from the context (weave.WithTenant). A non-nil value must equal it.
 	Tenant *string
 }
 
@@ -26,20 +27,24 @@ type ListFilter struct {
 type CountFilter struct {
 	// Search filters collections by name (case-insensitive substring match).
 	Search string
-	// Tenant filters by tenant. Nil means every tenant. A non-nil value is
-	// an exact match, so a pointer to "" means rows written with no tenant.
+	// Tenant is the old explicit tenant filter.
+	//
+	// Deprecated: the tenant comes from the context (weave.WithTenant). A non-nil value must equal it.
 	Tenant *string
 }
 
-// Store defines the persistence contract for collections.
+// Store defines the persistence contract for collections. Every method is
+// scoped to the context tenant; see store.Store for the rules.
 type Store interface {
-	// CreateCollection persists a new collection.
+	// CreateCollection persists a new collection. Its TenantID must be the
+	// context tenant.
 	CreateCollection(ctx context.Context, col *Collection) error
 
 	// GetCollection retrieves a collection by ID.
 	GetCollection(ctx context.Context, colID id.CollectionID) (*Collection, error)
 
 	// GetCollectionByName retrieves a collection by tenant and name.
+	// tenantID must equal the context tenant, else weave.ErrInvalidArgument.
 	GetCollectionByName(ctx context.Context, tenantID, name string) (*Collection, error)
 
 	// UpdateCollection persists changes to an existing collection.

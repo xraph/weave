@@ -1,4 +1,5 @@
-.PHONY: help build run test clean fmt lint lint-fix vet tidy deps install dev hot check coverage b r t c f l lf v check-deps
+.PHONY: help build run test clean fmt lint lint-fix vet tidy deps install dev hot check coverage b r t c f l lf v check-deps \
+	test-submodules vet-submodules lint-submodules tidy-submodules
 
 # Default target
 .DEFAULT_GOAL := help
@@ -10,6 +11,11 @@ BUILD_DIR=./bin
 GO=go
 GOFLAGS=-v
 LDFLAGS=-ldflags "-s -w"
+
+# Sub-modules with their own go.mod. The root targets above skip them, so
+# each has its own *-submodules target. They run with GOWORK=off so a go.work
+# on your machine can't hide what CI sees.
+SUBMODULES := embedder/nexus
 
 # Colors for output
 RED=\033[0;31m
@@ -46,6 +52,12 @@ help:
 	@echo "$(GREEN)Dependencies:$(NC)"
 	@echo "  make deps           - Install development dependencies"
 	@echo "  make tidy           - Tidy and verify go modules"
+	@echo ""
+	@echo "$(GREEN)Sub-modules ($(SUBMODULES)):$(NC)"
+	@echo "  make test-submodules  - Run their tests"
+	@echo "  make vet-submodules   - Run go vet on them"
+	@echo "  make lint-submodules  - Run golangci-lint on them"
+	@echo "  make tidy-submodules  - Tidy and verify their go modules"
 	@echo "  make mod-download   - Download go modules"
 	@echo "  make mod-verify     - Verify go modules"
 	@echo ""
@@ -168,6 +180,39 @@ tidy:
 	$(GO) mod tidy
 	$(GO) mod verify
 	@echo "$(GREEN)✓ Modules tidied$(NC)"
+
+## test-submodules: Run each sub-module's tests
+test-submodules:
+	@for m in $(SUBMODULES); do \
+		echo "$(BLUE)Testing $$m...$(NC)"; \
+		(cd $$m && GOWORK=off $(GO) test -v ./...) || exit 1; \
+	done
+	@echo "$(GREEN)✓ Sub-module tests complete$(NC)"
+
+## vet-submodules: Run go vet on each sub-module
+vet-submodules:
+	@for m in $(SUBMODULES); do \
+		echo "$(BLUE)Vetting $$m...$(NC)"; \
+		(cd $$m && GOWORK=off $(GO) vet ./...) || exit 1; \
+	done
+	@echo "$(GREEN)✓ Sub-module vet complete$(NC)"
+
+## lint-submodules: Run golangci-lint on each sub-module
+lint-submodules:
+	@command -v golangci-lint >/dev/null 2>&1 || { echo "$(RED)golangci-lint not found. Install: https://golangci-lint.run/usage/install/$(NC)"; exit 1; }
+	@for m in $(SUBMODULES); do \
+		echo "$(BLUE)Linting $$m...$(NC)"; \
+		(cd $$m && GOWORK=off golangci-lint run ./...) || exit 1; \
+	done
+	@echo "$(GREEN)✓ Sub-module linting complete$(NC)"
+
+## tidy-submodules: Tidy and verify each sub-module's go.mod
+tidy-submodules:
+	@for m in $(SUBMODULES); do \
+		echo "$(BLUE)Tidying $$m...$(NC)"; \
+		(cd $$m && GOWORK=off $(GO) mod tidy && GOWORK=off $(GO) mod verify) || exit 1; \
+	done
+	@echo "$(GREEN)✓ Sub-modules tidied$(NC)"
 
 ## deps: Install development dependencies
 deps:

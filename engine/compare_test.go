@@ -34,7 +34,7 @@ func TestRetrieveCompareShowsMMRMovement(t *testing.T) {
 	e := newRig(t, func(r *testRig) engine.Option {
 		return engine.WithRetriever(retriever.NewMMRRetriever(r.Vectors, r.Embed, 0.3))
 	}).Engine
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, e, "compare")
 	a := mustIngest(t, ctx, e, col.ID, "a", textA)
 	b := mustIngest(t, ctx, e, col.ID, "b", textB)
@@ -74,7 +74,7 @@ func TestRetrieveCompareSimilarityRetrieverIsNotReordered(t *testing.T) {
 	e := newRig(t, func(r *testRig) engine.Option {
 		return engine.WithRetriever(retriever.NewSimilarityRetriever(r.Vectors, r.Embed, r.Store))
 	}).Engine
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, e, "similarity")
 	mustIngest(t, ctx, e, col.ID, "a", textA)
 	mustIngest(t, ctx, e, col.ID, "b", textB)
@@ -104,7 +104,7 @@ func TestRetrieveCompareMMRThatKeptTheRawOrderIsNotReordered(t *testing.T) {
 	e := newRig(t, func(r *testRig) engine.Option {
 		return engine.WithRetriever(retriever.NewMMRRetriever(r.Vectors, r.Embed, 0.3))
 	}).Engine
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, e, "mmr-same")
 	mustIngest(t, ctx, e, col.ID, "a", textA)
 	mustIngest(t, ctx, e, col.ID, "b", textB)
@@ -122,7 +122,7 @@ func TestRetrieveCompareMMRThatKeptTheRawOrderIsNotReordered(t *testing.T) {
 
 func TestRetrieveCompareSurvivesAnUnidentifiedHit(t *testing.T) {
 	e := newRig(t, func(*testRig) engine.Option { return engine.WithRetriever(nilChunkRetriever{}) }).Engine
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, e, "nilchunk")
 	mustIngest(t, ctx, e, col.ID, "a", textA)
 
@@ -140,23 +140,25 @@ func TestRetrieveCompareSurvivesAnUnidentifiedHit(t *testing.T) {
 
 func TestRetrieveCompareTenantFilterIsExact(t *testing.T) {
 	r := newRig(t)
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
+	t2 := weave.WithTenant(context.Background(), "t2")
 	col := mustTestCollection(t, r.Engine, "tenants")
-	mustIngest(t, weave.WithTenant(ctx, "t1"), r.Engine, col.ID, "tenanted", textA)
-	plain := mustIngest(t, ctx, r.Engine, col.ID, "plain", textB)
+	other := mustCollectionAs(t, t2, r.Engine, "tenants")
+	mine := mustIngest(t, ctx, r.Engine, col.ID, "tenanted", textA)
+	mustIngest(t, t2, r.Engine, other.ID, "theirs", textA)
 
-	res, err := r.Engine.RetrieveCompare(ctx, "refund policy window", engine.CompareParams{CollectionID: col.ID, TopK: 5, Tenant: strPtr("")})
+	res, err := r.Engine.RetrieveCompare(ctx, "refund policy window", engine.CompareParams{TopK: 5, Tenant: strPtr("t1")})
 	if err != nil {
 		t.Fatalf("compare: %v", err)
 	}
-	if res.VectorMatches != 1 || len(res.Hits) != 1 || res.Hits[0].Chunk.DocumentID.String() != plain.String() {
-		t.Errorf("empty tenant filter: vector matches %d, hits %+v; want only the untenanted document", res.VectorMatches, res.Hits)
+	if res.VectorMatches != 1 || len(res.Hits) != 1 || res.Hits[0].Chunk.DocumentID.String() != mine.String() {
+		t.Errorf("t1 tenant filter: vector matches %d, hits %+v; want only t1's document", res.VectorMatches, res.Hits)
 	}
 }
 
 func TestRetrieveCompareWithoutRetriever(t *testing.T) {
 	r := newRig(t)
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, r.Engine, "plain")
 	mustIngest(t, ctx, r.Engine, col.ID, "a", textA)
 	mustIngest(t, ctx, r.Engine, col.ID, "c", textC)
@@ -178,7 +180,7 @@ func TestRetrieveCompareWithoutRetriever(t *testing.T) {
 
 func TestRetrieveCompareExplainsAnEmptyResult(t *testing.T) {
 	r := newRig(t)
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, r.Engine, "strict")
 	mustIngest(t, ctx, r.Engine, col.ID, "c", textC)
 
@@ -201,7 +203,7 @@ func TestRetrieveCompareTiesDoNotFakeReordering(t *testing.T) {
 	e := newRig(t, func(r *testRig) engine.Option {
 		return engine.WithRetriever(retriever.NewSimilarityRetriever(r.Vectors, r.Embed, r.Store))
 	}).Engine
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, e, "ties")
 	mustIngest(t, ctx, e, col.ID, "a", "refund window days")
 	mustIngest(t, ctx, e, col.ID, "b", "days refund window")
@@ -225,7 +227,7 @@ func TestRetrieveCompareTiesDoNotFakeReordering(t *testing.T) {
 
 func TestRetrieveCompareAnswersEmptyListsAsArrays(t *testing.T) {
 	r := newRig(t)
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, r.Engine, "empty")
 
 	res, err := r.Engine.RetrieveCompare(ctx, "refund policy window", engine.CompareParams{CollectionID: col.ID, TopK: 2})

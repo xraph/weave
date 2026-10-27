@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/xraph/forge"
 
@@ -28,15 +29,16 @@ func (a *API) ingestDocument(ctx forge.Context, req *IngestDocumentRequest) (*en
 		SourceType:   req.SourceType,
 		Content:      req.Content,
 		Metadata:     req.Metadata,
+		SourceKey:    req.SourceKey,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("ingest document: %w", err)
+		return nil, mapStoreError(err)
 	}
 
-	return result, ctx.JSON(http.StatusCreated, result)
+	return nil, ctx.JSON(http.StatusCreated, result)
 }
 
-func (a *API) ingestBatch(ctx forge.Context, req *IngestBatchRequest) ([]*engine.IngestResult, error) {
+func (a *API) ingestBatch(ctx forge.Context, req *IngestBatchRequest) (*struct{}, error) {
 	colID, err := id.ParseCollectionID(ctx.Param("collectionId"))
 	if err != nil {
 		return nil, forge.BadRequest(fmt.Sprintf("invalid collection ID: %v", err))
@@ -54,15 +56,16 @@ func (a *API) ingestBatch(ctx forge.Context, req *IngestBatchRequest) ([]*engine
 			SourceType:   doc.SourceType,
 			Content:      doc.Content,
 			Metadata:     doc.Metadata,
+			SourceKey:    doc.SourceKey,
 		}
 	}
 
 	results, err := a.eng.IngestBatch(ctx.Context(), inputs)
 	if err != nil {
-		return results, fmt.Errorf("ingest batch: %w", err)
+		return nil, mapStoreError(err)
 	}
 
-	return results, ctx.JSON(http.StatusCreated, results)
+	return nil, ctx.JSON(http.StatusCreated, results)
 }
 
 func (a *API) getDocument(ctx forge.Context, _ *GetDocumentRequest) (*document.Document, error) {
@@ -76,15 +79,18 @@ func (a *API) getDocument(ctx forge.Context, _ *GetDocumentRequest) (*document.D
 		return nil, mapStoreError(err)
 	}
 
-	return doc, ctx.JSON(http.StatusOK, doc)
+	return nil, ctx.JSON(http.StatusOK, doc)
 }
 
-func (a *API) listDocuments(ctx forge.Context, req *ListDocumentsRequest) ([]*document.Document, error) {
+func (a *API) listDocuments(ctx forge.Context, req *ListDocumentsRequest) (*struct{}, error) {
 	colID, err := id.ParseCollectionID(ctx.Param("collectionId"))
 	if err != nil {
 		return nil, forge.BadRequest(fmt.Sprintf("invalid collection ID: %v", err))
 	}
 
+	if _, err = a.eng.GetCollection(ctx.Context(), colID); err != nil {
+		return nil, mapStoreError(err)
+	}
 	docs, err := a.eng.ListDocuments(ctx.Context(), &document.ListFilter{
 		CollectionID: colID,
 		State:        document.State(req.State),
@@ -92,10 +98,13 @@ func (a *API) listDocuments(ctx forge.Context, req *ListDocumentsRequest) ([]*do
 		Offset:       req.Offset,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list documents: %w", err)
+		return nil, mapStoreError(err)
 	}
 
-	return docs, ctx.JSON(http.StatusOK, docs)
+	if docs == nil {
+		docs = []*document.Document{}
+	}
+	return nil, ctx.JSON(http.StatusOK, docs)
 }
 
 func (a *API) deleteDocument(ctx forge.Context, _ *DeleteDocumentRequest) (*struct{}, error) {
@@ -105,6 +114,22 @@ func (a *API) deleteDocument(ctx forge.Context, _ *DeleteDocumentRequest) (*stru
 	}
 
 	if err := a.eng.DeleteDocument(ctx.Context(), docID); err != nil {
+		return nil, mapStoreError(err)
+	}
+
+	return nil, ctx.NoContent(http.StatusNoContent)
+}
+
+func (a *API) deleteDocumentsBySource(ctx forge.Context, req *DeleteDocumentsBySourceRequest) (*struct{}, error) {
+	colID, err := id.ParseCollectionID(ctx.Param("collectionId"))
+	if err != nil {
+		return nil, forge.BadRequest(fmt.Sprintf("invalid collection ID: %v", err))
+	}
+	if strings.TrimSpace(req.SourceKey) == "" {
+		return nil, forge.BadRequest("source_key is required")
+	}
+
+	if err := a.eng.DeleteBySource(ctx.Context(), colID, req.SourceKey); err != nil {
 		return nil, mapStoreError(err)
 	}
 

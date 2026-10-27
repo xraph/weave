@@ -120,7 +120,7 @@ func TestExtensionWiresTelemetryIntoForge(t *testing.T) {
 	}
 	eng := ext.Engine()
 
-	ctx, span := forge.StartSpan(t.Context(), "request")
+	ctx, span := forge.StartSpan(weave.WithTenant(t.Context(), "t1"), "request")
 	col := &collection.Collection{Name: "docs", ChunkSize: 512}
 	if err := eng.CreateCollection(ctx, col); err != nil {
 		t.Fatal(err)

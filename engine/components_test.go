@@ -30,7 +30,7 @@ func TestComponents(t *testing.T) {
 	}
 	// The test embedder implements no Describe, so it reports as custom with
 	// its Go type and its real dimensions.
-	if c.Embedder.Kind != "custom" || c.Embedder.Type == "" || c.Embedder.Dimensions != r.Embed.dims {
+	if c.Embedder.Kind != "custom" || c.Embedder.Type == "" || c.Embedder.Dimensions != r.Embed.Dimensions() {
 		t.Errorf("embedder: %+v", c.Embedder)
 	}
 	// Content types are probed from the loader's own Supports, never a list.

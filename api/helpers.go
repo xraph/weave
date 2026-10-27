@@ -8,13 +8,20 @@ import (
 	"github.com/xraph/weave"
 )
 
-// mapStoreError maps domain errors to Forge HTTP errors.
+// mapStoreError maps domain errors to Forge HTTP errors. A request without
+// a tenant is 403, a not-found sentinel 404 and an invalid argument 400.
+// Anything else is returned as it is, which Forge answers with a 500 and a
+// generic message.
 func mapStoreError(err error) error {
-	if err == nil {
+	switch {
+	case err == nil:
 		return nil
-	}
-	if isNotFound(err) {
+	case errors.Is(err, weave.ErrTenantRequired):
+		return forge.Forbidden("weave: this request has no tenant")
+	case isNotFound(err):
 		return forge.NotFound(err.Error())
+	case errors.Is(err, weave.ErrInvalidArgument):
+		return forge.BadRequest(err.Error())
 	}
 	return err
 }

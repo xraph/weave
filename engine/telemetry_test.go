@@ -23,6 +23,7 @@ import (
 	"github.com/xraph/weave/embedder"
 	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/id"
+	"github.com/xraph/weave/internal/embedtest"
 	"github.com/xraph/weave/retriever"
 	"github.com/xraph/weave/vectorstore"
 )
@@ -124,10 +125,10 @@ func (s *fakeSink) byName(name string) []*fakeSeries {
 	return out
 }
 
-// describedEmbedder is a hashEmbedder that describes itself and reports a
+// describedEmbedder is a hash embedder that describes itself and reports a
 // token count per input, the way the OpenAI embedder does.
 type describedEmbedder struct {
-	hashEmbedder
+	*embedtest.Hash
 	kind   string
 	model  string
 	tokens int
@@ -138,7 +139,7 @@ func (d describedEmbedder) Embed(ctx context.Context, texts []string) ([]embedde
 	if d.err != nil {
 		return nil, d.err
 	}
-	out, err := d.hashEmbedder.Embed(ctx, texts)
+	out, err := d.Hash.Embed(ctx, texts)
 	for i := range out {
 		out[i].TokenCount = d.tokens
 	}
@@ -224,9 +225,9 @@ func TestIngestSpansAndMetrics(t *testing.T) {
 	sink := newFakeSink()
 	r := newRig(t,
 		withOpt(engine.WithMetrics(sink)),
-		withOpt(engine.WithEmbedder(describedEmbedder{hashEmbedder: hashEmbedder{dims: 64}, kind: "openai", model: "text-embedding-3-small", tokens: 7})),
+		withOpt(engine.WithEmbedder(describedEmbedder{Hash: embedtest.New(64), kind: "openai", model: "text-embedding-3-small", tokens: 7})),
 	)
-	col := mustTestCollection(t, r.Engine, "telemetry")
+	col := mustCollectionAs(t, weave.WithTenant(context.Background(), secret), r.Engine, "telemetry")
 
 	ctx, parent := otel.Tracer("test").Start(weave.WithTenant(context.Background(), secret), "request")
 	res, err := r.Engine.Ingest(ctx, &engine.IngestInput{
@@ -311,10 +312,10 @@ func TestCustomKindsAreBounded(t *testing.T) {
 	sink := newFakeSink()
 	r := newRig(t,
 		withOpt(engine.WithMetrics(sink)),
-		withOpt(engine.WithEmbedder(describedEmbedder{hashEmbedder: hashEmbedder{dims: 64}, kind: secret, model: secret})),
+		withOpt(engine.WithEmbedder(describedEmbedder{Hash: embedtest.New(64), kind: secret, model: secret})),
 	)
 	col := mustTestCollection(t, r.Engine, "kinds")
-	mustIngest(t, context.Background(), r.Engine, col.ID, "t", "some words to embed")
+	mustIngest(t, weave.WithTenant(context.Background(), "t1"), r.Engine, col.ID, "t", "some words to embed")
 
 	wantAttr(t, oneSpan(t, rec, "embed texts"), "gen_ai.provider.name", "custom")
 	for _, fs := range sink.byName("gen_ai.client.operation.duration") {
@@ -356,7 +357,7 @@ func TestCustomComponentsAreLabelledCustom(t *testing.T) {
 			return engine.WithRetriever(oddRetriever{retriever.NewSimilarityRetriever(r.Vectors, r.Embed, r.Store)})
 		},
 	)
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, r.Engine, "custom")
 	mustIngest(t, ctx, r.Engine, col.ID, "a", "refunds take thirty days")
 	if _, err := r.Engine.Retrieve(ctx, "refunds", engine.WithCollection(col.ID)); err != nil {
@@ -392,10 +393,10 @@ func TestCustomComponentsAreLabelledCustom(t *testing.T) {
 }
 
 // countingEmbedder reports a token count but doesn't describe itself.
-type countingEmbedder struct{ hashEmbedder }
+type countingEmbedder struct{ *embedtest.Hash }
 
 func (c countingEmbedder) Embed(ctx context.Context, texts []string) ([]embedder.EmbedResult, error) {
-	out, err := c.hashEmbedder.Embed(ctx, texts)
+	out, err := c.Hash.Embed(ctx, texts)
 	for i := range out {
 		out[i].TokenCount = 5
 	}
@@ -409,10 +410,10 @@ func TestUsageNeedsNoDescriber(t *testing.T) {
 	sink := newFakeSink()
 	r := newRig(t,
 		withOpt(engine.WithMetrics(sink)),
-		withOpt(engine.WithEmbedder(countingEmbedder{hashEmbedder{dims: 64}})),
+		withOpt(engine.WithEmbedder(countingEmbedder{embedtest.New(64)})),
 	)
 	col := mustTestCollection(t, r.Engine, "usage")
-	res, err := r.Engine.Ingest(context.Background(), &engine.IngestInput{CollectionID: col.ID, Content: "a few words"})
+	res, err := r.Engine.Ingest(weave.WithTenant(context.Background(), "t1"), &engine.IngestInput{CollectionID: col.ID, Content: "a few words"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,10 +437,10 @@ func TestIngestFailureNamesTheTypeOnly(t *testing.T) {
 	sink := newFakeSink()
 	r := newRig(t,
 		withOpt(engine.WithMetrics(sink)),
-		withOpt(engine.WithEmbedder(describedEmbedder{hashEmbedder: hashEmbedder{dims: 64}, kind: "openai", err: errors.New("provider said no to " + secret)})),
+		withOpt(engine.WithEmbedder(describedEmbedder{Hash: embedtest.New(64), kind: "openai", err: errors.New("provider said no to " + secret)})),
 	)
 	col := mustTestCollection(t, r.Engine, "fail")
-	if _, err := r.Engine.Ingest(context.Background(), &engine.IngestInput{CollectionID: col.ID, Content: "hello there"}); err == nil {
+	if _, err := r.Engine.Ingest(weave.WithTenant(context.Background(), "t1"), &engine.IngestInput{CollectionID: col.ID, Content: "hello there"}); err == nil {
 		t.Fatal("ingest succeeded with a failing embedder")
 	}
 
@@ -491,7 +492,7 @@ func TestIngestUnknownCollectionIsNotAnError(t *testing.T) {
 	rec := recordSpans(t)
 	sink := newFakeSink()
 	r := newRig(t, withOpt(engine.WithMetrics(sink)))
-	_, err := r.Engine.Ingest(context.Background(), &engine.IngestInput{CollectionID: id.NewCollectionID(), Content: "x"})
+	_, err := r.Engine.Ingest(weave.WithTenant(context.Background(), "t1"), &engine.IngestInput{CollectionID: id.NewCollectionID(), Content: "x"})
 	if !errors.Is(err, weave.ErrCollectionNotFound) {
 		t.Fatalf("ingest: %v", err)
 	}
@@ -511,7 +512,7 @@ func TestRetrieveSpansAndMetrics(t *testing.T) {
 	r := newRig(t, withOpt(engine.WithMetrics(sink)))
 	// The tenant rides on the context and must reach no span.
 	ctx := weave.WithTenant(context.Background(), secret)
-	col := mustTestCollection(t, r.Engine, "retrieve")
+	col := mustCollectionAs(t, ctx, r.Engine, "retrieve")
 	mustIngest(t, ctx, r.Engine, col.ID, "refunds", "refunds are issued within thirty days")
 	gone := mustIngest(t, ctx, r.Engine, col.ID, "refund policy", "refund policy thirty days")
 	// Drop one document's chunk rows and leave its vectors: an orphan.
@@ -546,7 +547,7 @@ func TestRetrieveSpansAndMetrics(t *testing.T) {
 		t.Fatal("no query embed span")
 	}
 	childOf(t, queryEmbed, ret)
-	// hashEmbedder doesn't describe itself or report tokens.
+	// The hash embedder doesn't describe itself or report tokens.
 	wantAttr(t, queryEmbed, "gen_ai.provider.name", "custom")
 	if _, ok := attrsOf(queryEmbed)["gen_ai.usage.input_tokens"]; ok {
 		t.Error("an embedder that reports no tokens got a usage attribute")
@@ -581,7 +582,7 @@ func TestRetrieveWithRetrieverLabelsItsKind(t *testing.T) {
 	r := newRig(t, withOpt(engine.WithMetrics(sink)), func(r *testRig) engine.Option {
 		return engine.WithRetriever(retriever.NewMMRRetriever(r.Vectors, r.Embed, 0.7))
 	})
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, r.Engine, "mmr")
 	mustIngest(t, ctx, r.Engine, col.ID, "a", "refunds are issued within thirty days")
 	if _, err := r.Engine.Retrieve(ctx, "refunds", engine.WithCollection(col.ID)); err != nil {
@@ -597,7 +598,7 @@ func TestReindexSpans(t *testing.T) {
 	rec := recordSpans(t)
 	sink := newFakeSink()
 	r := newRig(t, withOpt(engine.WithMetrics(sink)))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, r.Engine, "reindex")
 	mustIngest(t, ctx, r.Engine, col.ID, "a", "first document")
 	mustIngest(t, ctx, r.Engine, col.ID, "b", "second document")
@@ -635,8 +636,8 @@ func TestReindexSpans(t *testing.T) {
 func TestNoMetricsSinkIsFine(t *testing.T) {
 	r := newRig(t)
 	col := mustTestCollection(t, r.Engine, "plain")
-	mustIngest(t, context.Background(), r.Engine, col.ID, "a", "words")
-	if _, err := r.Engine.Retrieve(context.Background(), "words"); err != nil {
+	mustIngest(t, weave.WithTenant(context.Background(), "t1"), r.Engine, col.ID, "a", "words")
+	if _, err := r.Engine.Retrieve(weave.WithTenant(context.Background(), "t1"), "words"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -646,7 +647,7 @@ func TestMetricLabelKeysAreStable(t *testing.T) {
 	recordSpans(t)
 	sink := newFakeSink()
 	r := newRig(t, withOpt(engine.WithMetrics(sink)))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, r.Engine, "keys")
 	mustIngest(t, ctx, r.Engine, col.ID, "a", "words")
 	_, _ = r.Engine.Ingest(ctx, &engine.IngestInput{CollectionID: id.NewCollectionID(), Content: "x"}) // a not_found series is the point

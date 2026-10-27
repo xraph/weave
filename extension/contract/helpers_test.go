@@ -15,6 +15,7 @@ import (
 	dashauth "github.com/xraph/forge/extensions/dashboard/auth"
 	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunker"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/embedder"
@@ -60,7 +61,7 @@ func openMemory(*testing.T) store.Store { return memory.New() }
 
 func openSQLite(t *testing.T) store.Store {
 	t.Helper()
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	drv := sqlitedriver.New()
 	if err := drv.Open(ctx, filepath.Join(t.TempDir(), "weave.db")); err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -79,7 +80,8 @@ func openSQLite(t *testing.T) store.Store {
 
 // newDeps builds an engine on s with a memory vector store, the hashing
 // embedder and the recursive chunker. opts are applied after those, so a
-// test can replace the embedder.
+// test can replace the embedder. Every dashboard request resolves to t1,
+// the tenant the helpers seed under.
 func newDeps(t *testing.T, s store.Store, opts ...engine.Option) Deps {
 	t.Helper()
 	base := []engine.Option{
@@ -92,8 +94,10 @@ func newDeps(t *testing.T, s store.Store, opts ...engine.Option) Deps {
 	if err != nil {
 		t.Fatalf("engine.New: %v", err)
 	}
-	return Deps{Engine: e}
+	return Deps{Engine: e, Tenant: resolveT1}
 }
+
+func resolveT1(context.Context, dashcontract.Principal) (string, error) { return "t1", nil }
 
 // forEachStore runs fn on the memory store and on a real SQLite store, so
 // every handler is checked against at least one real backend.
@@ -122,7 +126,7 @@ func principal() dashcontract.Principal {
 func mustCollection(t *testing.T, deps Deps, name string) *collection.Collection {
 	t.Helper()
 	col := &collection.Collection{Name: name, ChunkSize: 512}
-	if err := deps.Engine.CreateCollection(context.Background(), col); err != nil {
+	if err := deps.Engine.CreateCollection(weave.WithTenant(context.Background(), "t1"), col); err != nil {
 		t.Fatalf("create collection %q: %v", name, err)
 	}
 	return col

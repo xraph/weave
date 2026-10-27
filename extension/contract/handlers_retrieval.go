@@ -99,7 +99,7 @@ func retrievalRunHandler(deps Deps) func(context.Context, runInput, contract.Pri
 			return runOutput{}, unavailable("retrieval needs Weave's own embedder and vector store; this deployment has no vector store configured")
 		}
 
-		res, err := deps.Engine.RetrieveCompare(ctx, query, engine.CompareParams{CollectionID: colID, Tenant: in.Tenant, TopK: topK, MinScore: in.MinScore})
+		res, err := deps.Engine.RetrieveCompare(ctx, query, engine.CompareParams{CollectionID: colID, TopK: topK, MinScore: in.MinScore})
 		if err != nil {
 			return runOutput{}, deps.mapError(intent, err)
 		}

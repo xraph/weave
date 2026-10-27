@@ -50,3 +50,14 @@ func TestPinSearchPath(t *testing.T) {
 		t.Errorf("keyword form: got %q, %v", kw, err)
 	}
 }
+
+func TestWithDatabase(t *testing.T) {
+	got, err := withDatabase("postgres://postgres:weave@localhost:55621/postgres?sslmode=disable", "d1")
+	if err != nil || got != "postgres://postgres:weave@localhost:55621/d1?sslmode=disable" {
+		t.Errorf("url form: got %q, %v", got, err)
+	}
+	kw, err := withDatabase("host=localhost port=55621", "d1")
+	if err != nil || kw != "host=localhost port=55621 dbname=d1" {
+		t.Errorf("keyword form: got %q, %v", kw, err)
+	}
+}

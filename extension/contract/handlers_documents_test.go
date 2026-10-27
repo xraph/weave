@@ -11,8 +11,6 @@ import (
 	forgetesting "github.com/xraph/forge/testing"
 
 	"github.com/xraph/weave"
-	"github.com/xraph/weave/chunk"
-	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/embedder"
 	"github.com/xraph/weave/engine"
@@ -23,7 +21,7 @@ import (
 
 func TestDocumentsIngestListGetSpansDelete(t *testing.T) {
 	forEachStore(t, func(t *testing.T, deps Deps) {
-		ctx := context.Background()
+		ctx := weave.WithTenant(context.Background(), "t1")
 		p := principal()
 		col := mustCollection(t, deps, "kb")
 
@@ -69,7 +67,7 @@ func TestDocumentsIngestListGetSpansDelete(t *testing.T) {
 // error: the page shows the stored reason and links to the document.
 func TestDocumentsIngest_FailureIsAnAnswer(t *testing.T) {
 	deps := newDeps(t, openMemory(t), engine.WithEmbedder(failingEmbedder{}))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustCollection(t, deps, "kb")
 	out, err := documentsIngestHandler(deps)(ctx, ingestInput{CollectionID: col.ID.String(), Content: "anything at all"}, principal())
 	if err != nil {
@@ -105,7 +103,7 @@ func TestDocumentsIngest_FailureWithUnreadableDocument(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			deps := newDeps(t, documentReadDown{memory.New()}, engine.WithEmbedder(failingEmbedder{}))
 			deps.Logger = logger
-			ctx := context.Background()
+			ctx := weave.WithTenant(context.Background(), "t1")
 			col := mustCollection(t, deps, "kb")
 			out, err := documentsIngestHandler(deps)(ctx, ingestInput{CollectionID: col.ID.String(), Content: "anything at all"}, principal())
 			if err != nil {
@@ -116,62 +114,6 @@ func TestDocumentsIngest_FailureWithUnreadableDocument(t *testing.T) {
 			}
 		})
 	}
-}
-
-// A dashboard request carries no tenant. Ingest into a tenant's collection
-// must still land the document, its chunks and its vectors in that tenant.
-func TestDocumentsIngest_UsesTheCollectionsTenant(t *testing.T) {
-	forEachStore(t, func(t *testing.T, deps Deps) {
-		ctx := context.Background()
-		p := principal()
-		col := &collection.Collection{Name: "kb", ChunkSize: 512}
-		if err := deps.Engine.CreateCollection(weave.WithApp(weave.WithTenant(ctx, "acme"), "portal"), col); err != nil {
-			t.Fatal(err)
-		}
-		out, err := documentsIngestHandler(deps)(ctx, ingestInput{CollectionID: col.ID.String(), Title: "refunds", Content: "refunds are issued within thirty days"}, p)
-		if err != nil || out.State != "ready" {
-			t.Fatalf("ingest: %+v %v", out, err)
-		}
-
-		docID, err := id.ParseDocumentID(out.DocumentID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		doc, err := deps.Engine.GetDocument(ctx, docID)
-		if err != nil || doc.TenantID != "acme" {
-			t.Fatalf("document tenant: %+v %v", doc, err)
-		}
-		chunks, err := deps.Engine.ListChunks(ctx, &chunk.ListFilter{DocumentID: docID})
-		if err != nil || len(chunks) == 0 {
-			t.Fatalf("chunks: %v %v", chunks, err)
-		}
-		for _, c := range chunks {
-			if c.TenantID != "acme" {
-				t.Errorf("chunk %s tenant %q, want acme", c.ID, c.TenantID)
-			}
-		}
-
-		acme, untenanted := "acme", ""
-		list, err := documentsListHandler(deps)(ctx, documentsListInput{Tenant: &acme}, p)
-		if err != nil || list.Total != 1 || list.Items[0].ID.String() != out.DocumentID {
-			t.Errorf("documents.list tenant acme: %+v %v", list, err)
-		}
-		list, err = documentsListHandler(deps)(ctx, documentsListInput{Tenant: &untenanted}, p)
-		if err != nil || list.Total != 0 {
-			t.Errorf("documents.list tenant \"\": %+v %v", list, err)
-		}
-
-		// The vectors carry the tenant too: retrieval filtered to acme finds
-		// the document, and filtered to "" finds nothing.
-		run, err := retrievalRunHandler(deps)(ctx, runInput{Query: "refunds", Tenant: &acme}, p)
-		if err != nil || len(run.Result.Hits) == 0 || run.Result.Hits[0].Chunk.DocumentID.String() != out.DocumentID {
-			t.Errorf("retrieval tenant acme: %+v %v", run.Result, err)
-		}
-		run, err = retrievalRunHandler(deps)(ctx, runInput{Query: "refunds", Tenant: &untenanted}, p)
-		if err != nil || len(run.Result.Hits) != 0 {
-			t.Errorf("retrieval tenant \"\": %+v %v", run.Result, err)
-		}
-	})
 }
 
 // cancellingEmbedder cancels the request on its first call, the way a
@@ -197,7 +139,7 @@ func TestDocumentsIngest_SurvivesCancellation(t *testing.T) {
 		open func(*testing.T) store.Store
 	}{{"memory", openMemory}, {"sqlite", openSQLite}} {
 		t.Run(b.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(weave.WithTenant(context.Background(), "t1"))
 			defer cancel()
 			deps := newDeps(t, b.open(t), engine.WithEmbedder(cancellingEmbedder{hashEmbedder: hashEmbedder{dims: 256}, cancel: cancel}))
 			col := mustCollection(t, deps, "kb")
@@ -210,7 +152,7 @@ func TestDocumentsIngest_SurvivesCancellation(t *testing.T) {
 				t.Fatalf("ingest: %+v %v", out, err)
 			}
 			docID, _ := id.ParseDocumentID(out.DocumentID)
-			doc, err := deps.Engine.GetDocument(context.Background(), docID)
+			doc, err := deps.Engine.GetDocument(weave.WithTenant(context.Background(), "t1"), docID)
 			if err != nil || doc.State != document.StateReady {
 				t.Errorf("stored document: %+v %v, want ready", doc, err)
 			}
@@ -220,7 +162,7 @@ func TestDocumentsIngest_SurvivesCancellation(t *testing.T) {
 
 func TestDocumentsIngest_Validation(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustCollection(t, deps, "kb")
 	big := strings.Repeat("a", maxIngestBytes+1)
 	cases := map[string]struct {
@@ -242,7 +184,7 @@ func TestDocumentsIngest_Validation(t *testing.T) {
 
 func TestDocumentsList_Validation(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	if _, err := documentsListHandler(deps)(ctx, documentsListInput{State: "archived"}, principal()); codeOf(err) != dashcontract.CodeBadRequest {
 		t.Errorf("bad state: %v", err)
 	}

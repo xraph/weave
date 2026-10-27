@@ -17,11 +17,13 @@ func TestMapError(t *testing.T) {
 		err  error
 		code dashcontract.ErrorCode
 	}{
+		{fmt.Errorf("weave: list collections: %w", weave.ErrTenantRequired), dashcontract.CodePermissionDenied},
 		{weave.ErrCollectionNotFound, dashcontract.CodeNotFound},
 		{fmt.Errorf("wrapped: %w", weave.ErrDocumentNotFound), dashcontract.CodeNotFound},
 		{weave.ErrChunkNotFound, dashcontract.CodeNotFound},
 		{weave.ErrDuplicateDocument, dashcontract.CodeConflict},
 		{weave.ErrCollectionAlreadyExists, dashcontract.CodeConflict},
+		{weave.ErrIngestInterrupted, dashcontract.CodeConflict},
 		{weave.ErrEmptyContent, dashcontract.CodeBadRequest},
 		{fmt.Errorf("%w: list chunks needs a document or a collection", weave.ErrInvalidArgument), dashcontract.CodeBadRequest},
 		{weave.ErrNoEmbedder, dashcontract.CodeUnavailable},

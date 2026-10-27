@@ -47,11 +47,11 @@ func chunksListHandler(deps Deps) func(context.Context, chunksListInput, contrac
 		if err != nil {
 			return listOutput[*chunk.Chunk]{}, err
 		}
-		chunks, err := deps.Engine.ListChunks(ctx, &chunk.ListFilter{DocumentID: docID, CollectionID: colID, Tenant: in.Tenant, Limit: limit, Offset: offset})
+		chunks, err := deps.Engine.ListChunks(ctx, &chunk.ListFilter{DocumentID: docID, CollectionID: colID, Limit: limit, Offset: offset})
 		if err != nil {
 			return listOutput[*chunk.Chunk]{}, deps.mapError(intent, err)
 		}
-		total, err := deps.Engine.CountChunks(ctx, &chunk.CountFilter{DocumentID: docID, CollectionID: colID, Tenant: in.Tenant})
+		total, err := deps.Engine.CountChunks(ctx, &chunk.CountFilter{DocumentID: docID, CollectionID: colID})
 		if err != nil {
 			return listOutput[*chunk.Chunk]{}, deps.mapError(intent, err)
 		}

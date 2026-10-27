@@ -13,9 +13,12 @@ It's a library, not a service. You own `main`, the database connection and the p
 - `engine.Retrieve` embeds the query and searches the vector store, or hands off to a retriever you configure: similarity, MMR, hybrid (Reciprocal Rank Fusion) or a reranker wrapper. `HybridSearch` covers several collections at once.
 - `engine.Assemble` turns the hits into one context string that fits a token budget, with a marker in front of each chunk.
 - Documents live in named collections, each with its own chunk size, overlap and a recorded embedding model.
+- Give an ingest a `SourceKey` and it becomes an upsert of that source: the same content embeds nothing, new content replaces the old version in one swap, and several replicas ingesting the same source at once end with one ready document. See [upsert by source](/docs/subsystems/ingestion#upsert-by-source).
+- If a process dies mid-ingest, [recovery](/docs/subsystems/ingestion#recovery) fails the document once its heartbeat goes stale and deletes its partial chunks and vectors, so a search never returns half a document.
 - The loader, chunker, embedder, retriever, vector store and metadata store are all Go interfaces.
-- Metadata goes in PostgreSQL, SQLite, MongoDB or memory. Vectors go in pgvector, [Fabriq](https://github.com/xraph/fabriq) or memory.
-- `weave.WithTenant` on the context stamps the tenant on everything you create and filters retrieval to it. See [multi-tenancy](/docs/concepts/multi-tenancy) for exactly what is and isn't scoped.
+- Metadata goes in PostgreSQL, SQLite, MongoDB or memory. Vectors go in [pgvector](/docs/stores/pgvector), whose table `pgvector.Migrate` creates as its own `weave_pgvector` migration group, [Fabriq](https://github.com/xraph/fabriq) or memory.
+- Embeddings come from OpenAI or any compatible server, or through a [nexus](https://github.com/xraph/nexus) gateway with `github.com/xraph/weave/embedder/nexus`, a module of its own so the root never pulls in nexus.
+- `weave.WithTenant` on the context is required. It stamps the tenant on everything you create, and reads, lists and searches only see that tenant's data. See [multi-tenancy](/docs/concepts/multi-tenancy).
 - You can hook into 14 lifecycle events (collections, ingestion, retrieval, deletes, reindexing and shutdown). Weave ships a metrics extension and a Chronicle audit bridge built on them.
 - `extension.New` builds the engine, provides `*engine.Engine` in the DI container and mounts 13 routes under `/weave/v1`.
 
@@ -30,6 +33,7 @@ import (
     "log"
     "os"
 
+    "github.com/xraph/weave"
     "github.com/xraph/weave/chunker"
     "github.com/xraph/weave/collection"
     "github.com/xraph/weave/embedder"
@@ -39,7 +43,8 @@ import (
 )
 
 func main() {
-    ctx := context.Background()
+    // Every call runs inside a tenant, so put one on the context first.
+    ctx := weave.WithTenant(context.Background(), "acme")
 
     eng, err := engine.New(
         engine.WithStore(memory.New()),

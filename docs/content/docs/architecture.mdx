@@ -70,7 +70,7 @@ eng, err := engine.New(
 6. Chunk the content and fire `OnIngestChunked`.
 7. Embed every chunk in one `Embed` call and fire `OnIngestEmbedded`.
 8. Write the chunks to the metadata store with `CreateChunkBatch`.
-9. Upsert one vector per chunk. Its ID is the chunk ID and its metadata carries `collection_id`, `document_id`, `tenant_id` and `chunk_index`, plus the chunk's own metadata.
+9. Upsert one vector per chunk. Its ID is the chunk ID and its metadata carries `collection_id`, `document_id`, `tenant_id` and `chunk_index` (and `source_key` for a source-keyed document), plus the chunk's own metadata.
 10. Set `State=ready` and `ChunkCount`, then fire `OnIngestCompleted`.
 
 If step 5 or anything after it fails, the document is set to `failed` with the error text in `Error`, and `OnIngestFailed` fires.
@@ -79,11 +79,12 @@ If step 5 or anything after it fails, the document is set to `failed` with the e
 
 `engine.Retrieve` runs:
 
-1. Fire `OnRetrievalStarted`.
-2. Build a filter: `collection_id` from `WithCollection`, and `tenant_id` from `WithTenantFilter`, `WithTenantID` or the context tenant, in that order.
-3. If a retriever is configured, call it with that filter. Otherwise embed the query and call `VectorStore.Search` directly.
-4. Read each hit's chunk back from the metadata store by ID. A hit whose chunk row is gone stays in the results with `Orphaned` set.
-5. Fire `OnRetrievalCompleted`, or `OnRetrievalFailed` on an error.
+1. Check the context tenant. Without one the call fails with `ErrTenantRequired` before anything is embedded.
+2. Fire `OnRetrievalStarted`.
+3. Build a filter: `tenant_id` from the context tenant, and `collection_id` from `WithCollection`.
+4. If a retriever is configured, call it with that filter. Otherwise embed the query and call `VectorStore.Search` directly.
+5. Read each hit's chunk back from the metadata store by ID, within the tenant. A hit whose chunk row is gone stays in the results with `Orphaned` set, and a hit from another tenant is dropped.
+6. Fire `OnRetrievalCompleted`, or `OnRetrievalFailed` on an error.
 
 ## Extension system
 

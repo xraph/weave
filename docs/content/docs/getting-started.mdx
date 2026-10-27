@@ -66,7 +66,7 @@ ctx = weave.WithTenant(ctx, "acme")
 ctx = weave.WithApp(ctx, "support-bot")
 ```
 
-This is optional. When it's there, `CreateCollection` records the tenant and app on the collection, `Ingest` stamps the tenant on the document and its chunks, and `Retrieve` only searches vectors with that tenant. Reads by ID and list calls don't check it, so read [multi-tenancy](/docs/concepts/multi-tenancy) before you rely on it for isolation.
+The tenant is required: without one, every call fails with `weave.ErrTenantRequired`. The app is optional. `CreateCollection` records both on the collection, `Ingest` stamps the tenant on the document and its chunks, and reads, lists and `Retrieve` only see that tenant's data. [Multi-tenancy](/docs/concepts/multi-tenancy) goes through it call by call.
 
 ## Step 3: Create a collection
 
@@ -184,16 +184,20 @@ st := postgres.New(db)
 if err := st.Migrate(ctx); err != nil {
     log.Fatal(err)
 }
+emb := embedder.NewOpenAIEmbedder(os.Getenv("OPENAI_API_KEY"))
+if err := pgvector.Migrate(ctx, db, emb.Dimensions()); err != nil {
+    log.Fatal(err)
+}
 
 eng, err := engine.New(
     engine.WithStore(st),
-    engine.WithVectorStore(pgvector.New(db)),
-    engine.WithEmbedder(embedder.NewOpenAIEmbedder(os.Getenv("OPENAI_API_KEY"))),
+    engine.WithVectorStore(pgvector.New(db, pgvector.WithDimensions(emb.Dimensions()))),
+    engine.WithEmbedder(emb),
     engine.WithChunker(chunker.NewRecursiveChunker()),
 )
 ```
 
-`Migrate` creates the metadata tables. Nothing creates the pgvector side: you have to create the `vector` extension and the `weave_vectors` table yourself before the first ingest. The [PostgreSQL store](/docs/stores/postgres#pgvector) page has the table definition.
+`st.Migrate` creates the metadata tables. `pgvector.Migrate` creates the `vector` extension, the `weave_vectors` table and its indexes, sized for your embedder. The database needs pgvector available for that; the [pgvector](/docs/stores/pgvector) page covers checking first with `pgvector.Available`.
 
 ## Next steps
 

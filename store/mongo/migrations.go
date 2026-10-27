@@ -141,5 +141,81 @@ func init() {
 				return mexec.DropCollection(ctx, (*chunkModel)(nil))
 			},
 		},
+		&migrate.Migration{
+			Name:    "add_weave_documents_source_key",
+			Version: "20261024000100",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				mexec, ok := exec.(*mongomigrate.Executor)
+				if !ok {
+					return fmt.Errorf("expected mongomigrate executor, got %T", exec)
+				}
+				// A partial filter can't say "not empty", so "greater than
+				// the empty string" stands in for it.
+				keyed := bson.M{"source_key": bson.M{"$gt": ""}}
+				return mexec.CreateIndexes(ctx, colDocuments, []mongo.IndexModel{
+					{
+						Keys: bson.D{
+							{Key: "collection_id", Value: 1},
+							{Key: "source_key", Value: 1},
+						},
+						Options: options.Index().
+							SetName("idx_weave_documents_source_ready").
+							SetUnique(true).
+							SetPartialFilterExpression(bson.M{"source_key": bson.M{"$gt": ""}, "state": "ready"}),
+					},
+					{
+						Keys: bson.D{
+							{Key: "tenant_id", Value: 1},
+							{Key: "collection_id", Value: 1},
+							{Key: "source_key", Value: 1},
+						},
+						Options: options.Index().
+							SetName("idx_weave_documents_source").
+							SetPartialFilterExpression(keyed),
+					},
+				})
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				mexec, ok := exec.(*mongomigrate.Executor)
+				if !ok {
+					return fmt.Errorf("expected mongomigrate executor, got %T", exec)
+				}
+				indexes := mexec.DB().Collection(colDocuments).Indexes()
+				for _, name := range []string{"idx_weave_documents_source", "idx_weave_documents_source_ready"} {
+					if err := indexes.DropOne(ctx, name); err != nil {
+						return fmt.Errorf("drop index %s: %w", name, err)
+					}
+				}
+				return nil
+			},
+		},
+		&migrate.Migration{
+			Name:    "index_weave_documents_state_updated",
+			Version: "20261024000200",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				mexec, ok := exec.(*mongomigrate.Executor)
+				if !ok {
+					return fmt.Errorf("expected mongomigrate executor, got %T", exec)
+				}
+				// Recovery lists stalled documents by state and age.
+				return mexec.CreateIndexes(ctx, colDocuments, []mongo.IndexModel{{
+					Keys: bson.D{
+						{Key: "state", Value: 1},
+						{Key: "updated_at", Value: 1},
+					},
+					Options: options.Index().SetName("idx_weave_documents_state_updated"),
+				}})
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				mexec, ok := exec.(*mongomigrate.Executor)
+				if !ok {
+					return fmt.Errorf("expected mongomigrate executor, got %T", exec)
+				}
+				if err := mexec.DB().Collection(colDocuments).Indexes().DropOne(ctx, "idx_weave_documents_state_updated"); err != nil {
+					return fmt.Errorf("drop index idx_weave_documents_state_updated: %w", err)
+				}
+				return nil
+			},
+		},
 	)
 }

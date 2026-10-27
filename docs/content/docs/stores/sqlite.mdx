@@ -72,6 +72,6 @@ The in-memory vectors are gone on restart while the metadata stays. After a rest
 
 ## Limitations
 
-- SQLite takes a database-wide write lock, so heavy concurrent writes queue up.
+- SQLite lets one writer in at a time. Every write the store makes takes the write lock as its transaction starts and waits up to five seconds for it, so concurrent writers queue up instead of failing with `SQLITE_BUSY`. Under heavy write load a writer that waits longer than that still fails.
 - No vector search in the database; you need a separate vector store.
 - One process at a time.

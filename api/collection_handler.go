@@ -28,10 +28,10 @@ func (a *API) createCollection(ctx forge.Context, req *CreateCollectionRequest) 
 	}
 
 	if err := a.eng.CreateCollection(ctx.Context(), col); err != nil {
-		return nil, fmt.Errorf("create collection: %w", err)
+		return nil, mapStoreError(err)
 	}
 
-	return col, ctx.JSON(http.StatusCreated, col)
+	return nil, ctx.JSON(http.StatusCreated, col)
 }
 
 func (a *API) getCollection(ctx forge.Context, _ *GetCollectionRequest) (*collection.Collection, error) {
@@ -45,19 +45,22 @@ func (a *API) getCollection(ctx forge.Context, _ *GetCollectionRequest) (*collec
 		return nil, mapStoreError(err)
 	}
 
-	return col, ctx.JSON(http.StatusOK, col)
+	return nil, ctx.JSON(http.StatusOK, col)
 }
 
-func (a *API) listCollections(ctx forge.Context, req *ListCollectionsRequest) ([]*collection.Collection, error) {
+func (a *API) listCollections(ctx forge.Context, req *ListCollectionsRequest) (*struct{}, error) {
 	cols, err := a.eng.ListCollections(ctx.Context(), &collection.ListFilter{
 		Limit:  defaultLimit(req.Limit),
 		Offset: req.Offset,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list collections: %w", err)
+		return nil, mapStoreError(err)
 	}
 
-	return cols, ctx.JSON(http.StatusOK, cols)
+	if cols == nil {
+		cols = []*collection.Collection{}
+	}
+	return nil, ctx.JSON(http.StatusOK, cols)
 }
 
 func (a *API) deleteCollection(ctx forge.Context, _ *DeleteCollectionRequest) (*struct{}, error) {
@@ -84,7 +87,7 @@ func (a *API) collectionStats(ctx forge.Context, _ *CollectionStatsRequest) (*en
 		return nil, mapStoreError(err)
 	}
 
-	return stats, ctx.JSON(http.StatusOK, stats)
+	return nil, ctx.JSON(http.StatusOK, stats)
 }
 
 func (a *API) reindexCollection(ctx forge.Context, _ *ReindexCollectionRequest) (*struct{}, error) {

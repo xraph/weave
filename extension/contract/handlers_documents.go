@@ -92,12 +92,12 @@ func documentsListHandler(deps Deps) func(context.Context, documentsListInput, c
 		}
 		state := document.State(in.State)
 		docs, err := deps.Engine.ListDocuments(ctx, &document.ListFilter{
-			CollectionID: colID, State: state, Search: in.Search, Limit: limit, Offset: offset, SortDesc: true, Tenant: in.Tenant,
+			CollectionID: colID, State: state, Search: in.Search, Limit: limit, Offset: offset, SortDesc: true,
 		})
 		if err != nil {
 			return listOutput[documentRow]{}, deps.mapError(intent, err)
 		}
-		total, err := deps.Engine.CountDocuments(ctx, &document.CountFilter{CollectionID: colID, State: state, Search: in.Search, Tenant: in.Tenant})
+		total, err := deps.Engine.CountDocuments(ctx, &document.CountFilter{CollectionID: colID, State: state, Search: in.Search})
 		if err != nil {
 			return listOutput[documentRow]{}, deps.mapError(intent, err)
 		}
@@ -160,17 +160,14 @@ func documentsSpansHandler(deps Deps) func(context.Context, idInput, contract.Pr
 	}
 }
 
-// documentsIngestHandler ingests synchronously. Two things differ from a
-// call to Engine.Ingest on the request context:
-//
-//   - The dashboard's request carries no tenant or app, and Ingest stamps
-//     the document, its chunks and its vectors with whatever the context
-//     holds. So the handler reads the collection and ingests under the
-//     collection's own tenant and app.
-//   - The engine call runs on a context that the request's cancellation
-//     does not reach. A closed tab or a proxy timeout would otherwise stop
-//     ingest between writes and leave a document in processing for good.
-//     There is no server-side timeout either, for the same reason.
+// documentsIngestHandler ingests synchronously, under the resolved tenant
+// like every other intent. It reads the collection first, so a collection
+// of another tenant is not found and nothing is written, and it ingests
+// with the collection's app. The engine call runs on a context that the
+// request's cancellation does not reach: a closed tab or a proxy timeout
+// would otherwise stop ingest between writes and leave a document in
+// processing for good. There is no server-side timeout either, for the
+// same reason.
 func documentsIngestHandler(deps Deps) func(context.Context, ingestInput, contract.Principal) (ingestOutput, error) {
 	return func(ctx context.Context, in ingestInput, _ contract.Principal) (ingestOutput, error) {
 		const intent = "documents.ingest"
@@ -188,7 +185,7 @@ func documentsIngestHandler(deps Deps) func(context.Context, ingestInput, contra
 		if err != nil {
 			return ingestOutput{}, deps.mapError(intent, err)
 		}
-		work := weave.WithApp(weave.WithTenant(context.WithoutCancel(ctx), col.TenantID), col.AppID)
+		work := weave.WithApp(context.WithoutCancel(ctx), col.AppID)
 		res, err := deps.Engine.Ingest(work, &engine.IngestInput{
 			CollectionID: colID, Title: in.Title, Source: in.Source, SourceType: in.SourceType,
 			Content: in.Content, Metadata: in.Metadata,

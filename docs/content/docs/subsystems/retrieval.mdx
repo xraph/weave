@@ -30,8 +30,8 @@ for _, h := range hits {
 | `engine.WithCollection(colID)` | Only chunks from this collection |
 | `engine.WithTopK(k)` | Maximum results. Defaults to `Config.DefaultTopK` (10). |
 | `engine.WithMinScore(score)` | Drop hits scoring below this |
-| `engine.WithTenantID(t)` | Search tenant `t` instead of the context tenant. An empty string falls back to the context. |
-| `engine.WithTenantFilter(t)` | Search exactly tenant `t`, and `""` here means rows with no tenant |
+| `engine.WithTenantID(t)` | Deprecated. Becomes the tenant when the context has none; must equal the context tenant when it has one. `""` names nothing. |
+| `engine.WithTenantFilter(t)` | Deprecated. The same, except `""` is a value, and never a valid one |
 | `engine.WithStrategy(name)` | Accepted and ignored, see below |
 
 `WithStrategy` doesn't do anything. `Retrieve` never reads the strategy, so it can't switch between similarity, MMR and hybrid per call; the retriever you passed to `engine.New` is always the one that runs. The same goes for `HybridSearchParams.Strategy` and the `strategy` field on the HTTP routes.
@@ -47,17 +47,51 @@ type ScoredChunk struct {
 }
 ```
 
-After the search, the engine reads every hit's chunk back from the metadata store by ID, so `Chunk` carries the real `DocumentID`, `Index`, offsets and metadata, and `Hydrated` is `true`. If the vector store returns a chunk ID the metadata store doesn't have, the hit keeps its place and its text, and `Orphaned` is `true`. A custom retriever that returns chunks without IDs gets them back unhydrated.
+After the search, the engine reads every hit's chunk back from the metadata store by ID, so `Chunk` carries the real `DocumentID`, `Index`, offsets and metadata, and `Hydrated` is `true`. If the vector store returns a chunk ID the metadata store doesn't have, the hit keeps its place and its text, and `Orphaned` is `true`, as long as the vector is labelled with your tenant. A custom retriever that returns chunks without IDs gets them back unhydrated.
+
+There's one exception to keeping orphans. A hit whose chunk row is missing and whose vector carries a non-empty `source_key` is dropped from the results, not marked `Orphaned`. During a [source upsert](/docs/subsystems/ingestion#upsert-by-source) the new version's vectors are written before its chunk rows exist, and once the swap commits the old version's chunk rows are gone while its vectors wait to be purged. Either way the vector belongs to a version that isn't the current one, and `Retrieve` drops it. Orphans without `source_key` behave as before.
+
+A hydrated hit also needs a live document. The engine reads each hit's document once per call, and drops the hits of a document that is `failed`, `superseded` or gone. A failed ingest deletes its own chunks and vectors, so this only catches what a delete that also failed left behind.
+
+Hits are read back one at a time, so a swap can also commit halfway through, with the old version's row read before it and the new version's after. After hydration, `Retrieve` (and `RetrieveCompare`) therefore keeps one document per source: when a source's hits come from more than one document, only the hits of the version that's `ready` at that moment stay, or the newest one when none is. You never get two versions of one source back. An engine without a metadata store has no versions to read, so it returns hits as the vector store gave them. A search that runs exactly during a swap can still briefly miss that source, for example when it found only the old version's vectors and the swap committed before they were read back. Hidden vectors also take up `TopK` slots, so you can get fewer results than you asked for while a swap is in progress.
 
 What `Score` means depends on the setup. The in-memory and pgvector stores return cosine similarity, MMR keeps that score but reorders, hybrid returns an RRF sum, and the reranker returns the reranker's score. `eng.Components().Score` tells you which one an engine produces.
 
+## Retrieve never crosses tenants
+
+You get hits from the context tenant and from nobody else, whatever the query, the collection or the options:
+
+- No tenant on the context (and no deprecated option naming one) is `weave.ErrTenantRequired`, returned before the query is embedded.
+- `WithTenantID`, `WithTenantFilter` or `CompareParams.Tenant` naming a tenant other than the context's is `weave.ErrInvalidArgument`. They can't widen the search or switch it to someone else.
+- The search filter always carries `tenant_id`, and `TenantKey` is always set.
+- A collection you name with `WithCollection`, in `HybridSearchParams.Collections` or in `CompareParams.CollectionID` is read within the tenant first. Another tenant's collection, or one that doesn't exist, is `weave.ErrCollectionNotFound`, and the query is never embedded. `HybridSearch` checks every named collection before it searches any of them.
+- Each hit is read back within the tenant. A hit labelled with another tenant is dropped, and so is an orphan whose vector isn't labelled with yours. A source-keyed orphan is dropped too, see above.
+- `HybridSearch` and `RetrieveCompare` follow the same rules.
+
+To search a collection several tenants share, such as product docs, keep it under a tenant of its own and call `Retrieve` again under that tenant's context, then merge:
+
+```go
+mine, err := eng.Retrieve(weave.WithTenant(ctx, workspaceID), query, engine.WithTopK(5))
+if err != nil {
+    return err
+}
+shared, err := eng.Retrieve(weave.WithTenant(ctx, "shared-docs"), query, engine.WithTopK(5))
+if err != nil {
+    return err
+}
+hits := append(mine, shared...)
+```
+
+Sort the merged list by `Score` if you want one ranking, and only when both searches produce the same kind of score.
+
 ## Retrieval pipeline
 
-1. Fire `OnRetrievalStarted`.
-2. Build a metadata filter with `collection_id` (from `WithCollection`) and `tenant_id` (from `WithTenantFilter`, else `WithTenantID`, else the context tenant). With no tenant anywhere, there's no tenant filter and every tenant's vectors are searched.
-3. If a retriever is configured, call it with that filter. Otherwise embed the query and call `VectorStore.Search`.
-4. Read each hit's chunk back from the metadata store.
-5. Fire `OnRetrievalCompleted` with the count and elapsed time, or `OnRetrievalFailed` with the error.
+1. Check the tenant (see above).
+2. Fire `OnRetrievalStarted`.
+3. Build a metadata filter with `tenant_id` and, from `WithCollection`, `collection_id`.
+4. If a retriever is configured, call it with that filter and `TenantKey`, on a context carrying the tenant. Otherwise embed the query and call `VectorStore.Search`.
+5. Read each hit's chunk back from the metadata store within the tenant, dropping any hit from another tenant.
+6. Fire `OnRetrievalCompleted` with the count and elapsed time, or `OnRetrievalFailed` with the error.
 
 Without a retriever, `Retrieve` needs both an embedder and a vector store.
 
@@ -113,7 +147,7 @@ hits, err := eng.HybridSearch(ctx, "return policy", &engine.HybridSearchParams{
 })
 ```
 
-With `Collections` set, it calls `Retrieve` once per collection, merges the hits, sorts by score and keeps the top `TopK`. With `Collections` empty, it's one `Retrieve` without a collection filter, scoped to the context tenant if there is one. Despite the name, it doesn't fuse rankings: hybrid ranking comes from `NewHybridRetriever`.
+With `Collections` set, it calls `Retrieve` once per collection, merges the hits, sorts by score and keeps the top `TopK`. With `Collections` empty, it's one `Retrieve` over every collection of the context tenant. Despite the name, it doesn't fuse rankings: hybrid ranking comes from `NewHybridRetriever`.
 
 ## Comparing rankings
 
@@ -131,7 +165,7 @@ type Options struct {
     TenantKey    string
     TopK         int
     MinScore     float64
-    Filter       map[string]string // collection_id and tenant_id as built above
+    Filter       map[string]string // tenant_id, and collection_id when set, as built above
 }
 
 type Result struct {

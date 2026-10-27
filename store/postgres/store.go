@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/xraph/grove"
@@ -17,7 +19,9 @@ import (
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/id"
+	"github.com/xraph/weave/internal/migrateretry"
 	"github.com/xraph/weave/internal/sqllike"
+	"github.com/xraph/weave/internal/tenancy"
 	"github.com/xraph/weave/store"
 )
 
@@ -38,15 +42,19 @@ func New(db *grove.DB) *Store {
 	}
 }
 
-// Migrate runs grove migrations for the Weave schema.
+// Migrate applies the pending migrations in Migrations through grove's
+// orchestrator, which records each version in grove_migrations. Every Up is
+// idempotent, so an install that ran them untracked is adopted in place.
+//
+// Grove v1.10.0 creates grove_migrations and grove_migration_locks before it
+// takes the migration lock, so replicas booting together on a database
+// without those tables race on the CREATE, and the losers fail with
+// duplicate_table or duplicate_object. Migrate retries that failure a few
+// times with a short jittered pause. By the next attempt the tables exist and
+// grove's lock serialises the replicas.
 func (s *Store) Migrate(ctx context.Context) error {
-	exec := pgmigrate.New(s.pg)
-	for _, m := range Migrations.Migrations() {
-		if m.Up != nil {
-			if err := m.Up(ctx, exec); err != nil {
-				return fmt.Errorf("weave: %w: %s: %w", weave.ErrMigrationFailed, m.Name, err)
-			}
-		}
+	if err := migrateretry.Run(ctx, pgmigrate.New(s.pg), Migrations); err != nil {
+		return fmt.Errorf("%w: %w", weave.ErrMigrationFailed, err)
 	}
 	return nil
 }
@@ -66,6 +74,9 @@ func (s *Store) Close() error {
 // ──────────────────────────────────────────────────
 
 func (s *Store) CreateCollection(ctx context.Context, col *collection.Collection) error {
+	if _, err := tenancy.Owner(ctx, "collection", col.TenantID); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	col.CreatedAt = now
 	col.UpdatedAt = now
@@ -82,8 +93,12 @@ func (s *Store) CreateCollection(ctx context.Context, col *collection.Collection
 }
 
 func (s *Store) GetCollection(ctx context.Context, colID id.CollectionID) (*collection.Collection, error) {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	m := new(collectionModel)
-	err := s.pg.NewSelect(m).Where("id = $1", colID.String()).Scan(ctx)
+	err = s.pg.NewSelect(m).Where("id = ?", colID.String()).Where("tenant_id = ?", tenant).Scan(ctx)
 	if err != nil {
 		if isNoRows(err) {
 			return nil, weave.ErrCollectionNotFound
@@ -94,10 +109,14 @@ func (s *Store) GetCollection(ctx context.Context, colID id.CollectionID) (*coll
 }
 
 func (s *Store) GetCollectionByName(ctx context.Context, tenantID, name string) (*collection.Collection, error) {
+	tenant, err := tenancy.Scope(ctx, &tenantID)
+	if err != nil {
+		return nil, err
+	}
 	m := new(collectionModel)
-	err := s.pg.NewSelect(m).
-		Where("tenant_id = $1", tenantID).
-		Where("name = $2", name).
+	err = s.pg.NewSelect(m).
+		Where("tenant_id = ?", tenant).
+		Where("name = ?", name).
 		Scan(ctx)
 	if err != nil {
 		if isNoRows(err) {
@@ -109,19 +128,26 @@ func (s *Store) GetCollectionByName(ctx context.Context, tenantID, name string) 
 }
 
 func (s *Store) UpdateCollection(ctx context.Context, col *collection.Collection) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	if col.TenantID != tenant {
+		return weave.ErrCollectionNotFound
+	}
 	col.UpdatedAt = time.Now().UTC()
 	m := collectionToModel(col)
 
-	res, err := s.pg.NewUpdate(m).WherePK().Exec(ctx)
+	res, err := s.pg.NewUpdate(m).WherePK().Where("tenant_id = ?", tenant).Exec(ctx)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("weave: update collection: %w", weave.ErrCollectionAlreadyExists)
 		}
 		return fmt.Errorf("weave: update collection: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("weave: update collection rows affected: %w", err)
+	n, rowsErr := res.RowsAffected()
+	if rowsErr != nil {
+		return fmt.Errorf("weave: update collection rows affected: %w", rowsErr)
 	}
 	if n == 0 {
 		return weave.ErrCollectionNotFound
@@ -130,15 +156,20 @@ func (s *Store) UpdateCollection(ctx context.Context, col *collection.Collection
 }
 
 func (s *Store) DeleteCollection(ctx context.Context, colID id.CollectionID) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
 	res, err := s.pg.NewDelete((*collectionModel)(nil)).
-		Where("id = $1", colID.String()).
+		Where("id = ?", colID.String()).
+		Where("tenant_id = ?", tenant).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete collection: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("weave: delete collection rows affected: %w", err)
+	n, rowsErr := res.RowsAffected()
+	if rowsErr != nil {
+		return fmt.Errorf("weave: delete collection rows affected: %w", rowsErr)
 	}
 	if n == 0 {
 		return weave.ErrCollectionNotFound
@@ -147,19 +178,20 @@ func (s *Store) DeleteCollection(ctx context.Context, colID id.CollectionID) err
 }
 
 func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilter) ([]*collection.Collection, error) {
+	tenant, err := tenancy.CollectionList(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
 	var models []collectionModel
 	order := "created_at ASC, id ASC"
 	if filter != nil && filter.SortDesc {
 		order = "created_at DESC, id DESC"
 	}
-	q := s.pg.NewSelect(&models).OrderExpr(order)
+	q := s.pg.NewSelect(&models).OrderExpr(order).Where("tenant_id = ?", tenant)
 
 	if filter != nil {
 		if filter.Search != "" {
 			q = q.Where("name ILIKE '%' || ? || '%' ESCAPE '\\'", sqllike.Escape(filter.Search))
-		}
-		if filter.Tenant != nil {
-			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
 		if filter.Limit > 0 {
 			q = q.Limit(filter.Limit)
@@ -181,14 +213,15 @@ func (s *Store) ListCollections(ctx context.Context, filter *collection.ListFilt
 }
 
 func (s *Store) CountCollections(ctx context.Context, filter *collection.CountFilter) (int64, error) {
-	q := s.pg.NewSelect((*collectionModel)(nil))
+	tenant, err := tenancy.CollectionCount(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	q := s.pg.NewSelect((*collectionModel)(nil)).Where("tenant_id = ?", tenant)
 
 	if filter != nil {
 		if filter.Search != "" {
 			q = q.Where("name ILIKE '%' || ? || '%' ESCAPE '\\'", sqllike.Escape(filter.Search))
-		}
-		if filter.Tenant != nil {
-			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
 	}
 
@@ -204,24 +237,51 @@ func (s *Store) CountCollections(ctx context.Context, filter *collection.CountFi
 // ──────────────────────────────────────────────────
 
 func (s *Store) CreateDocument(ctx context.Context, doc *document.Document) error {
+	tenant, err := tenancy.Owner(ctx, "document", doc.TenantID)
+	if err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	doc.CreatedAt = now
 	doc.UpdatedAt = now
 	m := documentToModel(doc)
 
-	_, err := s.pg.NewInsert(m).Exec(ctx)
+	// The collection is checked in the same transaction as the insert, so a
+	// document never hangs off another tenant's collection.
+	tx, err := s.pg.BeginTxQuery(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("weave: create document: %w", err)
+	}
+	defer rollback(tx)
+	n, err := tx.NewSelect((*collectionModel)(nil)).
+		Where("id = ?", doc.CollectionID.String()).
+		Where("tenant_id = ?", tenant).
+		Count(ctx)
+	if err != nil {
+		return fmt.Errorf("weave: create document: %w", err)
+	}
+	if n == 0 {
+		return weave.ErrCollectionNotFound
+	}
+	if _, err = tx.NewInsert(m).Exec(ctx); err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("weave: create document: %w", weave.ErrDuplicateDocument)
 		}
+		return fmt.Errorf("weave: create document: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("weave: create document: %w", err)
 	}
 	return nil
 }
 
 func (s *Store) GetDocument(ctx context.Context, docID id.DocumentID) (*document.Document, error) {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	m := new(documentModel)
-	err := s.pg.NewSelect(m).Where("id = $1", docID.String()).Scan(ctx)
+	err = s.pg.NewSelect(m).Where("id = ?", docID.String()).Where("tenant_id = ?", tenant).Scan(ctx)
 	if err != nil {
 		if isNoRows(err) {
 			return nil, weave.ErrDocumentNotFound
@@ -232,16 +292,26 @@ func (s *Store) GetDocument(ctx context.Context, docID id.DocumentID) (*document
 }
 
 func (s *Store) UpdateDocument(ctx context.Context, doc *document.Document) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	if doc.TenantID != tenant {
+		return weave.ErrDocumentNotFound
+	}
 	doc.UpdatedAt = time.Now().UTC()
 	m := documentToModel(doc)
 
-	res, err := s.pg.NewUpdate(m).WherePK().Exec(ctx)
+	res, err := s.pg.NewUpdate(m).WherePK().
+		Where("tenant_id = ?", tenant).
+		Where("collection_id = ?", doc.CollectionID.String()).
+		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: update document: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("weave: update document rows affected: %w", err)
+	n, rowsErr := res.RowsAffected()
+	if rowsErr != nil {
+		return fmt.Errorf("weave: update document rows affected: %w", rowsErr)
 	}
 	if n == 0 {
 		return weave.ErrDocumentNotFound
@@ -250,15 +320,20 @@ func (s *Store) UpdateDocument(ctx context.Context, doc *document.Document) erro
 }
 
 func (s *Store) DeleteDocument(ctx context.Context, docID id.DocumentID) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
 	res, err := s.pg.NewDelete((*documentModel)(nil)).
-		Where("id = $1", docID.String()).
+		Where("id = ?", docID.String()).
+		Where("tenant_id = ?", tenant).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete document: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("weave: delete document rows affected: %w", err)
+	n, rowsErr := res.RowsAffected()
+	if rowsErr != nil {
+		return fmt.Errorf("weave: delete document rows affected: %w", rowsErr)
 	}
 	if n == 0 {
 		return weave.ErrDocumentNotFound
@@ -267,12 +342,16 @@ func (s *Store) DeleteDocument(ctx context.Context, docID id.DocumentID) error {
 }
 
 func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) ([]*document.Document, error) {
+	tenant, err := tenancy.DocumentList(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
 	var models []documentModel
 	order := "created_at ASC, id ASC"
 	if filter != nil && filter.SortDesc {
 		order = "created_at DESC, id DESC"
 	}
-	q := s.pg.NewSelect(&models).OrderExpr(order)
+	q := s.pg.NewSelect(&models).OrderExpr(order).Where("tenant_id = ?", tenant)
 
 	if filter != nil {
 		if filter.CollectionID.String() != "" {
@@ -281,11 +360,14 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 		if filter.State != "" {
 			q = q.Where("state = ?", string(filter.State))
 		}
+		if filter.SourceKey != "" {
+			q = q.Where("source_key = ?", filter.SourceKey)
+		}
+		if filter.ContentHash != "" {
+			q = q.Where("content_hash = ?", filter.ContentHash)
+		}
 		if filter.Search != "" {
 			q = q.Where("title ILIKE '%' || ? || '%' ESCAPE '\\'", sqllike.Escape(filter.Search))
-		}
-		if filter.Tenant != nil {
-			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
 		if filter.Limit > 0 {
 			q = q.Limit(filter.Limit)
@@ -307,7 +389,11 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 }
 
 func (s *Store) CountDocuments(ctx context.Context, filter *document.CountFilter) (int64, error) {
-	q := s.pg.NewSelect((*documentModel)(nil))
+	tenant, err := tenancy.DocumentCount(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	q := s.pg.NewSelect((*documentModel)(nil)).Where("tenant_id = ?", tenant)
 
 	if filter != nil {
 		if filter.CollectionID.String() != "" {
@@ -318,9 +404,6 @@ func (s *Store) CountDocuments(ctx context.Context, filter *document.CountFilter
 		}
 		if filter.Search != "" {
 			q = q.Where("title ILIKE '%' || ? || '%' ESCAPE '\\'", sqllike.Escape(filter.Search))
-		}
-		if filter.Tenant != nil {
-			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
 		if !filter.UpdatedBefore.IsZero() {
 			q = q.Where("updated_at < ?", filter.UpdatedBefore.UTC())
@@ -335,11 +418,272 @@ func (s *Store) CountDocuments(ctx context.Context, filter *document.CountFilter
 }
 
 func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.CollectionID) error {
-	_, err := s.pg.NewDelete((*documentModel)(nil)).
-		Where("collection_id = $1", colID.String()).
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.pg.NewDelete((*documentModel)(nil)).
+		Where("collection_id = ?", colID.String()).
+		Where("tenant_id = ?", tenant).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete documents by collection: %w", err)
+	}
+	return nil
+}
+
+// TouchDocument records an ingest's heartbeat with one guarded UPDATE, so
+// of several claims of one stalled document only the first matches a row.
+func (s *Store) TouchDocument(ctx context.Context, docID id.DocumentID, staleBefore time.Time) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	q := s.pg.NewUpdate((*documentModel)(nil)).Set("state = ?", string(document.StateProcessing))
+	return s.transition(ctx, "touch document", tenant, docID, staleBefore, inProgress, q)
+}
+
+// FailDocument marks a pending or processing document failed with one
+// guarded UPDATE.
+func (s *Store) FailDocument(ctx context.Context, docID id.DocumentID, errText string, staleBefore time.Time) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	q := s.pg.NewUpdate((*documentModel)(nil)).
+		Set("state = ?", string(document.StateFailed)).
+		Set("error = ?", errText)
+	return s.transition(ctx, "fail document", tenant, docID, staleBefore, inProgress, q)
+}
+
+// CompleteDocument moves a processing document to ready with one guarded
+// UPDATE.
+func (s *Store) CompleteDocument(ctx context.Context, docID id.DocumentID, chunkCount int) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	q := s.pg.NewUpdate((*documentModel)(nil)).
+		Set("state = ?", string(document.StateReady)).
+		Set("chunk_count = ?", chunkCount)
+	return s.transition(ctx, "complete document", tenant, docID, time.Time{}, []string{string(document.StateProcessing)}, q)
+}
+
+// inProgress are the states TouchDocument and FailDocument move a document
+// from.
+var inProgress = []string{string(document.StatePending), string(document.StateProcessing)}
+
+// stateArgs turns states into query arguments.
+func stateArgs(states []string) []any {
+	args := make([]any, len(states))
+	for i, st := range states {
+		args[i] = st
+	}
+	return args
+}
+
+// transition runs q, an UPDATE that already sets the new state, on docID
+// within tenant, but only while the row is in one of the from states and,
+// when staleBefore is set, last updated before it. When no row matches, it
+// reads the row to tell a missing document from one in the wrong state.
+func (s *Store) transition(ctx context.Context, op, tenant string, docID id.DocumentID, staleBefore time.Time, from []string, q *pgdriver.UpdateQuery) error {
+	q = q.Set("updated_at = ?", time.Now().UTC()).
+		Where("id = ?", docID.String()).
+		Where("tenant_id = ?", tenant).
+		Where("state IN (?"+strings.Repeat(", ?", len(from)-1)+")", stateArgs(from)...)
+	if !staleBefore.IsZero() {
+		q = q.Where("updated_at < ?", staleBefore.UTC())
+	}
+	res, err := q.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("weave: %s: %w", op, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("weave: %s rows affected: %w", op, err)
+	}
+	if n > 0 {
+		return nil
+	}
+	stored := new(documentModel)
+	err = s.pg.NewSelect(stored).Where("id = ?", docID.String()).Where("tenant_id = ?", tenant).Scan(ctx)
+	switch {
+	case err != nil && isNoRows(err):
+		return weave.ErrDocumentNotFound
+	case err != nil:
+		return fmt.Errorf("weave: %s: %w", op, err)
+	case !slices.Contains(from, stored.State):
+		return fmt.Errorf("%w: document is %s", weave.ErrInvalidState, stored.State)
+	}
+	return fmt.Errorf("%w: document was updated since it stalled", weave.ErrInvalidState)
+}
+
+// ListStalledDocuments reads across tenants on the (state, updated_at)
+// index.
+func (s *Store) ListStalledDocuments(ctx context.Context, before time.Time, limit int) ([]*document.Document, error) {
+	if limit <= 0 {
+		limit = store.DefaultStalledLimit
+	}
+	var models []documentModel
+	err := s.pg.NewSelect(&models).
+		Where("state IN (?, ?, ?)",
+			string(document.StatePending), string(document.StateProcessing), string(document.StateSuperseded)).
+		Where("updated_at < ?", before.UTC()).
+		Where("tenant_id <> ''").
+		OrderExpr("updated_at ASC, id ASC").
+		Limit(limit).
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("weave: list stalled documents: %w", err)
+	}
+	result := make([]*document.Document, len(models))
+	for i := range models {
+		result[i] = documentFromModel(&models[i])
+	}
+	return result, nil
+}
+
+// CountStalledUntenanted counts on the same index as ListStalledDocuments.
+func (s *Store) CountStalledUntenanted(ctx context.Context, before time.Time) (int64, error) {
+	n, err := s.pg.NewSelect((*documentModel)(nil)).
+		Where("state IN (?, ?, ?)",
+			string(document.StatePending), string(document.StateProcessing), string(document.StateSuperseded)).
+		Where("updated_at < ?", before.UTC()).
+		Where("tenant_id = ''").
+		Count(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("weave: count stalled documents without a tenant: %w", err)
+	}
+	return n, nil
+}
+
+// ReplaceSourceDocument runs in one transaction. It first takes a
+// transaction-scoped advisory lock on the tenant, collection and source key,
+// so concurrent replaces of one source wait for each other instead of
+// colliding on the one-ready-document index, then reads doc FOR UPDATE.
+// Every refusal happens before the first write; any later failure rolls the
+// whole replace back.
+func (s *Store) ReplaceSourceDocument(ctx context.Context, doc *document.Document, chunks []*chunk.Chunk) ([]id.DocumentID, error) {
+	tenant, err := tenancy.SourceReplace(ctx, doc, chunks)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	models := make([]chunkModel, len(chunks))
+	for i, ch := range chunks {
+		ch.CreatedAt = now
+		models[i] = *chunkToModel(ch)
+	}
+	colID := doc.CollectionID.String()
+
+	tx, err := s.pg.BeginTxQuery(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+	defer rollback(tx)
+	lockKey := tenant + "/" + colID + "/" + doc.SourceKey
+	if _, err = tx.NewRaw(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey).Exec(ctx); err != nil {
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+
+	stored := new(documentModel)
+	err = tx.NewSelect(stored).
+		Where("id = ?", doc.ID.String()).
+		Where("tenant_id = ?", tenant).
+		ForUpdate().
+		Scan(ctx)
+	if err != nil {
+		if isNoRows(err) {
+			return nil, weave.ErrDocumentNotFound
+		}
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+	err = checkReplaceable(stored, colID, doc.SourceKey)
+	if err != nil {
+		return nil, err
+	}
+
+	var old []documentModel
+	err = tx.NewSelect(&old).
+		Where("tenant_id = ?", tenant).
+		Where("collection_id = ?", colID).
+		Where("source_key = ?", doc.SourceKey).
+		Where("state IN (?, ?)", string(document.StateReady), string(document.StateFailed)).
+		ForUpdate().
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+	replaced := make([]id.DocumentID, 0, len(old))
+	for i := range old {
+		replaced = append(replaced, documentFromModel(&old[i]).ID)
+		_, err = tx.NewUpdate((*documentModel)(nil)).
+			Set("state = ?", string(document.StateSuperseded)).
+			Set("updated_at = ?", now).
+			Where("id = ?", old[i].ID).
+			Where("tenant_id = ?", tenant).
+			Exec(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("weave: replace source document: %w", err)
+		}
+	}
+
+	// The new chunks go in before the old ones are deleted, so a batch that
+	// reuses a superseded chunk's ID fails like any other reused ID.
+	if len(models) > 0 {
+		if _, err = tx.NewInsert(&models).Exec(ctx); err != nil {
+			return nil, fmt.Errorf("weave: replace source document: %w", err)
+		}
+	}
+	for _, docID := range replaced {
+		_, err = tx.NewDelete((*chunkModel)(nil)).
+			Where("document_id = ?", docID.String()).
+			Where("tenant_id = ?", tenant).
+			Exec(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("weave: replace source document: %w", err)
+		}
+	}
+
+	res, err := tx.NewUpdate((*documentModel)(nil)).
+		Set("state = ?", string(document.StateReady)).
+		Set("chunk_count = ?", len(chunks)).
+		Set("updated_at = ?", now).
+		Where("id = ?", doc.ID.String()).
+		Where("tenant_id = ?", tenant).
+		Where("state = ?", string(document.StateProcessing)).
+		Exec(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("weave: replace source document rows affected: %w", err)
+	}
+	if n == 0 {
+		return nil, fmt.Errorf("%w: document is no longer processing", weave.ErrInvalidState)
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+	doc.State, doc.ChunkCount, doc.UpdatedAt = document.StateReady, len(chunks), now
+	return replaced, nil
+}
+
+// checkReplaceable refuses a stored document that ReplaceSourceDocument may
+// not finish: one in another collection than the caller named
+// (ErrDocumentNotFound, as a document never moves), one whose source key
+// differs (ErrInvalidArgument) and one that isn't processing
+// (ErrInvalidState).
+func checkReplaceable(stored *documentModel, colID, sourceKey string) error {
+	if stored.CollectionID != colID {
+		return weave.ErrDocumentNotFound
+	}
+	if stored.SourceKey != sourceKey {
+		return fmt.Errorf("%w: source key does not match the stored document's", weave.ErrInvalidArgument)
+	}
+	if stored.State != string(document.StateProcessing) {
+		return fmt.Errorf("%w: document is %s, not processing", weave.ErrInvalidState, stored.State)
 	}
 	return nil
 }
@@ -349,6 +693,15 @@ func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.Collec
 // ──────────────────────────────────────────────────
 
 func (s *Store) CreateChunkBatch(ctx context.Context, chunks []*chunk.Chunk) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	for _, ch := range chunks {
+		if _, err = tenancy.Owner(ctx, "chunk", ch.TenantID); err != nil {
+			return err
+		}
+	}
 	if len(chunks) == 0 {
 		return nil
 	}
@@ -360,16 +713,67 @@ func (s *Store) CreateChunkBatch(ctx context.Context, chunks []*chunk.Chunk) err
 		models[i] = *chunkToModel(ch)
 	}
 
-	_, err := s.pg.NewInsert(&models).Exec(ctx)
+	// Every chunk's document is checked in the same transaction as the
+	// insert: it must belong to the context tenant and sit in the chunk's
+	// collection.
+	tx, err := s.pg.BeginTxQuery(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("weave: create chunk batch: %w", err)
+	}
+	defer rollback(tx)
+	err = checkChunkParents(ctx, tx, tenant, chunks)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.NewInsert(&models).Exec(ctx); err != nil {
+		return fmt.Errorf("weave: create chunk batch: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("weave: create chunk batch: %w", err)
 	}
 	return nil
 }
 
+// checkChunkParents reads each distinct document the chunks name, within
+// tenant and inside tx. A missing document, or another tenant's, is
+// ErrDocumentNotFound; a chunk whose collection is not its document's is
+// ErrInvalidArgument.
+func checkChunkParents(ctx context.Context, tx *pgdriver.PgTx, tenant string, chunks []*chunk.Chunk) error {
+	collectionOf := make(map[string]string, 1)
+	for _, ch := range chunks {
+		docID := ch.DocumentID.String()
+		colID, ok := collectionOf[docID]
+		if !ok {
+			m := new(documentModel)
+			err := tx.NewSelect(m).Where("id = ?", docID).Where("tenant_id = ?", tenant).Scan(ctx)
+			if err != nil {
+				if isNoRows(err) {
+					return weave.ErrDocumentNotFound
+				}
+				return fmt.Errorf("weave: create chunk batch: %w", err)
+			}
+			colID = m.CollectionID
+			collectionOf[docID] = colID
+		}
+		if colID != ch.CollectionID.String() {
+			return fmt.Errorf("%w: chunk collection does not match its document's", weave.ErrInvalidArgument)
+		}
+	}
+	return nil
+}
+
+// rollback ends tx when it was not committed. After Commit it does nothing.
+func rollback(tx interface{ Rollback() error }) {
+	_ = tx.Rollback() //nolint:errcheck // nothing to undo after Commit; a failed rollback leaves the server to drop the transaction
+}
+
 func (s *Store) GetChunk(ctx context.Context, chunkID id.ChunkID) (*chunk.Chunk, error) {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	m := new(chunkModel)
-	err := s.pg.NewSelect(m).Where("id = $1", chunkID.String()).Scan(ctx)
+	err = s.pg.NewSelect(m).Where("id = ?", chunkID.String()).Where("tenant_id = ?", tenant).Scan(ctx)
 	if err != nil {
 		if isNoRows(err) {
 			return nil, weave.ErrChunkNotFound
@@ -380,9 +784,14 @@ func (s *Store) GetChunk(ctx context.Context, chunkID id.ChunkID) (*chunk.Chunk,
 }
 
 func (s *Store) ListChunksByDocument(ctx context.Context, docID id.DocumentID) ([]*chunk.Chunk, error) {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var models []chunkModel
-	err := s.pg.NewSelect(&models).
-		Where("document_id = $1", docID.String()).
+	err = s.pg.NewSelect(&models).
+		Where("document_id = ?", docID.String()).
+		Where("tenant_id = ?", tenant).
 		OrderExpr("index ASC").
 		Scan(ctx)
 	if err != nil {
@@ -397,17 +806,18 @@ func (s *Store) ListChunksByDocument(ctx context.Context, docID id.DocumentID) (
 }
 
 func (s *Store) ListChunks(ctx context.Context, filter *chunk.ListFilter) ([]*chunk.Chunk, error) {
+	tenant, err := tenancy.ChunkList(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
 	var models []chunkModel
-	q := s.pg.NewSelect(&models).OrderExpr("document_id ASC, index ASC")
+	q := s.pg.NewSelect(&models).OrderExpr("document_id ASC, index ASC").Where("tenant_id = ?", tenant)
 	if filter != nil {
 		if filter.DocumentID.String() != "" {
 			q = q.Where("document_id = ?", filter.DocumentID.String())
 		}
 		if filter.CollectionID.String() != "" {
 			q = q.Where("collection_id = ?", filter.CollectionID.String())
-		}
-		if filter.Tenant != nil {
-			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
 		if filter.Limit > 0 {
 			q = q.Limit(filter.Limit)
@@ -427,8 +837,13 @@ func (s *Store) ListChunks(ctx context.Context, filter *chunk.ListFilter) ([]*ch
 }
 
 func (s *Store) DeleteChunksByDocument(ctx context.Context, docID id.DocumentID) error {
-	_, err := s.pg.NewDelete((*chunkModel)(nil)).
-		Where("document_id = $1", docID.String()).
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.pg.NewDelete((*chunkModel)(nil)).
+		Where("document_id = ?", docID.String()).
+		Where("tenant_id = ?", tenant).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete chunks by document: %w", err)
@@ -437,8 +852,13 @@ func (s *Store) DeleteChunksByDocument(ctx context.Context, docID id.DocumentID)
 }
 
 func (s *Store) DeleteChunksByCollection(ctx context.Context, colID id.CollectionID) error {
-	_, err := s.pg.NewDelete((*chunkModel)(nil)).
-		Where("collection_id = $1", colID.String()).
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.pg.NewDelete((*chunkModel)(nil)).
+		Where("collection_id = ?", colID.String()).
+		Where("tenant_id = ?", tenant).
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete chunks by collection: %w", err)
@@ -447,7 +867,11 @@ func (s *Store) DeleteChunksByCollection(ctx context.Context, colID id.Collectio
 }
 
 func (s *Store) CountChunks(ctx context.Context, filter *chunk.CountFilter) (int64, error) {
-	q := s.pg.NewSelect((*chunkModel)(nil))
+	tenant, err := tenancy.ChunkCount(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	q := s.pg.NewSelect((*chunkModel)(nil)).Where("tenant_id = ?", tenant)
 
 	if filter != nil {
 		if filter.CollectionID.String() != "" {
@@ -455,9 +879,6 @@ func (s *Store) CountChunks(ctx context.Context, filter *chunk.CountFilter) (int
 		}
 		if filter.DocumentID.String() != "" {
 			q = q.Where("document_id = ?", filter.DocumentID.String())
-		}
-		if filter.Tenant != nil {
-			q = q.Where("tenant_id = ?", *filter.Tenant)
 		}
 	}
 

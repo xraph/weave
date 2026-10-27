@@ -7,20 +7,7 @@ This guide builds a whole RAG loop on PostgreSQL, pgvector and the OpenAI embedd
 
 ## 0. Prepare the database
 
-`store/postgres` migrates its own tables, but nothing creates the pgvector side. Run this once against your database (the dimension is `text-embedding-3-small`'s):
-
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-
-CREATE TABLE IF NOT EXISTS weave_vectors (
-    id        TEXT PRIMARY KEY,
-    embedding vector(1536),
-    content   TEXT,
-    metadata  JSONB
-);
-```
-
-The [PostgreSQL store](/docs/stores/postgres#pgvector) page explains the columns.
+You need PostgreSQL with the pgvector extension available, 0.8.0 or later if you can (the `pgvector/pgvector:pg17` image works). Both migrations run from `main` below, so there's no SQL to run by hand. The [pgvector](/docs/stores/pgvector) page lists what they create.
 
 ## 1. Set up the engine
 
@@ -62,11 +49,15 @@ func main() {
     if err := st.Migrate(ctx); err != nil {
         log.Fatal("migrate: ", err)
     }
+    emb := embedder.NewOpenAIEmbedder(os.Getenv("OPENAI_API_KEY"))
+    if err := pgvector.Migrate(ctx, db, emb.Dimensions()); err != nil {
+        log.Fatal("migrate vectors: ", err)
+    }
 
     eng, err := engine.New(
         engine.WithStore(st),
-        engine.WithVectorStore(pgvector.New(db)),
-        engine.WithEmbedder(embedder.NewOpenAIEmbedder(os.Getenv("OPENAI_API_KEY"))),
+        engine.WithVectorStore(pgvector.New(db, pgvector.WithDimensions(emb.Dimensions()))),
+        engine.WithEmbedder(emb),
         engine.WithChunker(chunker.NewRecursiveChunker()),
     )
     if err != nil {

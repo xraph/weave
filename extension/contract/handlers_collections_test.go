@@ -18,7 +18,7 @@ import (
 
 func TestCollectionsCreateListGet(t *testing.T) {
 	forEachStore(t, func(t *testing.T, deps Deps) {
-		ctx := context.Background()
+		ctx := weave.WithTenant(context.Background(), "t1")
 		p := principal()
 
 		created, err := collectionsCreateHandler(deps)(ctx, collectionCreateInput{
@@ -60,7 +60,7 @@ func TestCollectionsCreateListGet(t *testing.T) {
 
 func TestCollectionsCreate_Validation(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	for name, in := range map[string]collectionCreateInput{
 		"blank name":           {Name: "   "},
 		"negative size":        {Name: "a", ChunkSize: -1},
@@ -77,7 +77,7 @@ func TestCollectionsCreate_Validation(t *testing.T) {
 // came from, so an overlap nobody typed is not a mystery.
 func TestCollectionsCreate_OverlapMessage(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	cases := []struct {
 		in   collectionCreateInput
 		want string
@@ -100,7 +100,7 @@ func TestCollectionsCreate_OverlapMessage(t *testing.T) {
 // refused before anything is written.
 func TestCollectionsUpdate_RenameRules(t *testing.T) {
 	forEachStore(t, func(t *testing.T, deps Deps) {
-		ctx := context.Background()
+		ctx := weave.WithTenant(context.Background(), "t1")
 		p := principal()
 		mustCollection(t, deps, "billing")
 		col := mustCollection(t, deps, "support")
@@ -132,7 +132,7 @@ func TestCollectionsUpdate_RenameRules(t *testing.T) {
 
 func TestCollectionsGet_IDs(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	if _, err := collectionsGetHandler(deps)(ctx, idInput{ID: "garbage"}, principal()); codeOf(err) != dashcontract.CodeBadRequest {
 		t.Errorf("garbage: %v", err)
 	}
@@ -141,26 +141,11 @@ func TestCollectionsGet_IDs(t *testing.T) {
 	}
 }
 
-func TestCollectionsList_TenantAndPaging(t *testing.T) {
+func TestCollectionsList_Paging(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
-	if err := deps.Engine.CreateCollection(weave.WithTenant(ctx, "t1"), &collection.Collection{Name: "tenanted"}); err != nil {
-		t.Fatal(err)
-	}
+	ctx := weave.WithTenant(context.Background(), "t1")
 	mustCollection(t, deps, "open")
 
-	empty := ""
-	out, err := collectionsListHandler(deps)(ctx, collectionsListInput{Tenant: &empty}, principal())
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if out.Total != 1 || out.Items[0].Name != "open" {
-		t.Errorf("tenant \"\": %+v", out)
-	}
-	all, _ := collectionsListHandler(deps)(ctx, collectionsListInput{}, principal())
-	if all.Total != 2 {
-		t.Errorf("no tenant: total %d", all.Total)
-	}
 	if _, err := collectionsListHandler(deps)(ctx, collectionsListInput{page: page{Offset: -1}}, principal()); codeOf(err) != dashcontract.CodeBadRequest {
 		t.Errorf("negative offset: %v", err)
 	}
@@ -168,7 +153,7 @@ func TestCollectionsList_TenantAndPaging(t *testing.T) {
 
 func TestCollectionsUpdateDeleteReindex(t *testing.T) {
 	forEachStore(t, func(t *testing.T, deps Deps) {
-		ctx := context.Background()
+		ctx := weave.WithTenant(context.Background(), "t1")
 		p := principal()
 		col := mustCollection(t, deps, "billing")
 		mustIngest(t, ctx, deps, col.ID, "invoice", "invoices are sent monthly")
@@ -204,7 +189,7 @@ func TestCollectionsReindex_SurvivesCancellation(t *testing.T) {
 		open func(*testing.T) store.Store
 	}{{"memory", openMemory}, {"sqlite", openSQLite}} {
 		t.Run(b.name, func(t *testing.T) {
-			bg := context.Background()
+			bg := weave.WithTenant(context.Background(), "t1")
 			s, vs := b.open(t), vsmemory.New()
 			seed := newDeps(t, s, engine.WithVectorStore(vs))
 			col := mustCollection(t, seed, "kb")

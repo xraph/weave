@@ -7,14 +7,17 @@ import (
 
 	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/collection"
+	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/id"
+	"github.com/xraph/weave/store"
 )
 
 func TestChunksListAndGet(t *testing.T) {
 	forEachStore(t, func(t *testing.T, deps Deps) {
-		ctx := context.Background()
+		ctx := weave.WithTenant(context.Background(), "t1")
 		p := principal()
 		col := &collection.Collection{Name: "long", ChunkSize: 8, ChunkOverlap: 2}
 		if err := deps.Engine.CreateCollection(ctx, col); err != nil {
@@ -62,7 +65,7 @@ func TestChunksListAndGet(t *testing.T) {
 
 func TestChunks_Validation(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	if _, err := chunksListHandler(deps)(ctx, chunksListInput{}, principal()); codeOf(err) != dashcontract.CodeBadRequest {
 		t.Errorf("no scope: %v", err)
 	}
@@ -74,11 +77,24 @@ func TestChunks_Validation(t *testing.T) {
 	}
 }
 
+// lostDocuments is a store whose document rows are gone. Every built-in
+// store refuses a chunk without its document, so a chunk can only be
+// orphaned by losing the document afterwards, by hand or in a custom store.
+type lostDocuments struct{ store.Store }
+
+func (lostDocuments) GetDocument(context.Context, id.DocumentID) (*document.Document, error) {
+	return nil, weave.ErrDocumentNotFound
+}
+
 func TestChunksGet_OrphanedChunk(t *testing.T) {
-	deps := newDeps(t, openMemory(t))
-	ctx := context.Background()
+	deps := newDeps(t, lostDocuments{openMemory(t)})
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustCollection(t, deps, "orphans")
-	orphan := &chunk.Chunk{ID: id.NewChunkID(), DocumentID: id.NewDocumentID(), CollectionID: col.ID, Content: "orphan", Index: 0, EndOffset: 6}
+	doc := &document.Document{ID: id.NewDocumentID(), CollectionID: col.ID, TenantID: "t1", Title: "lost", ContentHash: "lost", State: document.StateReady}
+	if err := deps.Engine.Store().CreateDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	orphan := &chunk.Chunk{ID: id.NewChunkID(), DocumentID: doc.ID, CollectionID: col.ID, TenantID: "t1", Content: "orphan", Index: 0, EndOffset: 6}
 	if err := deps.Engine.Store().CreateChunkBatch(ctx, []*chunk.Chunk{orphan}); err != nil {
 		t.Fatal(err)
 	}

@@ -1,3 +1,325 @@
+# Upgrading to v1.9.0
+
+v1.9.0 puts a tenant on every call, so most of what follows is about that.
+You'll need to change code if anything calls Weave without `weave.WithTenant`
+on the context, if you wrote your own `store.Store`, or if you made the
+pgvector table by hand. Rows that an older version wrote without a tenant stay
+in your database where nothing can read them, and the SQL to move them is
+below.
+
+## Every call needs a tenant
+
+Put the tenant on the context and Weave works inside it:
+
+```go
+ctx = weave.WithTenant(ctx, "acme")
+```
+
+A call without one fails with `weave.ErrTenantRequired`, and nothing gets
+read or written. That covers every engine call that touches data and every
+`store.Store` method except `Migrate`, `Ping`, `Close` and the two recovery
+reads below. `Retrieve` refuses before it embeds the query, so a missing
+tenant costs you no embedding call. Over HTTP the routes answer 403, and the
+dashboard contract answers `PERMISSION_DENIED`. The built-in vector stores
+refuse a `Search` with no `TenantKey` and an `Upsert` whose entry has no
+`metadata["tenant_id"]`, with the same error.
+
+Gets, updates and deletes by ID stay inside the tenant too. In v1.8 a get or
+delete with another tenant's ID found that row and acted on it. Now you get
+the same not-found error as an ID that doesn't exist
+(`weave.ErrCollectionNotFound`, `weave.ErrDocumentNotFound` or
+`weave.ErrChunkNotFound`), and nothing is touched. `CreateCollection` fills an
+empty `TenantID` from the context, but a `TenantID` that names another tenant
+is `weave.ErrInvalidArgument`.
+
+A job that isn't serving a request has to build its own context with the
+tenant it means. Nothing searches or lists across tenants any more, so if you
+relied on a missing tenant meaning "everyone", you'll have to call once per
+tenant and merge the results yourself.
+[Multi-tenancy](docs/content/docs/concepts/multi-tenancy.mdx) has the call by
+call table.
+
+## Rows written without a tenant
+
+v1.8 let you write without a tenant, and its dashboard always did. Those rows
+have `tenant_id = ''`, and since `""` isn't a tenant, no call reaches them now.
+Nothing deletes them either; they stay put until you give them a real tenant.
+
+On Postgres, run this in one transaction, with `$1` bound to the tenant you're
+moving them to (or a quoted literal in its place in `psql`):
+
+```sql
+BEGIN;
+UPDATE weave_collections SET tenant_id = $1 WHERE tenant_id = '';
+UPDATE weave_documents SET tenant_id = $1 WHERE tenant_id = '';
+UPDATE weave_chunks SET tenant_id = $1 WHERE tenant_id = '';
+UPDATE weave_vectors
+   SET metadata = jsonb_set(metadata, '{tenant_id}', to_jsonb($1::text))
+ WHERE coalesce(metadata->>'tenant_id', '') = '';
+COMMIT;
+```
+
+The `coalesce` is there because v1.8's pipeline left `tenant_id` out of a
+vector's metadata altogether when the row had no tenant, and a plain
+`metadata->>'tenant_id' = ''` would miss those. If your vectors live in a
+table you named with `WithTableName`, use that name.
+
+SQLite takes the same first three statements, with `?` for the tenant
+(there's no vector table in SQLite). On MongoDB:
+
+```js
+const tenant = "acme"
+db.weave_collections.updateMany({ tenant_id: "" }, { $set: { tenant_id: tenant } })
+db.weave_documents.updateMany({ tenant_id: "" }, { $set: { tenant_id: tenant } })
+db.weave_chunks.updateMany({ tenant_id: "" }, { $set: { tenant_id: tenant } })
+```
+
+Collection names are unique per tenant. If the tenant you're moving to
+already has a collection with the same name as one of the old ones, the
+first statement fails on Postgres and SQLite, and on Mongo `updateMany` stops
+at that row with the earlier ones already moved. Find the clashes first and
+rename one side:
+
+```sql
+SELECT name FROM weave_collections
+ WHERE tenant_id = '' AND name IN (SELECT name FROM weave_collections WHERE tenant_id = $1);
+```
+
+If the old rows belong to different tenants, run the statements once per
+collection, with `AND id = '...'` on `weave_collections`,
+`AND collection_id = '...'` on documents and chunks, and
+`AND metadata->>'collection_id' = '...'` on `weave_vectors`.
+
+Fabriq kept v1.8's vectors under whatever Fabriq tenant was on the context
+when they were written, and SQL won't reach them. Once the rows are moved,
+`ReindexCollection` under the new tenant embeds the collection again and
+writes vectors that carry it.
+
+Recovery also leaves these rows alone. It counts them in `SkippedNoTenant`
+and logs one warning per sweep, and it picks them up on the next sweep once
+they have a tenant.
+
+## The dashboard runs under one tenant
+
+Give the extension `WithDashboardTenant` so it can find the signed-in user's
+tenant, or put the tenant on the request context in your own middleware. A
+request with neither is `PERMISSION_DENIED`, and so is one where your
+function returns an error. The `tenant` field on lists and retrieval can only
+repeat the tenant you resolved. "The dashboard answers for one tenant at a
+time" in the dashboard record below has the details.
+
+## RegisterRoutes returns an error
+
+`api.API.RegisterRoutes` and `Extension.RegisterRoutes` now return an `error`
+naming each route forge refused, and `Extension.Register` fails with it. A
+bare call still compiles, but it drops the error, so check it wherever you
+call them yourself. `api.API.Handler()` has nowhere to return one and panics
+instead.
+
+## A borrowed Grove database stays open
+
+When the extension builds its store from a `*grove.DB` in the container,
+`Stop` used to close that database, under every other extension still using
+it. It leaves it open now, because the container owns it. A store you pass
+with `WithStore` is still yours to the end of `Stop`, and Weave still closes
+it.
+
+## Upsert by source
+
+This one is new, and nothing changes unless you use it. Set
+`IngestInput.SourceKey` when you ingest the same thing over and over (a docs
+page you read on every deploy, say) and Weave keeps one current version per
+key and collection. The same content again embeds nothing and comes back with
+`Unchanged` set. New content is embedded beside the old version and swapped
+in, and `Replaced` lists the IDs it replaced. A keyed ingest that finds the
+same content still in flight on another replica returns that document in
+state `processing` with a nil error. `DeleteBySource` removes a key. On
+MongoDB a keyed ingest needs a replica set; plain ingest doesn't.
+[Ingestion](docs/content/docs/subsystems/ingestion.mdx#upsert-by-source) walks
+through the whole order.
+
+## Recovery
+
+A process killed mid-ingest used to leave its document `pending` or
+`processing` forever, with some of its chunks and vectors written. Now the
+extension sweeps for those every `recovery_interval` (5m by default). A
+document whose last heartbeat is older than `stalled_after` (15m) is marked
+`failed` with `weave.ErrIngestInterrupted`, and only then are its partial
+chunks and vectors deleted, so a search never returns half a document and an
+ingest that turns out to be alive keeps what it wrote.
+`OnIngestFailed` fires once per document even with several replicas
+sweeping. A negative `recovery_interval` turns the loop off, and a negative
+`stalled_after` makes `Register` fail. Without the extension, recovery is off
+until you pass `engine.WithRecovery`, or you call `RecoverStalled` from your
+own scheduler.
+
+Pick `stalled_after` well above your slowest embed call. Heartbeats only go
+out between steps, so a single call that runs longer gets its document
+failed underneath it.
+
+That's where a new error comes from. `Ingest` can now return
+`weave.ErrIngestInterrupted`: recovery failed the document while the ingest
+was still going, someone deleted it mid-ingest, or a keyed source kept
+changing under four attempts to start. By the time you see it, the ingest
+has already removed the chunks and vectors it wrote. Ingest the content
+again, with or without a `SourceKey`: the failed row still holds the
+content hash, and the retry deletes it and starts over. If you treat every
+`Ingest` error as fatal today, give this one a retry.
+
+The same goes for any failed ingest. A failed document keeps its row (with
+the error in `Error`) but loses its chunks and vectors, so it never shows
+up in a search, and the next ingest of that content replaces it. In v1.8
+the retry hit `weave.ErrDuplicateDocument` until you called
+`DeleteDocument`. That error now means a live document holds the content:
+a `ready` one, or one another ingest is still working on.
+
+## If you wrote your own store
+
+`store.Store` grew six methods, and a custom store doesn't compile until it has
+all of them. The built-in stores (memory, SQLite, Postgres, Mongo) already do.
+
+- `ReplaceSourceDocument(ctx, doc, chunks)` swaps in a new version of a
+  source-keyed document in one atomic step.
+- `TouchDocument(ctx, docID, staleBefore)` is an ingest's heartbeat, and with a
+  cutoff it's a claim only one caller wins.
+- `FailDocument(ctx, docID, errText, staleBefore)` moves a pending or processing
+  document to failed, and never touches a ready one.
+- `CompleteDocument(ctx, docID, chunkCount)` moves a processing document to
+  ready with its chunk count. It's how an ingest without a source key
+  finishes, and it refuses any other state, so a document recovery has
+  already failed can't come back as ready.
+- `ListStalledDocuments(ctx, before, limit)` is recovery's read across tenants.
+  It works with no tenant on the context and leaves out rows with an empty
+  tenant.
+- `CountStalledUntenanted(ctx, before)` counts the rows that listing leaves out.
+
+The last two are the only methods besides `Migrate`, `Ping` and `Close` that run
+without a tenant. The three moves have to be single guarded writes (a
+compare-and-set on the stored state), not a read and then an update, or two
+replicas can both win. [Writing a custom store](docs/content/docs/guides/custom-store.mdx)
+spells out each rule, and `storetest.Run` checks them. If your store ever held
+v1.8 rows, run `storetest.RunLegacy` too: you give it a function that writes a
+document as it is, empty tenant and all, and it checks those rows never reach
+recovery.
+
+There's also a new document state, `superseded`, for an old version a replace
+has swapped out and not yet purged. Every other method has to refuse a
+missing tenant with `weave.ErrTenantRequired` before it touches the database.
+
+## Schema and migrations
+
+Postgres and Mongo migrations are tracked from now on. v1.8 ran every
+migration's `Up` on each start and recorded nothing. Now `Migrate` runs the
+`weave` group through Grove's orchestrator, and each version gets one row in
+`grove_migrations`. You don't have to do anything when you upgrade: every
+migration creates its tables and indexes only if they're missing, so the first
+tracked run finds yours, leaves the rows alone and records the versions.
+SQLite was tracked already. Replicas booting together on a fresh Postgres
+database race on Grove's own tracking tables, and `Migrate` retries that race
+up to five times.
+
+Two new migrations run on `Migrate`, on SQLite, Postgres and Mongo:
+
+- `20261024000100` adds `source_key` to `weave_documents`, a unique index on
+  `(collection_id, source_key)` over ready keyed rows, and a lookup index on
+  `(tenant_id, collection_id, source_key)`.
+- `20261024000200` adds `idx_weave_documents_state_updated` on
+  `(state, updated_at)`, which recovery lists stalled documents by.
+
+Both are idempotent, so an install that already has the column or the indexes
+is adopted as it stands. On a large `weave_documents` table on Postgres, the
+`CREATE INDEX` takes a lock that blocks writes while it builds. Run it by hand
+with `CONCURRENTLY` first if that matters to you, and `Migrate` will find it
+there.
+
+## pgvector's table
+
+Older docs had you create the `vector` extension and `weave_vectors` by hand.
+Now `pgvector.Migrate(ctx, db, dims)` does it, as its own tracked group,
+`weave_pgvector`. If you run your own orchestrator, add
+`pgvector.Migrations(dims)` to it instead. The extension's `Start` doesn't
+migrate this table, and the `weave` group never creates an extension, so an
+app without pgvector never needs it installed. `pgvector.Available` tells you
+whether the server has it before you try.
+
+A table you made by hand is adopted when its size matches `dims`. When it
+doesn't, the migration fails with `weave.ErrDimensionMismatch` naming both
+numbers and records nothing. Drop the old docs' unnamed HNSW index
+(`weave_vectors_embedding_idx`) before the first run, or you end up with two
+of them.
+
+## Changes that can break your build
+
+Two more changes stop code from compiling, besides `RegisterRoutes` and the
+store methods above. Both are small.
+
+`engine.IngestResult` has a `Replaced []id.DocumentID` field now, so the
+struct is no longer comparable. Code that compares two results with `==`, or
+uses one as a map key, stops compiling. Compare the fields you care about
+(`DocumentID` and `State`, usually).
+
+`api.IngestBatchRequest.Documents` is a slice of an anonymous struct, and
+that struct gained `SourceKey`. If you build the request in Go with a
+composite literal that spells the struct type out, add the field to your
+copy of the type or the assignment won't compile. JSON clients aren't
+affected; `source_key` is optional on each item.
+
+If you build pipelines by hand, `pipeline.EmbedStep` now refuses a step
+context with no non-empty string under `pipeline.KeyTenantID`, with
+`weave.ErrTenantRequired`, before it calls the embedder. Every vector it
+builds is labelled with that tenant, and the vector stores would refuse an
+unlabelled one anyway. Set the key wherever you create the `StepContext`.
+
+## The HTTP routes
+
+Skip this if you don't mount Weave's routes (`WithDisableRoutes`).
+
+- Five routes never registered under forge v1.13.1: `listCollections`,
+  `listDocuments`, `ingestBatch`, `retrieve` and `hybridSearch`. Forge
+  refused them because they answered with a slice, and the error was
+  dropped, so `GET /v1/collections` gave you a 405 and `POST /v1/search` a
+  404. They register now, and every JSON route writes its body once.
+- `limit` and `offset` are optional on the list routes. Leave `limit` out
+  and you get 50; anything above 1000 is treated as 1000.
+- `top_k` on retrieve and search is capped at 1000. A bigger value isn't
+  refused, you just get at most 1000 hits.
+- Retrieve against another tenant's collection answers 404, the same as a
+  collection that doesn't exist. v1.8 gave you 200 and an empty list.
+
+## Deprecated
+
+These still compile, and only work within the tenant on the context:
+
+- `engine.WithTenantID` and `engine.WithTenantFilter` on `Retrieve`. With no
+  tenant on the context, the value becomes the tenant. With one, it has to
+  match, or you get `weave.ErrInvalidArgument`. `WithTenantFilter("")` no
+  longer means "rows without a tenant".
+- `CompareParams.Tenant` on `RetrieveCompare`, with the same rules.
+- `Tenant *string` on the collection, document and chunk list and count
+  filters. Leave it nil. A non-nil value has to equal the context tenant, and
+  anything else, `""` included, is `weave.ErrInvalidArgument`.
+
+Put the tenant on the context and drop them when you next touch that code.
+
+## Smaller things
+
+- SQLite writers wait up to five seconds for the write lock instead of failing
+  at once with `SQLITE_BUSY`, so concurrent ingests on one file queue up.
+- An unkeyed ingest finishes with the store's guarded `CompleteDocument`
+  and checks its answer. Before, a failed final write was ignored, and you
+  could get `ready` with a nil error for a document still `processing`,
+  which recovery would later fail and empty. Now that write failing gives
+  you the error and a `failed` document.
+- `ReindexCollection` replaces vectors one `ready` document at a time
+  (delete by `document_id`, then upsert). It used to delete the whole
+  collection's vectors first. Vectors of documents that aren't `ready`,
+  including a keyed version that hasn't swapped in yet, are left alone.
+- Weave needs forge v1.13.1, grove v1.10.0 (with its three drivers) and, for
+  the Fabriq vector store, fabriq/core v1.10.0.
+- The nexus embedder is its own module,
+  `github.com/xraph/weave/embedder/nexus`, tagged with the same version as
+  Weave. You only pull nexus in when you import it.
+
 # Dashboard migration: templ to React shell
 
 Weave's dashboard used to render server-side with templ and ForgeUI, from
@@ -36,9 +358,12 @@ The cut happened in two steps. Commit `dfe48b8` (xraph/weave#39, merged as
 
 ## What you need to do
 
-You don't need to change anything in Weave's own API. Every route, request body
-and config key is where it was. One thing you might notice: the retrieve route
-now returns hydrated hits (see "Fixed in Weave on the way"), so each hit carries
+If you use Weave through the extension and its routes, you don't need to change
+anything in Weave's own API. Every route, request body and config key is where
+it was. If you wrote your own `store.Store`, you do: it has five new methods to
+implement, see "If you wrote your own store" under "Upgrading to v1.9.0" at the
+top of this file. One thing you might notice: the retrieve route now returns
+hydrated hits (see "Fixed in Weave on the way"), so each hit carries
 its real chunk ID, document ID and collection ID. Existing clients keep
 working.
 
@@ -72,16 +397,13 @@ the module.
 The contributor, the extension and the plugin are all named `weave`. The
 contributor's capabilities are `weave.read` and `weave.write`.
 
-The dashboard is operator-wide. Its requests carry no tenant, so you see every
-tenant's rows. Lists and retrieval take an optional tenant filter. Leave it out
-and you get every tenant; set it and it's an exact match, so an empty string
-gives you only the untenanted rows.
-
-Ingest from the dashboard is the one place a tenant gets set. The handler reads
-the collection first and ingests under the collection's own tenant and app, so a
-document you ingest into a collection owned by `acme` is an `acme` document, and
-so are its chunks and vectors. Without that it would have landed untenanted, and
-a list filtered to `acme` would never show it.
+The dashboard answers for one tenant at a time. Give the extension
+`WithDashboardTenant` so it can find the signed-in user's tenant, or put the
+tenant on the request context in a middleware of your own. A request with
+neither is refused with `PERMISSION_DENIED`. Lists and retrieval still take a
+`tenant` field, but it can only repeat the tenant you resolved. Ingest runs under
+that tenant too, so the document you ingest is yours, and so are its chunks and
+vectors.
 
 Your YAML now reaches the engine. The extension used to keep its config to
 itself, so the engine ran on its built-in defaults whatever you wrote. From
@@ -145,7 +467,9 @@ differently now:
   broken by ID). The default order stays ascending, so offset paging doesn't
   shift under you. Document counts take `Search` and `UpdatedBefore`.
 - Collection, document and chunk filters, and retrieval, take `Tenant *string`.
-  Nil means every tenant. A pointer to `""` means only untenanted rows.
+  It's deprecated already: the tenant comes from the context, and a non-nil
+  value has to repeat it. `""` is not a tenant, so a pointer to it is
+  `weave.ErrInvalidArgument`. See "Deprecated" under "Upgrading to v1.9.0".
 - A duplicate document (same collection, same content hash) and a duplicate
   collection name now return `weave.ErrDuplicateDocument` and
   `weave.ErrCollectionAlreadyExists` on all four stores. Before, only the memory
@@ -155,8 +479,6 @@ differently now:
   used to be a wildcard on SQLite and Postgres.
 - The memory store and pgvector break score ties by ID, so two searches over the
   same data agree.
-
-There is no schema change.
 
 ## Fixed in Weave on the way
 
@@ -191,6 +513,25 @@ things that were wrong, and that the templ pages had been hiding.
   They store an empty map now.
 - Every list sorted `created_at` ascending, so every "recent" list was the
   oldest rows. `SortDesc` exists now, and the dashboard asks for it.
+
+- The dashboard answered for every tenant. Anyone who could sign in to it could
+  list, read, edit and delete any tenant's collections, and ingest into them,
+  because its requests carried no tenant and an absent `tenant` meant all of
+  them. Every intent now runs under the tenant the host resolves for the
+  signed-in principal, through `extension.WithDashboardTenant` (or the tenant on
+  the request context when you don't set it). No tenant, or a resolver error, is
+  `PERMISSION_DENIED`, and the resolver's error text stays on the server. A
+  `tenant` in the request can only repeat the resolved one. Another tenant's ID
+  is not found, and ingest into another tenant's collection writes nothing. The
+  Overview's `scope` reads `"tenant"` now.
+- Route registration errors used to vanish. The API threw away the error from
+  every route it registered, so a route forge refused just didn't exist, and you
+  found out from a 404. `api.API.RegisterRoutes` and `Extension.RegisterRoutes`
+  now return an `error` naming each refused route, and `Extension.Register`
+  fails with it. Check it wherever you call them yourself. A call written as a
+  bare statement still compiles, but it drops the error, which is the old
+  behaviour. `api.API.Handler()` has no error to return, so it panics when a
+  route fails to register.
 
 One finding carries into the open list below: `pipeline/steps.go` omits
 `tenant_id` from the vector metadata for untenanted rows.
@@ -359,7 +700,7 @@ through htmx swaps of `#content`.
 | templ | React | status |
 |---|---|---|
 | Title "Overview" | `/`, "Overview" | moved |
-| Subtitle "Weave RAG pipeline dashboard" | one line saying this dashboard sees every tenant's data | changed: the thing worth saying on this page changed |
+| Subtitle "Weave RAG pipeline dashboard" | one line saying this dashboard shows one tenant's data, the signed-in user's (`scope` reads `"tenant"`) | changed: the thing worth saying on this page changed |
 | Stat card Collections, "Data groups" | `StatGrid`, `system.overview` | moved |
 | Stat card Documents, "Total ingested" | documents by state | changed: the design shows the four states, so the total is their sum and not a card of its own |
 | Stat card Ready, "Searchable documents" | `StatGrid`, documents by state | moved |
@@ -698,11 +1039,11 @@ Document state, proportion first.
 | failed, destructive | destructive: what you came to find | moved |
 | any other state, an outline badge with the raw string | none | dropped: the four states are all there are |
 
-A `processing` document whose `updated_at` is more than 15 minutes old also
-carries a destructive marker with its real age. Ingest runs inside one request,
-so a document still processing after that long almost certainly died with its
-process. Weave has no heartbeat, so the marker states the age and doesn't call
-the document dead.
+A `processing` document whose `updated_at` is older than `stalled_after` (15
+minutes by default) also carries a destructive marker with its real age. An
+ingest sends a heartbeat after each step, so a document that far behind almost
+certainly died with its process. The marker still states the age and doesn't
+call the document dead: recovery fails it on its next sweep.
 
 ### Shared components and helpers
 
@@ -757,8 +1098,9 @@ and so the browser walk covers every one of them.
   tenant, chunk size and overlap and created-date columns, and the Documents
   table gains ID, size and updated. The collection detail page shows tenant, app
   and timestamps.
-- The Overview's stalled count (documents in `processing` not updated for 15
-  minutes), and its components strip linking to Pipeline.
+- The Overview's stalled count (documents in `processing` with no heartbeat for
+  `stalled_after`, 15 minutes by default), and its components strip linking to
+  Pipeline.
 - Retrieval's comparison: the configured ranking next to the raw vector ranking,
   with each hit's raw cosine score, raw vector rank and how far it moved. The
   "Context sent to the model" tab shows the assembled text exactly as built, with
@@ -817,9 +1159,6 @@ These are known gaps. None of them is a regression from the templ pages.
   retrieval page does. Your app may assemble its own way, so "Context sent to
   the model" is what Weave's default assembler would build, not necessarily what
   you sent.
-- Only dashboard ingest sets a tenant on the dashboard path. Every read runs
-  with none, and an empty tenant searches everything: every vector store skips
-  the tenant filter when `TenantKey` is empty.
 - There are no component registries or getters for the loader, chunker,
   embedder, vector store or retriever. `Components()` works by type switch, and
   an unknown type is reported by its Go type name.

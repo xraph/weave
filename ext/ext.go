@@ -1,7 +1,7 @@
 // Package ext defines the extension system for Weave.
 // Extensions are notified of lifecycle events (collection created, ingest
-// completed, retrieval started, etc.) and can react to them — logging,
-// metrics, tracing, auditing, etc.
+// completed, retrieval started, etc.) and can react to them (logging,
+// metrics, tracing, auditing and so on).
 //
 // Each lifecycle hook is a separate interface so extensions opt in only
 // to the events they care about.

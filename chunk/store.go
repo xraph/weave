@@ -12,8 +12,9 @@ type CountFilter struct {
 	CollectionID id.CollectionID
 	// DocumentID filters by document. Empty means all documents.
 	DocumentID id.DocumentID
-	// Tenant filters by tenant. Nil means every tenant. A non-nil value is
-	// an exact match, so a pointer to "" means rows written with no tenant.
+	// Tenant is the old explicit tenant filter.
+	//
+	// Deprecated: the tenant comes from the context (weave.WithTenant). A non-nil value must equal it.
 	Tenant *string
 }
 
@@ -24,7 +25,9 @@ type ListFilter struct {
 	DocumentID id.DocumentID
 	// CollectionID filters by collection. Empty means all collections.
 	CollectionID id.CollectionID
-	// Tenant filters by tenant: nil means every tenant, non-nil is exact.
+	// Tenant is the old explicit tenant filter.
+	//
+	// Deprecated: the tenant comes from the context (weave.WithTenant). A non-nil value must equal it.
 	Tenant *string
 	// Limit is the maximum number of chunks to return. Zero means no limit.
 	Limit int
@@ -32,9 +35,13 @@ type ListFilter struct {
 	Offset int
 }
 
-// Store defines the persistence contract for chunks.
+// Store defines the persistence contract for chunks. Every method is scoped
+// to the context tenant; see store.Store for the rules.
 type Store interface {
-	// CreateChunkBatch persists a batch of chunks.
+	// CreateChunkBatch persists a batch of chunks. Every chunk's TenantID
+	// must be the context tenant, its document must belong to that tenant
+	// (else weave.ErrDocumentNotFound) and sit in the chunk's collection, and
+	// its ID must be new. One chunk that fails refuses the whole batch.
 	CreateChunkBatch(ctx context.Context, chunks []*Chunk) error
 
 	// GetChunk retrieves a chunk by ID.

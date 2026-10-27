@@ -1,7 +1,6 @@
 package storetest
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -13,7 +12,7 @@ import (
 // testTimestamps pins that created_at and updated_at survive every read path
 // the dashboard uses: get and list, for collections and documents.
 func testTimestamps(t *testing.T, s store.Store) {
-	ctx := context.Background()
+	ctx := as("t1")
 
 	col := mustCollection(t, s, "timestamps", "t1")
 	gotCol, err := s.GetCollection(ctx, col.ID)

@@ -3,50 +3,40 @@ title: Multi-Tenant Guide
 description: Patterns for tenant isolation, per-tenant collections and safe data deletion in Weave.
 ---
 
-Weave stamps a tenant on everything it writes and filters retrieval by it, but it leaves reads and deletes by ID to you. This guide shows how to set the tenant, where to add your own checks, and how to delete a tenant's data. [Multi-tenancy](/docs/concepts/multi-tenancy) has the call-by-call detail.
+Every Weave call needs a tenant on its context, and it only ever sees that tenant's collections, documents, chunks and vectors. Your job is to put the right tenant there. This guide shows where to set it, what Weave checks for you, and how to delete a tenant's data. [Multi-tenancy](/docs/concepts/multi-tenancy) has the call-by-call detail.
 
 ## Set the tenant at the request boundary
 
-In a Forge app, a global middleware puts the tenant on the request context, and the Weave routes and your own handlers pick it up from there:
+In a Forge app, a global middleware puts the tenant on the request context, and the Weave routes and your own handlers pick it up from there. Run it after your auth middleware, so it reads the principal that auth has already verified:
 
 ```go
 app.Router().UseGlobal(func(next forge.Handler) forge.Handler {
     return func(ctx forge.Context) error {
-        tenantID := tenantFromAuth(ctx) // your JWT or API key lookup
+        tenantID, ok := tenantFromPrincipal(ctx) // e.g. the org on the verified token
+        if !ok {
+            return next(ctx) // no tenant: every Weave route answers 403
+        }
         ctx.WithContext(weave.WithTenant(ctx.Context(), tenantID))
         return next(ctx)
     }
 })
 ```
 
-Take the tenant from something the caller can't forge, such as verified token claims, not a header they control.
+Take the tenant from something the caller can't forge, such as verified token claims, not a header they control. When there's no tenant, leave the context alone. The engine refuses the call with `weave.ErrTenantRequired`, and the HTTP routes turn that into a 403.
 
-## What's isolated for you
+## What Weave checks for you
 
-- Collections, documents and chunks created under the context are stamped with its tenant.
-- `Retrieve` and `HybridSearch` only search vectors with that tenant.
+- A call with no tenant on the context fails with `weave.ErrTenantRequired` before it touches the embedder or either store.
+- Collections, documents, chunks and vectors created under the context get its tenant.
+- Gets, updates, deletes, stats and reindex by ID only find the tenant's own rows. Another tenant's ID gets the same not-found error as an ID that doesn't exist, so a caller can't probe which IDs are real.
+- `Ingest` reads the collection within the tenant first. Another tenant's collection is `ErrCollectionNotFound`, and nothing is created or embedded.
+- Lists and counts return only the tenant's rows.
+- `Retrieve`, `HybridSearch` and `RetrieveCompare` only search the tenant's vectors.
 - Collection names are unique per tenant, and `GetCollectionByName` looks within the tenant.
 
-## What you have to check
+You don't need to compare a loaded row's `TenantID` with the context any more. Code that does still works, it just never finds a mismatch.
 
-- `GetCollection`, `GetDocument`, `DeleteCollection`, `DeleteDocument`, `CollectionStats` and `ReindexCollection` act on any ID. Compare the loaded row's `TenantID` with the context before you act.
-- `ListCollections` and `ListDocuments` return every tenant unless you set the filter's `Tenant`.
-- `Ingest` doesn't check that the collection belongs to the caller.
-- `AppID` is stored on collections and not used for any filtering.
-- IDs aren't typed by entity: `id.CollectionID` and `id.DocumentID` are both `id.ID`, so the compiler won't catch a mix-up. `id.ParseCollectionID` and friends check the prefix.
-
-```go
-func ownedCollection(ctx context.Context, eng *engine.Engine, colID id.CollectionID) (*collection.Collection, error) {
-    col, err := eng.GetCollection(ctx, colID)
-    if err != nil {
-        return nil, err
-    }
-    if col.TenantID != weave.TenantFromContext(ctx) {
-        return nil, weave.ErrCollectionNotFound
-    }
-    return col, nil
-}
-```
+Two things are still yours. `AppID` is stored on collections and not used for any filtering. And IDs aren't typed by entity: `id.CollectionID` and `id.DocumentID` are both `id.ID`, so the compiler won't catch a mix-up. `id.ParseCollectionID` and friends check the prefix.
 
 ## Per-tenant collections
 
@@ -66,26 +56,29 @@ Both are named `support-docs`, which is fine across tenants. They share the engi
 
 `DeleteDocument` removes a document's vectors, chunks and row. `DeleteCollection` does the same for every document in a collection, then removes the collection.
 
-To delete everything a tenant owns, list its collections with an explicit tenant filter and delete each one:
+To delete everything a tenant owns, list its collections under that tenant's context and delete each one:
 
 ```go
-func deleteTenant(ctx context.Context, eng *engine.Engine, tenantID string) error {
-    cols, err := eng.ListCollections(ctx, &collection.ListFilter{Tenant: &tenantID})
-    if err != nil {
-        return err
-    }
-    for _, col := range cols {
-        if err := eng.DeleteCollection(ctx, col.ID); err != nil {
+func deleteTenant(eng *engine.Engine, tenantID string) error {
+    ctx := weave.WithTenant(context.Background(), tenantID)
+    for {
+        cols, err := eng.ListCollections(ctx, &collection.ListFilter{Limit: 100})
+        if err != nil {
             return err
         }
+        if len(cols) == 0 {
+            return nil
+        }
+        for _, col := range cols {
+            if err := eng.DeleteCollection(ctx, col.ID); err != nil {
+                return err
+            }
+        }
     }
-    return nil
 }
 ```
 
-Don't leave the filter's `Tenant` nil here: that lists every tenant's collections.
-
-This only reaches collections the tenant owns. A document the tenant ingested into someone else's collection carries the tenant's ID but lives in the other collection; find those with `ListDocuments` and a `Tenant` filter if that can happen in your app.
+Every document lives in a collection of its own tenant, since `Ingest` refuses anyone else's collection, so this reaches all of it. Vector deletes are filtered by `tenant_id` as well as the collection or document ID, so they can't touch another tenant's vectors.
 
 A failed vector delete during `DeleteCollection` or `DeleteDocument` is logged and doesn't stop the metadata delete, so the vectors can outlive the rows. Hits for them come back from `Retrieve` with `Orphaned` set. Check your logs (pass `engine.WithLogger`) when you need deletion to be complete.
 

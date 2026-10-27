@@ -168,10 +168,13 @@ eng, _ := engine.New(engine.WithVectorStore(&WeaviateStore{client: weaviateClien
 
 The engine relies on a few things from a vector store:
 
-- `Search` applies every key in `opts.Filter` as an exact metadata match (the engine sends `collection_id` and `tenant_id` there) and treats an empty `TenantKey` as no tenant filter.
+- `Search` applies every key in `opts.Filter` as an exact metadata match (the engine sends `tenant_id`, and `collection_id` when the caller names one) and refuses an empty `TenantKey` with `weave.ErrTenantRequired`. There's no search across tenants.
+- `Upsert` refuses a batch with any entry lacking `metadata["tenant_id"]` with `weave.ErrTenantRequired`, before it writes any of it.
 - `SearchResult.ID` is the entry ID you were given, which is the chunk ID. The engine reads the chunk back by it.
-- `DeleteByMetadata` deletes every entry matching all the pairs. Document and collection deletes call it with `document_id` or `collection_id`.
+- `DeleteByMetadata` deletes every entry matching all the pairs, and refuses an empty filter with `weave.ErrInvalidArgument`. Document and collection deletes call it with `tenant_id` next to `document_id` or `collection_id`.
 - Return `SearchResult.Vector` if you can. The MMR retriever needs it.
+
+The engine also drops any hit labelled with another tenant, but a store that skips the filter then hands back short pages, so apply it.
 
 ## Custom MetadataStore
 
@@ -184,7 +187,9 @@ import "github.com/xraph/weave/store"
 // - collection.Store (CreateCollection, GetCollection, ListCollections, DeleteCollection, ...)
 // - document.Store (CreateDocument, GetDocument, UpdateDocument, ListDocuments, DeleteDocument, ...)
 // - chunk.Store (CreateChunkBatch, ListChunksByDocument, DeleteChunksByDocument, ...)
-// - store.Store (Migrate, Ping, Close)
+// - store.Store (ReplaceSourceDocument, TouchDocument, FailDocument,
+//   CompleteDocument, ListStalledDocuments, CountStalledUntenanted,
+//   Migrate, Ping, Close)
 
 type MyStore struct{ /* ... */ }
 
@@ -194,6 +199,52 @@ eng, _ := engine.New(engine.WithStore(&MyStore{}))
 ```
 
 See [store/store.go](https://github.com/xraph/weave/blob/main/store/store.go) for the full interface definition.
+
+### Tenant rules
+
+Weave relies on the store to keep tenants apart, so your store has to do what the built-in ones do. Go through this list before you ship one:
+
+- Every method except `Migrate`, `Ping`, `Close`, `ListStalledDocuments` and `CountStalledUntenanted` reads the tenant from the context first, with `weave.RequireTenant(ctx)`. No tenant means `weave.ErrTenantRequired`, returned before any query runs.
+- `ListStalledDocuments` is the one exception, and it's deliberate. Recovery is an operator's sweep, so it needs one read across tenants to find what a crash left behind. It works with no tenant on the context and returns each row with its `TenantID`, and the engine then handles each document under that tenant, so every later call is scoped as usual. `CountStalledUntenanted` needs no tenant either, but it only counts rows that belong to none. Don't add another method like these two.
+- Get, update and delete by ID match on the tenant as well as the ID (`WHERE id = $1 AND tenant_id = $2` in SQL, a `tenant_id` key in a Mongo filter). A row that belongs to another tenant returns `ErrCollectionNotFound`, `ErrDocumentNotFound` or `ErrChunkNotFound`, the same as an ID that doesn't exist. Never a different error, or IDs leak what exists.
+- An update checks the stored row's tenant, not just the `TenantID` on the struct it's given, so a caller can't move a row into its own tenant by relabelling it.
+- `DeleteChunksByDocument`, `DeleteChunksByCollection`, `DeleteDocumentsByCollection`, `ListChunksByDocument` and every list and count add the tenant predicate too. Pointed at another tenant's collection or document, the deletes succeed and remove nothing.
+- `CreateCollection`, `CreateDocument` and `CreateChunkBatch` refuse an entity whose `TenantID` isn't the context tenant with `weave.ErrInvalidArgument`. For a batch, check every chunk before you write any of them.
+- A row only hangs off a parent of its own tenant. `CreateDocument` checks that the document's collection belongs to the context tenant, and `CreateChunkBatch` does the same for each chunk's document. Another tenant's parent and an unknown ID both get `ErrCollectionNotFound` or `ErrDocumentNotFound`, checked before anything else, so a create can't tell you which IDs exist or what content they hold. Do the check in the same transaction as the insert if your database has them. Without it, a collection delete that cascades would take another tenant's rows with it.
+- A chunk's `CollectionID` must be its document's, else `ErrInvalidArgument`, and `UpdateDocument` never moves a document to another collection: match on `collection_id` as well and answer not-found when it differs.
+- A batch that reuses a chunk ID already stored, by any tenant, or repeats one, fails as a whole. Never upsert a chunk.
+- `GetCollectionByName(ctx, tenantID, name)` refuses a `tenantID` that isn't the context tenant with `weave.ErrInvalidArgument`.
+- The deprecated `Tenant *string` on list and count filters must equal the context tenant when it's set. Anything else, `""` included, is `weave.ErrInvalidArgument`.
+
+Treat `""` as no tenant everywhere. Rows a v1.8 install wrote with an empty tenant must stay unreachable.
+
+`document.ListFilter` has two exact-match filters besides the collection and state: `SourceKey` and `ContentHash`. An unkeyed ingest whose create collides on the content hash lists the collection by `ContentHash` to find the document in the way, so give that column an index (the built-in stores' unique `(collection_id, content_hash)` index serves). The engine checks the hash on what comes back, so a store that ignores the filter still works, only slower.
+
+### Replacing a source's document
+
+`ReplaceSourceDocument(ctx, doc, chunks)` finishes the ingest of a new version of a source. It's the one store method that changes several rows at once, and it has to be atomic: a reader sees the old version or the new one, never both and never neither. Your store has to do all of this:
+
+- Check the tenant first, like every other method. Then read the stored document under the context tenant, inside the same transaction as the writes. Missing, another tenant's, or in another collection than `doc.CollectionID` is `ErrDocumentNotFound`.
+- `doc.SourceKey` empty, or different from the stored one, is `ErrInvalidArgument`. So is a chunk whose tenant, document or collection isn't `doc`'s.
+- The stored document must be `processing`. Anything else is `ErrInvalidState`, returned before you write anything.
+- Mark every `ready` or `failed` document with the same tenant, collection and source key `superseded`, delete their chunks, insert `chunks`, and move `doc` to `ready` with `ChunkCount` set to `len(chunks)`. Return the superseded IDs.
+- If any step fails, none of it sticks. A chunk ID that repeats inside the batch or already exists (the superseded version's included) fails the call.
+- Concurrent replaces of one source must serialize. Six replicas replacing the same source at once all succeed, and the source ends with one `ready` document, the last to finish. The built-in stores take a Postgres advisory lock on tenant, collection and key, take SQLite's write lock as the transaction starts, retry Mongo's transaction on a write conflict, and run under the mutex in memory.
+
+A unique index on `(collection_id, source_key)` over ready, keyed rows is a good backstop. The built-in SQL and Mongo stores have one.
+
+### Heartbeats and recovery
+
+Three methods let ingest and [recovery](/docs/subsystems/ingestion#recovery) move a document's state without stepping on each other, and a fourth finds the documents recovery should look at. Each move is a single guarded write, a compare-and-set on the stored state. A read followed by an update leaves a gap another replica can land in.
+
+- `TouchDocument(ctx, docID, staleBefore)` moves a `pending` or `processing` document to `processing` and sets `UpdatedAt` to now. With a non-zero `staleBefore` it only does that when the stored `UpdatedAt` is older than `staleBefore`. That's what makes a claim safe: when eight replicas find one stalled document, exactly one touch matches and the other seven get `ErrInvalidState`.
+- `FailDocument(ctx, docID, errText, staleBefore)` moves a `pending` or `processing` document to `failed` with `Error` set to `errText`, under the same `staleBefore` rule. It must never touch a `ready` document, because that's how a failing attempt is kept from overwriting a version another attempt has just finished.
+- Both answer `ErrInvalidState` for a document in any other state, or one updated since `staleBefore`, and `ErrDocumentNotFound` for a missing document or another tenant's. Neither writes anything when it refuses.
+- `CompleteDocument(ctx, docID, chunkCount)` ends an ingest without a source key. It moves a `processing` document, and only a `processing` one, to `ready` with `ChunkCount` set and `UpdatedAt` now. Anything else is `ErrInvalidState` with nothing written, and the same not-found rule applies. This is the write that keeps a document recovery has already failed from coming back as `ready`, so it can't be a read and then an update.
+- `ListStalledDocuments(ctx, before, limit)` returns `pending`, `processing` and `superseded` documents with `UpdatedAt` before `before`, from every tenant, oldest first by `UpdatedAt` then ID. Leave out rows with an empty tenant: recovery can't scope them, and v1.8 installs can hold enough of them to fill every batch. A `limit` of zero or less means 100. An index on `(state, updated_at)` keeps it cheap; the built-in stores add one in migration `20261024000200`.
+- `CountStalledUntenanted(ctx, before)` counts exactly the rows that rule leaves out: same states, same age, empty tenant. Recovery only reports the number.
+
+In SQL each of these moves is one `UPDATE ... WHERE id = $1 AND tenant_id = $2 AND state IN ('pending', 'processing') AND updated_at < $3` (for `CompleteDocument`, `state = 'processing'` and no age check), and zero rows affected means you read the row once to tell not-found from the wrong state. In Mongo it's one `UpdateOne` with the same filter.
 
 ### Testing a custom store
 
@@ -207,4 +258,4 @@ func TestMyStore(t *testing.T) {
 }
 ```
 
-It checks filters, tenancy, ordering, duplicates, timestamps and nil metadata handling.
+It checks filters, ordering, duplicates, timestamps and nil metadata handling, every rule in the list above, the replace contract, concurrent replaces included, and the heartbeat and recovery methods, with concurrent claims of one document. `storetest.RunLegacy(t, open, plant)` adds the cases that need rows only a v1.8 install could write; `plant` writes a document as it is, bypassing your store's checks. The tenant cases call every method with no tenant, and try each read, update and delete as one tenant with another tenant's IDs. When `store.Store` gains a method, the tenant case fails until it covers that method too.

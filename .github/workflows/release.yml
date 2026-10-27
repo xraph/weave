@@ -33,8 +33,19 @@ jobs:
             echo "Creating tag $TAG"
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git tag "$TAG"
-            git push origin "$TAG"
+            # A re-run of this dispatch finds the tag it pushed the first
+            # time. Reuse it when it names the commit being released; a tag
+            # on any other commit is never moved.
+            if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
+              if [ "$(git rev-parse "$TAG^{commit}")" != "$(git rev-parse HEAD)" ]; then
+                echo "::error::$TAG already exists on another commit"
+                exit 1
+              fi
+              echo "$TAG already exists on this commit, reusing it"
+            else
+              git tag "$TAG"
+              git push origin "$TAG"
+            fi
           else
             TAG="${{ github.ref_name }}"
           fi
@@ -53,6 +64,113 @@ jobs:
           go build ./...
           go test -race -count=1 ./...
 
+      - name: Verify sub-modules
+        run: |
+          for mod in embedder/nexus; do
+            echo "::group::Verifying $mod"
+            pushd "$mod" > /dev/null
+            go mod download
+            go mod tidy
+            git diff --exit-code go.mod go.sum
+            go build ./...
+            go test -race -count=1 ./...
+            popd > /dev/null
+            echo "::endgroup::"
+          done
+
+      - name: Tag sub-modules
+        run: |
+          TAG="${{ steps.set-tag.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # A sub-module's replace is ignored once it is somebody else's
+          # dependency, so its require line is what a consumer resolves. On
+          # main that line names the previous release, which is right for
+          # local work and wrong for the tag we are cutting: a consumer would
+          # get a root older than the code that needs it. Pin the require to
+          # this tag, commit, and tag that commit.
+          #
+          # The commit never goes to a branch. Only the sub-module tags reach
+          # it, so main keeps building against the working tree.
+          scripts/pin-submodules.sh "$TAG"
+          git add embedder/nexus/go.mod
+          # A re-run, or a main that already requires this tag, leaves the
+          # pin unchanged. Then there is nothing to commit, and the
+          # sub-modules are tagged on HEAD itself.
+          PINNED=false
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: pin sub-modules to $TAG"
+            PINNED=true
+          fi
+
+          # Build each pinned sub-module the way a consumer gets it, before
+          # its tag is public: in a copy outside the repo, with the in-repo
+          # replace dropped, so the require has to resolve the root tag
+          # pushed above. GOPRIVATE sends that one module straight to GitHub
+          # (the proxy may not serve a minute-old tag yet) and skips the
+          # checksum database for it; everything else comes from the proxy.
+          for mod in embedder/nexus; do
+            echo "::group::Build $mod against github.com/xraph/weave@$TAG"
+            CHECK=$(mktemp -d)
+            cp -R "$mod/." "$CHECK"
+            (cd "$CHECK" && go mod edit -dropreplace=github.com/xraph/weave && \
+              GOPRIVATE=github.com/xraph/weave GOFLAGS=-mod=mod go build ./...)
+            echo "::endgroup::"
+          done
+
+          for mod in embedder/nexus; do
+            MOD_TAG="$mod/$TAG"
+            if git rev-parse -q --verify "refs/tags/$MOD_TAG" > /dev/null; then
+              # A re-run finds the tag it pushed the first time, on an
+              # earlier pin commit with the same content. A tag whose
+              # sub-module differs from what we would tag now is never
+              # moved: fail and fix forward with the next patch.
+              if ! git diff --quiet "refs/tags/$MOD_TAG" HEAD -- "$mod"; then
+                echo "::error::$MOD_TAG already exists with a different $mod"
+                exit 1
+              fi
+              echo "$MOD_TAG already exists with this content, skipping"
+              continue
+            fi
+            echo "Tagging $MOD_TAG"
+            git tag "$MOD_TAG"
+            git push origin "$MOD_TAG"
+          done
+
+          if [ "$PINNED" = true ]; then
+            git reset --hard HEAD~1
+          fi
+
+      - name: Verify sub-modules resolve from the proxy
+        run: |
+          TAG="${{ steps.set-tag.outputs.tag }}"
+          # This catches a sub-module tag whose require names a root version
+          # the proxy can't serve. CI never sees it, because the replace hides
+          # it, and the first person to run go get does.
+          #
+          # The tags were pushed moments ago, so the proxy may not serve them
+          # yet. Each attempt starts from a fresh probe module and retries
+          # for up to ten minutes before it fails the release.
+          ATTEMPTS=20
+          for mod in embedder/nexus; do
+            echo "::group::go get github.com/xraph/weave/$mod@$TAG"
+            for attempt in $(seq 1 "$ATTEMPTS"); do
+              PROBE=$(mktemp -d)
+              if (cd "$PROBE" && go mod init example.com/probe > /dev/null 2>&1 && \
+                GOFLAGS=-mod=mod GOPROXY=proxy.golang.org go get "github.com/xraph/weave/$mod@$TAG"); then
+                break
+              fi
+              if [ "$attempt" -eq "$ATTEMPTS" ]; then
+                echo "::error::the proxy did not serve github.com/xraph/weave/$mod@$TAG after $ATTEMPTS attempts"
+                exit 1
+              fi
+              echo "attempt $attempt of $ATTEMPTS failed, retrying in 30s"
+              sleep 30
+            done
+            echo "::endgroup::"
+          done
+
       - name: Generate release notes
         id: notes
         run: |
@@ -60,7 +178,7 @@ jobs:
           if [ -z "$PREV_TAG" ]; then
             NOTES=$(git log --pretty=format:"- %s (%h)" HEAD)
           else
-            NOTES=$(git log --pretty=format:"- %s (%h)" ${PREV_TAG}..HEAD)
+            NOTES=$(git log --pretty=format:"- %s (%h)" "${PREV_TAG}..HEAD")
           fi
           {
             echo "notes<<EOF"
@@ -83,5 +201,12 @@ jobs:
 
             ```bash
             go get github.com/xraph/weave@${{ steps.set-tag.outputs.tag }}
+            ```
+
+            The nexus embedder is its own module, so you only pull in nexus
+            when you use it:
+
+            ```bash
+            go get github.com/xraph/weave/embedder/nexus@${{ steps.set-tag.outputs.tag }}
             ```
           generate_release_notes: true

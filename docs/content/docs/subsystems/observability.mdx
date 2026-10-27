@@ -27,18 +27,21 @@ Every span below comes from the tracer `github.com/xraph/weave` and is `Internal
 
 | Span | Parent | Attributes |
 |------|--------|------------|
-| `ingest document` | the caller's span | `weave.collection.id`, `weave.document.id`, `weave.chunker.kind`, `weave.vectorstore.kind`, `weave.content.bytes`, `weave.chunk.count` (once the content is chunked, so a later failure keeps it), `weave.result` |
+| `ingest document` | the caller's span | `weave.collection.id`, `weave.document.id`, `weave.chunker.kind`, `weave.vectorstore.kind`, `weave.content.bytes`, `weave.chunk.count` (once the content is chunked, so a later failure keeps it), `weave.result`, and on a source-keyed ingest `weave.ingest.unchanged` (true when the source already held the content and nothing was embedded) and `weave.ingest.replaced` (how many previous versions it replaced) |
 | `chunk document` | `ingest document` | `weave.chunker.kind`, `weave.chunk.count` |
 | `embed texts` | `ingest document`, `retrieve chunks`, `reindex collection` or the caller's span | `gen_ai.operation.name` (`embeddings`), `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `weave.embed.operation`, `weave.embed.inputs` |
 | `upsert vectors` | `ingest document` or `reindex collection` | `weave.vectorstore.kind`, `weave.vector.count` |
 | `retrieve chunks` | the caller's span | `weave.retriever.kind`, `weave.retrieve.top_k`, `weave.collection.id` (when set), `weave.retrieve.results`, `weave.retrieve.hydrated`, `weave.retrieve.orphaned`, `weave.result` |
 | `search vectors` | `retrieve chunks` or the caller's span | `weave.vectorstore.kind`, `weave.search.top_k`, `weave.search.results` |
 | `reindex collection` | the caller's span | `weave.collection.id`, `weave.vectorstore.kind`, `weave.reindex.documents`, `weave.reindex.chunks` |
+| `recover stalled documents` | the caller's span, or none when the recovery loop runs it | `weave.recover.listed` (stalled documents the sweep read), `weave.recover.failed`, `weave.recover.purged`, `weave.recover.skipped_no_tenant` (stalled rows with an empty tenant, counted, never listed) |
 | `POST` (Client) | `embed texts` | `http.request.method`, `server.address`, `server.port`, `http.response.status_code` |
 
 `embed texts` and `search vectors` sit straight under the caller's span when `RetrieveCompare` makes them (the dashboard's retrieval page). `gen_ai.request.model` is the `model` param an embedder reports through `weave.Describer`, so an embedder that doesn't describe itself has no model on its span. `gen_ai.usage.input_tokens` doesn't depend on that: it's the sum of the `TokenCount` values the embedder returns, set whenever that sum is above zero. The OpenAI embedder sets both.
 
-`retrieve chunks` reads each hit back with one `GetChunk`. You'll see those as grove spans, and the totals as `weave.retrieve.hydrated` and `weave.retrieve.orphaned`. An orphan is a hit whose chunk row is gone from the metadata store.
+`recover stalled documents` is one [recovery](/docs/subsystems/ingestion#recovery) sweep. It reads across tenants but never names one: you get counts, and the deletes and writes it makes for each document show up as grove spans under it. A document another sweep or a live ingest got to first counts in `listed` and nowhere else, and keeps its data.
+
+`retrieve chunks` reads each hit back with one `GetChunk`. You'll see those as grove spans, and the totals as `weave.retrieve.hydrated` and `weave.retrieve.orphaned`. An orphan is a hit whose chunk row is gone from the metadata store. A source-keyed hit without a chunk row isn't an orphan: it belongs to a version mid-swap, retrieval drops it, and it counts toward neither total.
 
 When you configure a retriever, it embeds the query and searches with its own embedder and vector store. Those calls happen inside `retrieve chunks` but get no `embed texts` or `search vectors` span of their own, and they don't count towards the GenAI metrics. The OpenAI embedder's `POST` span still shows the provider call.
 
@@ -71,7 +74,7 @@ Every label value comes from a bounded set. All but `error_type` are fixed lists
 | `operation` | `search`, `upsert` |
 | `result` | `ok`, `error`, and `not_found` on ingest when the collection doesn't exist |
 | `gen_ai_operation_name` | `embeddings` |
-| `gen_ai_provider_name` | `openai`, `local`, `custom` |
+| `gen_ai_provider_name` | `openai`, `local`, `nexus`, `custom` |
 | `weave_embed_operation` | `ingest`, `query`, `reindex` |
 | `error_type` | empty on success, otherwise the error type described above. It isn't a fixed list, but it is bounded: the values are the Weave sentinels, the two context errors and the Go error types your process can return, never error text |
 | `gen_ai_token_type` | `input` |
@@ -80,7 +83,7 @@ A component's label is the `Kind` it reports through `weave.Describer`. A kind W
 
 The two `gen_ai` metrics are the OpenTelemetry GenAI client metrics, with the buckets the GenAI conventions advise. `gen_ai` isn't one of forge's semconv namespaces, so they keep the `forge_` prefix and don't get a `_seconds` suffix. Nexus records the same two names with different keys: nexus carries `gen_ai_request_model` where Weave carries `weave_embed_operation`. If one app runs both, the families share a name and forge fills a missing label with an empty value, so nexus's rows have `weave_embed_operation=""` and Weave's have `gen_ai_request_model=""`. `sum by (gen_ai_provider_name)` still works across both, and `weave_embed_operation!=""` picks out Weave's rows.
 
-Mind one double count. If you point Weave's OpenAI embedder at a nexus gateway in the same app (its base URL set to nexus), both sides record the call: Weave as `embeddings` with provider `openai`, and nexus as `embeddings` with whatever provider it routed to, often `openai` too. A sum over the whole family then counts that call twice, so filter on `weave_embed_operation` one way or the other.
+Mind one double count. If you point Weave's OpenAI embedder at a nexus gateway in the same app (its base URL set to nexus), both sides record the call: Weave as `embeddings` with provider `openai`, and nexus as `embeddings` with whatever provider it routed to, often `openai` too. A sum over the whole family then counts that call twice, so filter on `weave_embed_operation` one way or the other. The [nexus embedder](/docs/subsystems/embedder#nexus-embedder) counts the same way: Weave records the call with provider `nexus`, and nexus records it again under the provider it routed to.
 
 The vector histogram only times calls the engine makes itself. For pgvector, grove also records `db_client_operation_duration_seconds` for the same queries.
 
@@ -174,5 +177,7 @@ Without `WithLogger` the engine logs nothing. The Forge extension passes the app
 
 - deleting a collection's or document's vectors fails (the metadata delete still goes ahead). The line has the collection or document ID and `error_type`.
 - a lifecycle hook returns an error. The line has the hook, the plugin and `error_type`. One hook of one plugin logs at most once a minute, and `suppressed` says how many errors it stood for since its last line.
+- a recovery sweep fails (`recovery sweep failed`, with `error_type`), or finds stalled rows without a tenant (one line per sweep, with how many under `documents`).
+- an interrupted ingest can't delete the chunks it wrote, or a keyed ingest can't purge a superseded version. Recovery finishes the purge of a superseded version on a later sweep. An interrupted ingest's leftovers belong to a `failed` document, which no sweep lists again, so they stay until you call `DeleteDocument` (a keyed re-ingest of the source purges them too).
 
-Neither line logs the error's text. A store error can quote a DSN or a host, and a hook's error can quote whatever the hook was handed.
+None of these lines logs the error's text. A store error can quote a DSN or a host, and a hook's error can quote whatever the hook was handed.

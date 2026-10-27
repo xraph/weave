@@ -66,6 +66,12 @@ const (
 	RetrieveOrphaned = attribute.Key("weave.retrieve.orphaned")
 	ReindexDocuments = attribute.Key("weave.reindex.documents")
 	ReindexChunks    = attribute.Key("weave.reindex.chunks")
+	RecoverListed    = attribute.Key("weave.recover.listed")
+	RecoverFailed    = attribute.Key("weave.recover.failed")
+	RecoverPurged    = attribute.Key("weave.recover.purged")
+	RecoverSkipped   = attribute.Key("weave.recover.skipped_no_tenant")
+	IngestUnchanged  = attribute.Key("weave.ingest.unchanged")
+	IngestReplaced   = attribute.Key("weave.ingest.replaced")
 )
 
 // OperationEmbeddings is gen_ai.operation.name for an embedding call.
@@ -98,7 +104,7 @@ const (
 // metric label never carries a string a caller chose.
 var (
 	ChunkerKinds     = kindSet("fixed", "recursive", "semantic", "sliding", "code")
-	EmbedderKinds    = kindSet("openai", "local")
+	EmbedderKinds    = kindSet("openai", "local", "nexus")
 	VectorStoreKinds = kindSet("memory", "pgvector", "fabriq")
 	RetrieverKinds   = kindSet("similarity", "mmr", "hybrid", "rerank")
 )
@@ -146,7 +152,10 @@ var sentinels = []struct {
 	{weave.ErrDuplicateDocument, "weave.ErrDuplicateDocument"},
 	{weave.ErrEmptyContent, "weave.ErrEmptyContent"},
 	{weave.ErrInvalidArgument, "weave.ErrInvalidArgument"},
+	{weave.ErrTenantRequired, "weave.ErrTenantRequired"},
 	{weave.ErrStoreClosed, "weave.ErrStoreClosed"},
+	{weave.ErrIngestInterrupted, "weave.ErrIngestInterrupted"},
+	{weave.ErrInvalidState, "weave.ErrInvalidState"},
 }
 
 // ErrorType names err for error.type, the exception event and log lines: the

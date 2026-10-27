@@ -110,5 +110,40 @@ CREATE INDEX IF NOT EXISTS idx_weave_chunks_tenant ON weave_chunks (tenant_id);
 				return err
 			},
 		},
+		&migrate.Migration{
+			Name:    "add_weave_documents_source_key",
+			Version: "20261024000100",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				_, err := exec.Exec(ctx, `
+ALTER TABLE weave_documents ADD COLUMN IF NOT EXISTS source_key TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_weave_documents_source_ready
+    ON weave_documents (collection_id, source_key) WHERE source_key <> '' AND state = 'ready';
+CREATE INDEX IF NOT EXISTS idx_weave_documents_source
+    ON weave_documents (tenant_id, collection_id, source_key) WHERE source_key <> '';
+`)
+				return err
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				_, err := exec.Exec(ctx, `
+DROP INDEX IF EXISTS idx_weave_documents_source;
+DROP INDEX IF EXISTS idx_weave_documents_source_ready;
+ALTER TABLE weave_documents DROP COLUMN IF EXISTS source_key;
+`)
+				return err
+			},
+		},
+		&migrate.Migration{
+			Name:    "index_weave_documents_state_updated",
+			Version: "20261024000200",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// Recovery lists stalled documents by state and age.
+				_, err := exec.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_weave_documents_state_updated ON weave_documents (state, updated_at)`)
+				return err
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				_, err := exec.Exec(ctx, `DROP INDEX IF EXISTS idx_weave_documents_state_updated`)
+				return err
+			},
+		},
 	)
 }

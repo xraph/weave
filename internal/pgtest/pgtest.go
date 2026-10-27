@@ -30,6 +30,13 @@ import (
 // somebody's live database.
 func Schema(t testing.TB, dsn string) string {
 	t.Helper()
+	return schema(t, dsn, "")
+}
+
+// schema is Schema with extra appended to the pinned search_path after the
+// new schema, or nothing when extra is empty.
+func schema(t testing.TB, dsn, extra string) string {
+	t.Helper()
 
 	refused, err := usesDefaultPort(dsn)
 	if err != nil {
@@ -39,21 +46,31 @@ func Schema(t testing.TB, dsn string) string {
 		t.Fatalf("WEAVE_TEST_POSTGRES_DSN points at the default port; refusing to write to what may be a live database")
 	}
 
-	var b [8]byte
-	if _, err = rand.Read(b[:]); err != nil {
-		t.Fatalf("random schema suffix: %v", err)
-	}
-	schema := "weave_test_" + hex.EncodeToString(b[:])
-	quoted := pgx.Identifier{schema}.Sanitize()
+	name := "weave_test_" + randomSuffix(t)
+	quoted := pgx.Identifier{name}.Sanitize()
 
 	exec(t, dsn, "CREATE SCHEMA "+quoted)
 	t.Cleanup(func() { exec(t, dsn, "DROP SCHEMA IF EXISTS "+quoted+" CASCADE") })
 
-	scoped, err := pinSearchPath(dsn, schema)
+	path := name
+	if extra != "" {
+		path += "," + extra
+	}
+	scoped, err := pinSearchPath(dsn, path)
 	if err != nil {
-		t.Fatalf("pin WEAVE_TEST_POSTGRES_DSN to schema %s: %v", schema, err)
+		t.Fatalf("pin WEAVE_TEST_POSTGRES_DSN to schema %s: %v", name, err)
 	}
 	return scoped
+}
+
+// randomSuffix returns 16 random hex digits for a test object's name.
+func randomSuffix(t testing.TB) string {
+	t.Helper()
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatalf("random name suffix: %v", err)
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // usesDefaultPort reports whether dsn resolves to port 5432 on any host it
@@ -79,19 +96,24 @@ const defaultPort = 5432
 
 func exec(t testing.TB, dsn, stmt string) {
 	t.Helper()
+	if err := execErr(dsn, stmt); err != nil {
+		t.Fatalf("%s: %v", stmt, err)
+	}
+}
 
+// execErr runs stmt on a connection of its own and returns its error.
+func execErr(dsn, stmt string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		t.Fatalf("connect: %v", err)
+		return err
 	}
 	defer func() { _ = conn.Close(ctx) }()
 
-	if _, err := conn.Exec(ctx, stmt); err != nil {
-		t.Fatalf("%s: %v", stmt, err)
-	}
+	_, err = conn.Exec(ctx, stmt)
+	return err
 }
 
 // pinSearchPath sets search_path in whichever DSN spelling pgx was handed.

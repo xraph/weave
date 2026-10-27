@@ -130,6 +130,8 @@ extensions:
     default_top_k: 10
     shutdown_timeout: 30s
     ingest_concurrency: 4
+    recovery_interval: 5m
+    stalled_after: 15m
 ```
 
 | Key | Type | Default | Description |
@@ -145,6 +147,8 @@ extensions:
 | `default_top_k` | int | `10` | Engine `DefaultTopK` |
 | `shutdown_timeout` | duration | `30s` | Not used yet |
 | `ingest_concurrency` | int | `4` | Not used yet |
+| `recovery_interval` | duration | `5m` | How often the engine sweeps for documents a crash left behind (see [Recovery](/docs/subsystems/ingestion#recovery)). Negative turns the loop off, for a host that calls `RecoverStalled` from its own scheduler |
+| `stalled_after` | duration | `15m` | How long a `pending` or `processing` document can go without a heartbeat before recovery fails it and a keyed ingest of the same content may claim it. Keep it well above your slowest embed call. Negative fails `Register` |
 
 ### Merge behaviour
 

@@ -1,6 +1,6 @@
 ---
 title: HTTP API
-description: How the 13 Weave routes are mounted, scoped to tenants and mapped to errors.
+description: How the 14 Weave routes are mounted, scoped to tenants and mapped to errors.
 ---
 
 The `api` package turns engine calls into Forge routes with OpenAPI metadata. The Forge extension mounts them under `/weave`, so the full paths start with `/weave/v1`. Every route takes and returns JSON. The [HTTP API reference](/docs/api-reference/http-api) has each route's request and response.
@@ -28,10 +28,14 @@ Without the extension, build an `api.API` and register it on a router or group y
 
 ```go
 a := api.New(eng, router)
-a.RegisterRoutes(router.Group("/weave")) // /weave/v1/...
+if err := a.RegisterRoutes(router.Group("/weave")); err != nil { // /weave/v1/...
+    log.Fatal(err)
+}
 ```
 
-`a.Handler()` returns an `http.Handler` with the routes registered on the router you passed (or a new Forge router when you passed nil), with no prefix.
+`RegisterRoutes` tries every route and returns an error naming each one the router refused. The extension's `Register` fails with the same error, so your app doesn't boot with part of the API missing.
+
+`a.Handler()` returns an `http.Handler` with the routes registered on the router you passed (or a new Forge router when you passed nil), with no prefix. It panics if a route fails to register, the way `http.ServeMux` does on a conflicting pattern.
 
 ## Routes
 
@@ -46,37 +50,50 @@ a.RegisterRoutes(router.Group("/weave")) // /weave/v1/...
 | `POST /weave/v1/collections/:collectionId/documents` | Ingest one document |
 | `POST /weave/v1/collections/:collectionId/documents/batch` | Ingest several |
 | `GET /weave/v1/collections/:collectionId/documents` | List documents |
+| `DELETE /weave/v1/collections/:collectionId/documents?source_key=...` | Delete every document of a source, with chunks and vectors |
 | `GET /weave/v1/documents/:documentId` | Get a document |
 | `DELETE /weave/v1/documents/:documentId` | Delete a document and its chunks and vectors |
 | `POST /weave/v1/collections/:collectionId/retrieve` | Retrieve from one collection |
 | `POST /weave/v1/search` | Search across collections |
 
+Both ingest routes take an optional `source_key` per document, which turns the ingest into an upsert of that source (see [Upsert by source](/docs/subsystems/ingestion#upsert-by-source)). The delete route answers 204 even when the source has nothing under it, and 400 when `source_key` is missing or blank.
+
 The routes are tagged `collections`, `documents` and `retrieval` in the OpenAPI spec.
 
 ## Tenants
 
-The routes don't read a tenant from anywhere. They pass the request context to the engine, so the tenant is whatever your middleware put there with `weave.WithTenant`. Add a global Forge middleware that sets it from your auth:
+The routes don't read a tenant from the request themselves. They pass the request context to the engine, so the tenant is whatever your middleware put there with `weave.WithTenant`. Add a global Forge middleware that sets it from the authenticated principal:
 
 ```go
 app.Router().UseGlobal(func(next forge.Handler) forge.Handler {
     return func(ctx forge.Context) error {
-        tenantID := ctx.Request().Header.Get("X-Tenant-ID") // or from your auth claims
-        ctx.WithContext(weave.WithTenant(ctx.Context(), tenantID))
+        if tenantID, ok := tenantFromPrincipal(ctx); ok { // from your verified auth claims
+            ctx.WithContext(weave.WithTenant(ctx.Context(), tenantID))
+        }
         return next(ctx)
     }
 })
 ```
 
-Even with a tenant set, only creates, ingests and the two search routes use it. `GET /collections` lists every tenant's collections, and the get, delete, stats and reindex routes act on any ID they're given. Put your own authorization in front of them if tenants mustn't see each other's data. See [multi-tenancy](/docs/concepts/multi-tenancy).
+Don't take it from a header the caller sets, like `X-Tenant-ID`: anyone could name any tenant.
+
+A request whose context has no tenant gets a 403 on every route. The check runs before the request is even parsed, so a malformed ID or an empty body gets the 403 too, and nothing is read or embedded. With a tenant, every route works inside it. `GET /collections` lists only that tenant's collections, and every route that names a collection or document answers 404 for another tenant's ID, exactly as for one that doesn't exist. That includes retrieve and a search naming `collections`, which refuse before the query is embedded. See [multi-tenancy](/docs/concepts/multi-tenancy).
 
 ## Errors
 
-Validation failures (a malformed ID, a missing `name`, `content` or `query`) return 400, and a collection or document that isn't there returns 404 on the get, delete and stats routes. Both have this body:
+| Status | When |
+|--------|------|
+| 400 | A malformed ID, a missing `name`, `content`, `query` or `source_key`, or an engine `ErrInvalidArgument` (a `source_key` over 1024 bytes, say) |
+| 403 | The request context has no tenant |
+| 404 | The collection or document isn't there in the request's tenant: get, delete, stats, reindex, ingest, batch ingest, list documents, delete by source, retrieve, and search with `collections` |
+| 500 | Anything else |
+
+400, 403 and 404 have this body:
 
 ```json
 { "error": "weave: collection not found", "code": 404 }
 ```
 
-Reindexing a collection that doesn't exist returns 204, since there's nothing to re-embed.
+The 403 always says `weave: this request has no tenant`. An empty list or search result is `[]`, never `null`.
 
-Everything else comes back as a 500 through Forge's error handling, which by default leaves the error text out of the response. That includes ingesting into a collection that doesn't exist, a duplicate collection name, duplicate document content and embedder or vector store failures.
+Everything else comes back as a 500 through Forge's error handling, which by default leaves the error text out of the response. That covers a duplicate collection name, duplicate document content and embedder or vector store failures.

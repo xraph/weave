@@ -15,6 +15,7 @@ import (
 	"net/http"
 
 	"github.com/xraph/forge"
+	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
 	"github.com/xraph/grove"
 	"github.com/xraph/vessel"
 
@@ -47,6 +48,10 @@ type Extension struct {
 	apiHandler *api.API
 	engineOpts []engine.Option
 	useGrove   bool
+
+	// dashboardTenant resolves the tenant of a dashboard request; nil
+	// reads it from the request context.
+	dashboardTenant func(ctx context.Context, p dashcontract.Principal) (string, error)
 }
 
 // New creates a Weave Forge extension with the given options.
@@ -103,8 +108,11 @@ func (e *Extension) Register(fapp forge.App) error {
 
 	// The config, the app's logger and the app's metrics go first, so an
 	// engine option the caller passed with WithEngineOption still wins.
-	opts := make([]engine.Option, 0, 3+len(e.engineOpts))
-	opts = append(opts, engine.WithConfig(e.config.engineConfig()))
+	if err := checkStalledAfter(e.config); err != nil {
+		return err
+	}
+	opts := make([]engine.Option, 0, 4+len(e.engineOpts))
+	opts = append(opts, engine.WithConfig(e.config.engineConfig()), engine.WithRecovery(e.config.recoveryConfig()))
 	if l := e.Logger(); l != nil {
 		opts = append(opts, engine.WithLogger(l))
 	}
@@ -122,14 +130,17 @@ func (e *Extension) Register(fapp forge.App) error {
 	// Create the API handler.
 	e.apiHandler = api.New(e.eng, fapp.Router())
 
-	// Register HTTP routes unless disabled.
+	// Register HTTP routes unless disabled. A route the router refuses
+	// fails Register, so the app never serves part of the API.
 	if !e.config.DisableRoutes {
 		basePath := e.config.BasePath
 		if basePath == "" {
 			basePath = "/weave"
 		}
 
-		e.apiHandler.RegisterRoutes(fapp.Router().Group(basePath))
+		if err := e.apiHandler.RegisterRoutes(fapp.Router().Group(basePath)); err != nil {
+			return err
+		}
 	}
 
 	// Register the engine in the DI container so other extensions can use it.
@@ -189,7 +200,8 @@ func (e *Extension) Health(ctx context.Context) error {
 }
 
 // Handler returns the HTTP handler for all API routes.
-// Convenience for standalone use outside Forge.
+// Convenience for standalone use outside Forge. Like api.API.Handler, it
+// panics when a route fails to register.
 func (e *Extension) Handler() http.Handler {
 	if e.apiHandler == nil {
 		return http.NotFoundHandler()
@@ -197,11 +209,14 @@ func (e *Extension) Handler() http.Handler {
 	return e.apiHandler.Handler()
 }
 
-// RegisterRoutes registers all Weave API routes into a Forge router.
-func (e *Extension) RegisterRoutes(router forge.Router) {
-	if e.apiHandler != nil {
-		e.apiHandler.RegisterRoutes(router)
+// RegisterRoutes registers all Weave API routes into a Forge router. It
+// returns an error naming every route the router refused, and nil before
+// Register has run.
+func (e *Extension) RegisterRoutes(router forge.Router) error {
+	if e.apiHandler == nil {
+		return nil
 	}
+	return e.apiHandler.RegisterRoutes(router)
 }
 
 // --- Config Loading (mirrors grove extension pattern) ---
@@ -239,6 +254,8 @@ func (e *Extension) loadConfiguration() error {
 		forge.F("default_chunk_size", e.config.DefaultChunkSize),
 		forge.F("default_embedding_model", e.config.DefaultEmbeddingModel),
 		forge.F("ingest_concurrency", e.config.IngestConcurrency),
+		forge.F("recovery_interval", e.config.RecoveryInterval.String()),
+		forge.F("stalled_after", e.config.StalledAfter.String()),
 	)
 
 	return nil
@@ -302,6 +319,12 @@ func (e *Extension) mergeWithDefaults(cfg Config) Config {
 	if cfg.IngestConcurrency == 0 {
 		cfg.IngestConcurrency = defaults.IngestConcurrency
 	}
+	if cfg.RecoveryInterval == 0 {
+		cfg.RecoveryInterval = defaults.RecoveryInterval
+	}
+	if cfg.StalledAfter == 0 {
+		cfg.StalledAfter = defaults.StalledAfter
+	}
 	return cfg
 }
 
@@ -346,6 +369,12 @@ func (e *Extension) mergeConfigurations(yamlConfig, programmaticConfig Config) C
 	if yamlConfig.IngestConcurrency == 0 && programmaticConfig.IngestConcurrency != 0 {
 		yamlConfig.IngestConcurrency = programmaticConfig.IngestConcurrency
 	}
+	if yamlConfig.RecoveryInterval == 0 && programmaticConfig.RecoveryInterval != 0 {
+		yamlConfig.RecoveryInterval = programmaticConfig.RecoveryInterval
+	}
+	if yamlConfig.StalledAfter == 0 && programmaticConfig.StalledAfter != 0 {
+		yamlConfig.StalledAfter = programmaticConfig.StalledAfter
+	}
 
 	// Fill remaining zeros with defaults.
 	return e.mergeWithDefaults(yamlConfig)
@@ -369,16 +398,17 @@ func (e *Extension) resolveGroveDB(fapp forge.App) (*grove.DB, error) {
 }
 
 // buildStoreFromGroveDB constructs the appropriate store backend
-// based on the grove driver type (pg, sqlite, mongo).
+// based on the grove driver type (pg, sqlite, mongo). The database belongs to
+// the container, so the store it returns never closes it.
 func (e *Extension) buildStoreFromGroveDB(db *grove.DB) (store.Store, error) {
 	driverName := db.Driver().Name()
 	switch driverName {
 	case "pg":
-		return pgstore.New(db), nil
+		return borrow(pgstore.New(db)), nil
 	case "sqlite":
-		return sqlitestore.New(db), nil
+		return borrow(sqlitestore.New(db)), nil
 	case "mongo":
-		return mongostore.New(db), nil
+		return borrow(mongostore.New(db)), nil
 	default:
 		return nil, fmt.Errorf("weave: unsupported grove driver %q", driverName)
 	}

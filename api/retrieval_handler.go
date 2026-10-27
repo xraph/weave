@@ -10,7 +10,11 @@ import (
 	"github.com/xraph/weave/id"
 )
 
-func (a *API) retrieve(ctx forge.Context, req *RetrieveRequest) ([]engine.ScoredChunk, error) {
+// maxTopK caps top_k on the retrieve and search routes, as the list routes
+// cap limit.
+const maxTopK = 1000
+
+func (a *API) retrieve(ctx forge.Context, req *RetrieveRequest) (*struct{}, error) {
 	colID, err := id.ParseCollectionID(ctx.Param("collectionId"))
 	if err != nil {
 		return nil, forge.BadRequest(fmt.Sprintf("invalid collection ID: %v", err))
@@ -22,31 +26,31 @@ func (a *API) retrieve(ctx forge.Context, req *RetrieveRequest) ([]engine.Scored
 
 	results, err := a.eng.Retrieve(ctx.Context(), req.Query,
 		engine.WithCollection(colID),
-		engine.WithTopK(req.TopK),
+		engine.WithTopK(min(req.TopK, maxTopK)),
 		engine.WithMinScore(req.MinScore),
 		engine.WithStrategy(req.Strategy),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("retrieve: %w", err)
+		return nil, mapStoreError(err)
 	}
 
-	return results, ctx.JSON(http.StatusOK, results)
+	return nil, ctx.JSON(http.StatusOK, results)
 }
 
-func (a *API) hybridSearch(ctx forge.Context, req *HybridSearchRequest) ([]engine.ScoredChunk, error) {
+func (a *API) hybridSearch(ctx forge.Context, req *HybridSearchRequest) (*struct{}, error) {
 	if req.Query == "" {
 		return nil, forge.BadRequest("query is required")
 	}
 
 	results, err := a.eng.HybridSearch(ctx.Context(), req.Query, &engine.HybridSearchParams{
 		Collections: req.Collections,
-		TopK:        req.TopK,
+		TopK:        min(req.TopK, maxTopK),
 		Strategy:    req.Strategy,
 		MinScore:    req.MinScore,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("hybrid search: %w", err)
+		return nil, mapStoreError(err)
 	}
 
-	return results, ctx.JSON(http.StatusOK, results)
+	return nil, ctx.JSON(http.StatusOK, results)
 }

@@ -1,7 +1,6 @@
 package storetest
 
 import (
-	"context"
 	"testing"
 
 	"github.com/xraph/weave/chunk"
@@ -15,11 +14,12 @@ import (
 // metadata map at all, which is what a caller that never sets one sends.
 // Every write must succeed and read back by ID.
 func testNilMetadata(t *testing.T, s store.Store) {
-	ctx := context.Background()
+	ctx := as("t1")
 
 	col := &collection.Collection{
 		ID:            id.NewCollectionID(),
 		Name:          "nil-metadata",
+		TenantID:      "t1",
 		ChunkStrategy: "recursive",
 		ChunkSize:     64,
 	}
@@ -33,6 +33,7 @@ func testNilMetadata(t *testing.T, s store.Store) {
 	doc := &document.Document{
 		ID:           id.NewDocumentID(),
 		CollectionID: col.ID,
+		TenantID:     "t1",
 		Title:        "no metadata",
 		ContentHash:  "sha-nil-metadata",
 		State:        document.StateReady,
@@ -48,6 +49,7 @@ func testNilMetadata(t *testing.T, s store.Store) {
 		ID:           id.NewChunkID(),
 		DocumentID:   doc.ID,
 		CollectionID: col.ID,
+		TenantID:     "t1",
 		Content:      "a chunk with no metadata",
 	}
 	if err := s.CreateChunkBatch(ctx, []*chunk.Chunk{ch}); err != nil {

@@ -54,6 +54,96 @@ jobs:
             exit 1
           fi
 
+  # ─── Sub-modules ────────────────────────────────────────────────────
+  # The shared workflow runs from the repo root, and Go skips every
+  # directory with its own go.mod, so embedder/nexus gets its own job.
+  submodules:
+    name: Sub-modules
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: embedder/nexus/go.mod
+          cache: true
+          cache-dependency-path: embedder/nexus/go.sum
+
+      - name: Tidy
+        run: |
+          make tidy-submodules
+          git diff --exit-code -- embedder/nexus/go.mod embedder/nexus/go.sum
+
+      - name: Vet
+        run: make vet-submodules
+
+      - name: Test
+        run: make test-submodules
+
+      # Same linter version and setup as the shared workflow's lint job. The
+      # sub-module has no config of its own, so golangci-lint finds the
+      # root's .golangci.yml.
+      - name: Warm build cache
+        continue-on-error: true
+        working-directory: embedder/nexus
+        run: go build ./...
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: embedder/nexus
+          args: --timeout=5m
+
+      - name: Install goimports
+        run: go install golang.org/x/tools/cmd/goimports@latest
+
+      - name: Check formatting (goimports)
+        run: |
+          OUTPUT=$(goimports -l -local github.com/xraph/weave embedder/nexus)
+          if [ -n "$OUTPUT" ]; then
+            echo "::error::The following files need goimports formatting:"
+            echo "$OUTPUT"
+            exit 1
+          fi
+
+  # ─── Sub-module security ────────────────────────────────────────────
+  # The shared workflow's Security job runs gosec and govulncheck from the
+  # root only, which skips embedder/nexus. Same tools and excludes here, on
+  # the latest 1.26 patch so stdlib fixes count.
+  submodules-security:
+    name: Sub-module security
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: embedder/nexus
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          check-latest: true
+          cache: true
+          cache-dependency-path: embedder/nexus/go.sum
+
+      - name: gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -exclude=G115 ./...
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
   # ─── Docs ───────────────────────────────────────────────────────────
   docs:
     name: Docs

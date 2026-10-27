@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/xraph/weave/internal/tenancy"
 	"github.com/xraph/weave/vectorstore"
 )
 
@@ -27,8 +28,20 @@ func New() *Store {
 	}
 }
 
-// Upsert inserts or updates vector entries.
+// Len returns how many entries the store holds, across every tenant.
+func (s *Store) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.entries)
+}
+
+// Upsert inserts or updates vector entries. Every entry needs a
+// metadata["tenant_id"]; one without it is ErrTenantRequired, and nothing
+// in the batch is written.
 func (s *Store) Upsert(_ context.Context, entries []vectorstore.Entry) error {
+	if err := tenancy.VectorEntries(entries); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -38,8 +51,12 @@ func (s *Store) Upsert(_ context.Context, entries []vectorstore.Entry) error {
 	return nil
 }
 
-// Search returns the most similar entries to the given vector using cosine similarity.
+// Search returns the most similar entries of one tenant to the given vector
+// using cosine similarity. An empty TenantKey is ErrTenantRequired.
 func (s *Store) Search(_ context.Context, vector []float32, opts *vectorstore.SearchOptions) ([]vectorstore.SearchResult, error) {
+	if err := tenancy.VectorSearch(opts); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -58,10 +75,8 @@ func (s *Store) Search(_ context.Context, vector []float32, opts *vectorstore.Se
 		}
 
 		// Apply tenant filter.
-		if opts != nil && opts.TenantKey != "" {
-			if e.Metadata["tenant_id"] != opts.TenantKey {
-				continue
-			}
+		if e.Metadata["tenant_id"] != opts.TenantKey {
+			continue
 		}
 
 		score := cosineSimilarity(vector, e.Vector)
@@ -102,8 +117,12 @@ func (s *Store) Delete(_ context.Context, ids []string) error {
 	return nil
 }
 
-// DeleteByMetadata removes entries matching the given metadata filter.
+// DeleteByMetadata removes entries matching the given metadata filter. An
+// empty filter would match every entry and is ErrInvalidArgument.
 func (s *Store) DeleteByMetadata(_ context.Context, filter map[string]string) error {
+	if err := tenancy.VectorDeleteFilter(filter); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

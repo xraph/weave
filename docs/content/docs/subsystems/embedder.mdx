@@ -70,6 +70,59 @@ A status other than 200 comes back as `*embedder.StatusError`, which carries `St
 
 Each call gets an OpenTelemetry client span named `POST` with the server's host and port and the response status. It never records the URL's path or query, any userinfo in the base URL, the key or the texts, and it drops the caller's baggage before the request leaves. The client you pass with `WithOpenAIClient` is traced the same way, so don't hand it a transport that is traced already. See [observability](/docs/subsystems/observability).
 
+## Nexus embedder
+
+If your app already runs a [nexus](https://github.com/xraph/nexus) gateway, you can send embeddings through it. Nexus records the spend on the same usage rows and budgets as your chat traffic, and the provider's key never leaves nexus.
+
+It ships as its own module, so the root `github.com/xraph/weave` never pulls in nexus:
+
+```bash
+go get github.com/xraph/weave/embedder/nexus
+```
+
+```go
+import (
+    weavenexus "github.com/xraph/weave/embedder/nexus"
+)
+
+// nexusExt is nexus's Forge extension. Pass its Gateway method, not its result.
+emb := weavenexus.New(nexusExt.Gateway, "text-embedding-3-small", 1536,
+    weavenexus.WithProvider("knowledge"),
+)
+eng, err := engine.New(engine.WithEmbedder(emb) /* , ... */)
+```
+
+`New(gw func() *nexus.Gateway, model string, dimensions int, opts ...Option)` doesn't call `gw`. The first `Embed` does, and keeps the first gateway it gets back, so you can build the embedder before nexus has started. Until then `Embed` returns `weavenexus.ErrGatewayUnavailable`: while `gw` answers nil, and while the gateway it answered isn't initialized (the error also matches `nexus.ErrNotInitialized`). Both clear once nexus starts, so it's safe to retry.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `WithProvider(name)` | none, nexus routes by model | The registered nexus provider every request goes to |
+| `WithTenantMapper(fn)` | the weave tenant, unchanged | Turns the weave tenant into the nexus tenant the call is charged to |
+| `WithBatchSize(n)` | `256` | Most texts in one nexus request |
+
+### Pick the provider
+
+Pass `WithProvider` whenever more than one nexus provider could serve the model. Without it nexus routes by model name, and a chat provider that also lists `text-embedding-3-small` can win, so the call goes out with that provider's key and base URL. With a name, nexus calls that provider or refuses the request. It never swaps in another one.
+
+### Tenants and who pays
+
+Every call needs a weave tenant on the context (`weave.WithTenant`). Without one, `Embed` returns `weave.ErrTenantRequired` before it calls nexus, so no embedding ever goes out without someone to charge it to.
+
+Who pays depends on what's on the context:
+
+- If your middleware set a nexus tenant with nexus's `pipeline.WithTenantID`, the call is charged to that one and the mapper isn't called.
+- Otherwise the weave tenant goes through `WithTenantMapper` and the result is sent as the request's `TenantID`. A mapper that returns `""` gives `weave.ErrTenantRequired`.
+
+The default mapper passes the weave tenant straight through, which only works when your weave tenants are nexus tenant IDs (`tenant_...`). If they're something else, such as workspace IDs, pass a mapper. The nexus tenant has to exist and be active in nexus: nexus refuses an ID it can't parse with `middlewares.ErrInvalidIdentity` and an unknown one as forbidden, and `Embed` returns both wrapped.
+
+### Dimensions
+
+Every request asks nexus for exactly `dimensions` numbers per vector, so you can store a shorter vector than the model's native size (pgvector indexes up to 2000). That only works with a model that can shorten its vectors, and on OpenAI's own endpoint that means `text-embedding-3-small` or `text-embedding-3-large`. Nexus's `openai` provider knows this and refuses anything else there, `text-embedding-ada-002` included, even at its native 1536: you get an error wrapping `middlewares.ErrDimensionsUnsupported`, and nexus never calls OpenAI. Nexus's `opencompat` provider says yes for every model and sends the width along, so the endpoint decides, and OpenAI's endpoint rejects it for ada-002 with an error of its own.
+
+Each response is still checked. A vector of the wrong length is `weave.ErrDimensionMismatch` with the model and both sizes in the message (nexus usually catches it first, and its `middlewares.ErrDimensionsMismatch` stays in the chain), and a response with fewer or more vectors than inputs is an error too.
+
+Nexus reports usage per request, so `TokenCount` is split across the inputs the way the OpenAI embedder splits it. The embedder drops the caller's OpenTelemetry baggage before it calls nexus, and it sets no usage metadata.
+
 ## Local embedder
 
 `embedder.NewLocalEmbedder(dimensions int)` exists, but it's a placeholder. Every `Embed` call returns `embedder.ErrNotImplemented`. Until a local model lands, run an OpenAI-compatible server and use the OpenAI embedder against it, or write your own `Embedder`.

@@ -55,11 +55,11 @@ With the default base path, the routes are at `/weave/v1/...`. The [HTTP API ref
 | Phase | Behaviour |
 |-------|-----------|
 | `Register` | Loads config, resolves a store from Grove when there is one, builds the engine, mounts the routes (unless `disable_routes`) and provides `*engine.Engine` to the container. Fails when `default_chunk_overlap` isn't smaller than `default_chunk_size`. |
-| `Start` | Runs the metadata store's `Migrate` (unless `disable_migrate`). Nothing migrates the pgvector table. |
+| `Start` | Runs the metadata store's `Migrate` (unless `disable_migrate`). It doesn't migrate the pgvector table: call `pgvector.Migrate` yourself, see [pgvector](/docs/stores/pgvector). |
 | `Health` | Pings the metadata store. Fails when there's no store. |
-| `Stop` | Calls `engine.Stop`, which fires `OnShutdown` and closes the metadata store. |
+| `Stop` | Calls `engine.Stop`, which fires `OnShutdown` and closes the metadata store, unless the extension borrowed it from the container. |
 
-`Stop` closing the store means a `*grove.DB` the store was built on gets closed too, including one the extension found in the container and that other extensions share.
+A store you hand over with `WithStore` is yours to the end of `Stop`: Weave closes it. A store the extension builds from a `*grove.DB` in the container is different. The database belongs to the container and other extensions are still using it, so `Stop` leaves it open. The extension doesn't build a vector store from Grove, so nothing else on the borrowed path closes it either.
 
 ## Using a Grove database
 
@@ -114,9 +114,11 @@ extensions:
     default_top_k: 10
     shutdown_timeout: 30s
     ingest_concurrency: 4
+    recovery_interval: 5m
+    stalled_after: 15m
 ```
 
-Those are the defaults. `shutdown_timeout` and `ingest_concurrency` are read but nothing uses them yet. `default_embedding_model` and `default_chunk_strategy` are only recorded on new collections. [Configuration](/docs/concepts/configuration#yaml-configuration) describes every key.
+Those are the defaults. `shutdown_timeout` and `ingest_concurrency` are read but nothing uses them yet. `recovery_interval` and `stalled_after` drive [recovery](/docs/subsystems/ingestion#recovery): every 5 minutes the engine fails documents that have sent no heartbeat for 15 minutes and clears their partial chunks and vectors. Set `recovery_interval` negative if you'd rather run `RecoverStalled` from your own job scheduler. The dashboard flags a document as stalled with the same `stalled_after`. `default_embedding_model` and `default_chunk_strategy` are only recorded on new collections. [Configuration](/docs/concepts/configuration#yaml-configuration) describes every key.
 
 When the file has a weave section, its values win over `WithConfig` and the other programmatic options, which only fill fields the file leaves empty. `WithDisableRoutes` and `WithDisableMigrate` always turn their flag on.
 
@@ -153,7 +155,15 @@ app.Router().UseGlobal(func(next forge.Handler) forge.Handler {
 })
 ```
 
-Only creates, ingests and searches use the tenant. The list, get, delete, stats and reindex routes don't check it; see [multi-tenancy](/docs/concepts/multi-tenancy).
+Every route works inside that tenant, and a request without one gets a 403. See [multi-tenancy](/docs/concepts/multi-tenancy) for what each call does with it.
+
+## Authentication
+
+Weave's routes don't authenticate anyone. They trust the tenant on the request context, and a request with no tenant gets a 403, but nothing checks that the caller is allowed to use the tenant they name. Mount them only behind middleware that authenticates the caller and sets the tenant from the principal with `weave.WithTenant`. The middleware in [Tenants](#tenants) reads a header, which is fine behind a gateway that sets it and wrong on its own.
+
+If your app has its own API and its own auth, you can skip the routes. Pass `WithDisableRoutes()` and call the engine from your handlers. If you also run migrations yourself, pass `WithDisableMigrate()` so `Start` leaves the schema alone.
+
+Loomplane works this way. It mounts no Weave routes, so it passes `WithDisableRoutes()` and `WithDisableMigrate()`. It runs `postgres.Migrations` and the `weave_pgvector` group in its own migration pass, and it passes `WithDashboardTenant` so the dashboard contract takes its tenant from the principal. Anything else that reaches Weave goes through the engine, behind Loomplane's own auth.
 
 ## Metrics, traces and logs
 
@@ -181,3 +191,26 @@ if err != nil {
 ## Dashboard
 
 The extension implements Forge's dashboard contract contributor (`RegisterContractContributor`), so when you run the Forge dashboard it discovers a Weave section on start.
+
+Every dashboard request runs under one tenant, and you tell the extension how to find it. `WithDashboardTenant` takes a function that gets the request context and the signed-in principal:
+
+```go
+import dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
+
+weaveext.New(
+    weaveext.WithDashboardTenant(func(ctx context.Context, p dashcontract.Principal) (string, error) {
+        if p.User == nil {
+            return "", nil // nobody signed in, so the request is refused
+        }
+        return workspaces.TenantFor(ctx, p.User.Subject)
+    }),
+)
+```
+
+What it returns scopes everything the pages do: the counts on the Overview, every list, a get by ID, ingest, edits, deletes and retrieval runs. Another tenant's collection, document or chunk is not found, which is the same answer you get for an ID that doesn't exist.
+
+Leave the option out and the dashboard reads `weave.TenantFromContext` instead, so a middleware that already puts the tenant on the request context keeps working.
+
+A request that ends up with no tenant is refused with `PERMISSION_DENIED`. So is one where your function returns an error. The error's text never reaches the browser (the extension logs its type at warn level), so it's fine to return one that names an organisation or the lookup that failed.
+
+The lists, the Overview and retrieval still accept a `tenant` field, so a page that sends one keeps working as long as it sends the tenant you resolved. Any other value, `""` included, is refused with `PERMISSION_DENIED`. The Overview's `scope` reads `"tenant"`.

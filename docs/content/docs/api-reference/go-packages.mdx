@@ -3,7 +3,7 @@ title: Go Packages
 description: Quick reference for all Weave Go packages and their public APIs.
 ---
 
-Everything lives in the one module, `github.com/xraph/weave`. The full API is on [pkg.go.dev](https://pkg.go.dev/github.com/xraph/weave).
+Almost everything lives in the root module, `github.com/xraph/weave`. The nexus embedder is a module of its own, `github.com/xraph/weave/embedder/nexus`, so you only pull in nexus when you use it. The full API is on [pkg.go.dev](https://pkg.go.dev/github.com/xraph/weave).
 
 ## Core packages
 
@@ -37,7 +37,7 @@ Everything lives in the one module, `github.com/xraph/weave`. The full API is on
 | `Engine.ReindexCollection` | Re-embed a collection |
 | `Engine.Components`, `DescribeExtensions`, `Config`, `Store`, `Logger`, `Extensions` | Introspection |
 | `Engine.Start`, `Stop`, `Health` | Lifecycle. `Start` does nothing yet; `Stop` fires `OnShutdown` and closes the store. |
-| `WithCollection`, `WithTopK`, `WithMinScore`, `WithTenantID`, `WithTenantFilter`, `WithStrategy` | Retrieve options (`WithStrategy` is ignored) |
+| `WithCollection`, `WithTopK`, `WithMinScore`, `WithTenantID`, `WithTenantFilter`, `WithStrategy` | Retrieve options (`WithStrategy` is ignored; `WithTenantID` and `WithTenantFilter` are deprecated and must match the context tenant) |
 | `IngestInput`, `IngestResult`, `ScoredChunk`, `HybridSearchParams`, `AssembleParams`, `AssembledContext`, `CollectionUpdate`, `CompareParams`, `CompareResult` | Parameter and result types |
 
 ## Interface packages
@@ -58,6 +58,18 @@ type Embedder interface {
     Dimensions() int
 }
 ```
+
+### `github.com/xraph/weave/embedder/nexus` (its own module)
+
+```go
+var ErrGatewayUnavailable error // gw() answers nil, or nexus isn't initialized yet
+func New(gw func() *nexus.Gateway, model string, dimensions int, opts ...Option) embedder.Embedder
+func WithProvider(name string) Option
+func WithTenantMapper(fn func(ctx context.Context, weaveTenant string) (string, error)) Option
+func WithBatchSize(n int) Option // default 256
+```
+
+See [the nexus embedder](/docs/subsystems/embedder#nexus-embedder).
 
 ### `github.com/xraph/weave/loader`
 
@@ -132,15 +144,17 @@ func New(opts ...ExtOption) *Extension
 func (e *Extension) Engine() *engine.Engine
 func (e *Extension) API() *api.API
 func (e *Extension) Handler() http.Handler
+func (e *Extension) RegisterRoutes(router forge.Router) error
+func WithDashboardTenant(fn func(ctx context.Context, p dashcontract.Principal) (string, error)) ExtOption
 ```
 
-Options: `WithStore`, `WithVectorStore`, `WithEngineOption`, `WithExtension`, `WithConfig`, `WithBasePath`, `WithDisableRoutes`, `WithDisableMigrate`, `WithGroveDatabase`, `WithRequireConfig`.
+Options: `WithStore`, `WithVectorStore`, `WithEngineOption`, `WithExtension`, `WithConfig`, `WithBasePath`, `WithDisableRoutes`, `WithDisableMigrate`, `WithGroveDatabase`, `WithRequireConfig`, `WithDashboardTenant`.
 
 ### `github.com/xraph/weave/api`
 
 ```go
 func New(eng *engine.Engine, router forge.Router) *API
-func (a *API) RegisterRoutes(router forge.Router)
+func (a *API) RegisterRoutes(router forge.Router) error
 func (a *API) Handler() http.Handler
 ```
 
@@ -167,7 +181,7 @@ func DefaultTemplate() *Template
 | `store/sqlite.New(db *grove.DB)` | `store.Store` | SQLite on Grove |
 | `store/mongo.New(db *grove.DB)` | `store.Store` | MongoDB on Grove |
 | `vectorstore/memory.New()` | `vectorstore.VectorStore` | Brute-force cosine similarity |
-| `vectorstore/pgvector.New(db, opts...)` | `vectorstore.VectorStore` | PostgreSQL with pgvector; you create the table |
+| `vectorstore/pgvector.New(db, opts...)` | `vectorstore.VectorStore` | PostgreSQL with pgvector; `pgvector.Migrate` creates the table, `pgvector.Available` checks first |
 | `vectorstore/fabriq.New(vq, opts...)` | `vectorstore.VectorStore` | Fabriq vector plane (package `fabriqvec`) |
 | `chunker.NewRecursiveChunker()` | `chunker.Chunker` | Separator-based |
 | `chunker.NewFixedChunker()` | `chunker.Chunker` | Fixed character windows |
@@ -176,6 +190,7 @@ func DefaultTemplate() *Template
 | `chunker.NewCodeChunker()` | `chunker.Chunker` | Code block boundaries |
 | `embedder.NewOpenAIEmbedder(apiKey, opts...)` | `embedder.Embedder` | OpenAI or any compatible endpoint; a non-200 answer returns `*embedder.StatusError` |
 | `embedder.NewLocalEmbedder(dims)` | `embedder.Embedder` | Placeholder, returns `ErrNotImplemented` |
+| `embedder/nexus.New(gw, model, dims, opts...)` | `embedder.Embedder` | Calls a nexus gateway; its own module |
 | `retriever.NewSimilarityRetriever(vs, emb, store)` | `retriever.Retriever` | Plain vector search |
 | `retriever.NewMMRRetriever(vs, emb, lambda)` | `retriever.Retriever` | Maximal Marginal Relevance |
 | `retriever.NewHybridRetriever(retrievers...)` | `retriever.Retriever` | Reciprocal Rank Fusion of other retrievers |

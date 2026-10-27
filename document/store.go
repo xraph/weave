@@ -15,6 +15,10 @@ type ListFilter struct {
 	State State
 	// Search filters documents by title (case-insensitive substring match).
 	Search string
+	// SourceKey filters by exact source key. Empty means any.
+	SourceKey string
+	// ContentHash filters by exact content hash. Empty means any.
+	ContentHash string
 	// Limit is the maximum number of documents to return. Zero means no limit.
 	Limit int
 	// Offset is the number of documents to skip.
@@ -22,8 +26,9 @@ type ListFilter struct {
 	// SortDesc lists newest first. The default is oldest first, which API
 	// clients paging by offset already depend on.
 	SortDesc bool
-	// Tenant filters by tenant. Nil means every tenant. A non-nil value is
-	// an exact match, so a pointer to "" means rows written with no tenant.
+	// Tenant is the old explicit tenant filter.
+	//
+	// Deprecated: the tenant comes from the context (weave.WithTenant). A non-nil value must equal it.
 	Tenant *string
 }
 
@@ -35,23 +40,28 @@ type CountFilter struct {
 	State State
 	// Search filters by title, matched exactly as ListFilter.Search.
 	Search string
-	// Tenant filters by tenant. Nil means every tenant. A non-nil value is
-	// an exact match, so a pointer to "" means rows written with no tenant.
+	// Tenant is the old explicit tenant filter.
+	//
+	// Deprecated: the tenant comes from the context (weave.WithTenant). A non-nil value must equal it.
 	Tenant *string
 	// UpdatedBefore counts only documents last updated before this instant.
 	// Zero means no filter.
 	UpdatedBefore time.Time
 }
 
-// Store defines the persistence contract for documents.
+// Store defines the persistence contract for documents. Every method is
+// scoped to the context tenant; see store.Store for the rules.
 type Store interface {
-	// CreateDocument persists a new document.
+	// CreateDocument persists a new document. Its TenantID must be the
+	// context tenant, and its collection must belong to that tenant, else
+	// weave.ErrCollectionNotFound.
 	CreateDocument(ctx context.Context, doc *Document) error
 
 	// GetDocument retrieves a document by ID.
 	GetDocument(ctx context.Context, docID id.DocumentID) (*Document, error)
 
-	// UpdateDocument persists changes to an existing document.
+	// UpdateDocument persists changes to an existing document. A document
+	// never changes collection: a different CollectionID is not-found.
 	UpdateDocument(ctx context.Context, doc *Document) error
 
 	// DeleteDocument removes a document by ID.

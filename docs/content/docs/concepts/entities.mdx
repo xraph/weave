@@ -59,8 +59,9 @@ type Document struct {
     ContentLength int               // bytes
     ChunkCount    int
     Metadata      map[string]string
-    State         document.State    // pending | processing | ready | failed
+    State         document.State    // pending | processing | ready | failed | superseded
     Error         string            // set when State is failed
+    SourceKey     string            // which source this is the current version of; empty if none
 }
 ```
 
@@ -74,10 +75,17 @@ Documents carry a tenant but no app ID. The document doesn't keep the content it
 | `processing` | Being loaded, chunked and embedded |
 | `ready` | Fully processed and searchable |
 | `failed` | Ingestion failed; `Error` says why |
+| `superseded` | A newer version of the same source replaced it |
 
 On success a document goes `pending`, `processing`, `ready`. On a failure after it was created, it ends up `failed` and stays in the store until you delete it.
 
 `ContentHash` is unique per collection. Ingesting the same content into the same collection again fails with `weave.ErrDuplicateDocument`, and that includes content whose earlier ingest failed.
+
+### Source keys
+
+A source key names where a document came from, such as `docs/getting-started.md`, so you can ingest the same source again when it changes. Within a collection a source has at most one `ready` document. When a new version finishes, the store marks every `ready` or `failed` document of that source `superseded`, deletes their chunks and makes the new one `ready`, all in one step. The engine then purges the superseded rows and their vectors. Until then, and while a new version's vectors are written ahead of its chunks, retrieval drops any source-keyed vector without a chunk row and keeps one version per source, so a search never returns two versions. One that runs exactly during a swap can briefly miss the source. You set the key with `IngestInput.SourceKey` and remove a source with `DeleteBySource`, see [Upsert by source](/docs/subsystems/ingestion#upsert-by-source). Filter by key with `document.ListFilter{SourceKey: "docs/getting-started.md"}`; an empty `SourceKey` lists every document.
+
+Leave `SourceKey` empty and the document isn't source-managed, so none of this applies to it. The `ContentHash` rule still holds across keys, so identical content under two different source keys is `weave.ErrDuplicateDocument`.
 
 ## Chunk
 

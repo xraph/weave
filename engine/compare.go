@@ -3,9 +3,11 @@ package engine
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/xraph/weave"
+	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/id"
 	"github.com/xraph/weave/internal/telemetry"
 	"github.com/xraph/weave/retriever"
@@ -16,7 +18,12 @@ import (
 type CompareParams struct {
 	// CollectionID restricts both searches. Zero means every collection.
 	CollectionID id.CollectionID
-	// Tenant restricts both searches exactly; nil means every tenant.
+	// Tenant names the tenant to search. With no tenant on the context a
+	// non-empty value becomes the tenant; with one, a different value
+	// (including "") is ErrInvalidArgument. Both searches always run within
+	// one tenant.
+	//
+	// Deprecated: put the tenant on the context with weave.WithTenant.
 	Tenant *string
 	// TopK is how many final hits to return. Zero or less uses the config
 	// default.
@@ -63,7 +70,8 @@ type CompareResult struct {
 }
 
 // RetrieveCompare runs the configured retriever and a raw vector search over
-// a wider window, and reports where each final hit sat in the raw ranking.
+// a wider window, within the context tenant, and reports where each final
+// hit sat in the raw ranking.
 // With no retriever configured it embeds the query once and derives both
 // sides from the same search.
 //
@@ -73,6 +81,15 @@ type CompareResult struct {
 func (e *Engine) RetrieveCompare(ctx context.Context, query string, p CompareParams) (*CompareResult, error) {
 	if e.embedder == nil || e.vectorStore == nil {
 		return nil, fmt.Errorf("weave: compare needs an embedder and a vector store")
+	}
+	ctx, tenant, err := e.tenantNamed(ctx, p.Tenant)
+	if err != nil {
+		return nil, err
+	}
+	if !p.CollectionID.IsNil() {
+		if colErr := e.ownedCollections(ctx, tenant, p.CollectionID); colErr != nil {
+			return nil, colErr
+		}
 	}
 	topK := p.TopK
 	if topK <= 0 {
@@ -95,14 +112,13 @@ func (e *Engine) RetrieveCompare(ctx context.Context, query string, p ComparePar
 	if len(embedded) == 0 {
 		return nil, fmt.Errorf("weave: embed query: no vector returned")
 	}
-	// The same scope rules as Retrieve, including the context tenant when no
-	// explicit filter is given.
-	scope := &RetrieveParams{CollectionID: p.CollectionID.String(), TenantID: weave.TenantFromContext(ctx), TenantFilter: p.Tenant}
-	filter, tenantKey := searchScope(scope)
+	// The same scope as Retrieve.
+	filter, tenantKey := searchScope(p.CollectionID.String(), tenant)
 	raw, err := e.searchVectors(ctx, embedded[0].Vector, &vectorstore.SearchOptions{TopK: window, Filter: filter, TenantKey: tenantKey})
 	if err != nil {
 		return nil, fmt.Errorf("weave: raw vector search: %w", err)
 	}
+	raw = ownVectors(raw, tenant)
 	res.VectorMillis = float64(time.Since(vecStart).Microseconds()) / 1000
 	res.VectorMatches = len(raw)
 	if len(raw) > 0 {
@@ -133,9 +149,9 @@ func (e *Engine) RetrieveCompare(ctx context.Context, query string, p ComparePar
 		}
 		res.RetrieverMillis = res.VectorMillis
 	} else {
-		params := &RetrieveParams{CollectionID: p.CollectionID.String(), TopK: topK, MinScore: p.MinScore, TenantFilter: p.Tenant}
+		params := &RetrieveParams{CollectionID: p.CollectionID.String(), TopK: topK, MinScore: p.MinScore}
 		retStart := time.Now()
-		final, err = e.retrieveRaw(ctx, query, params)
+		final, err = e.retrieveRaw(ctx, query, params, tenant)
 		if err != nil {
 			return nil, err
 		}
@@ -188,26 +204,54 @@ func (e *Engine) RetrieveCompare(ctx context.Context, query string, p ComparePar
 		res.Reordered = true
 	}
 
-	if err := e.hydrateCompare(ctx, res.Hits); err != nil {
+	if res.Hits, err = e.hydrateCompare(ctx, tenant, res.Hits); err != nil {
 		return nil, err
 	}
-	if err := e.hydrateCompare(ctx, res.LeftOut); err != nil {
+	if res.LeftOut, err = e.hydrateCompare(ctx, tenant, res.LeftOut); err != nil {
 		return nil, err
 	}
+	// One version per source across both lists, as Retrieve keeps.
+	chunks := make([]*chunk.Chunk, 0, len(res.Hits)+len(res.LeftOut))
+	for _, h := range slices.Concat(res.Hits, res.LeftOut) {
+		chunks = append(chunks, h.Chunk)
+	}
+	keep, err := e.currentVersions(ctx, tenant, chunks)
+	if err != nil {
+		return nil, err
+	}
+	res.Hits = slices.DeleteFunc(res.Hits, func(h CompareHit) bool { return !keep(h.Chunk) })
+	res.LeftOut = slices.DeleteFunc(res.LeftOut, func(h CompareHit) bool { return !keep(h.Chunk) })
 	return res, nil
 }
 
-func (e *Engine) hydrateCompare(ctx context.Context, hits []CompareHit) error {
-	plain := make([]ScoredChunk, len(hits))
-	for i := range hits {
-		plain[i] = hits[i].ScoredChunk
+// hydrateCompare is hydrate for compare hits: each keeps its ranks, and a
+// hit hydrateHit drops is removed.
+func (e *Engine) hydrateCompare(ctx context.Context, tenant string, hits []CompareHit) ([]CompareHit, error) {
+	kept := hits[:0]
+	shown := shownDocuments{}
+	for _, h := range hits {
+		keep, err := e.hydrateHit(ctx, tenant, &h.ScoredChunk, shown)
+		if err != nil {
+			return nil, err
+		}
+		if keep {
+			kept = append(kept, h)
+		}
 	}
-	plain, err := e.hydrate(ctx, plain)
-	if err != nil {
-		return err
+	return kept, nil
+}
+
+// ownVectors keeps only the search results labelled with tenant. Every
+// built-in store labels every entry, so only a vector store that ignores
+// the tenant filter loses anything here, and then no count, score or rank
+// of another tenant's vectors reaches the result.
+func ownVectors(results []vectorstore.SearchResult, tenant string) []vectorstore.SearchResult {
+	kept := results[:0]
+	for _, r := range results {
+		if r.Metadata["tenant_id"] != tenant {
+			continue
+		}
+		kept = append(kept, r)
 	}
-	for i := range hits {
-		hits[i].ScoredChunk = plain[i]
-	}
-	return nil
+	return kept
 }

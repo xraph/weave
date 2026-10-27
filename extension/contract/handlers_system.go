@@ -24,35 +24,35 @@ type overviewOutput struct {
 	StalledAfterSeconds int               `json:"stalled_after_seconds"`
 	NewestDocuments     []documentRow     `json:"newest_documents"`
 	Components          engine.Components `json:"components"`
-	// Scope is "all": the dashboard path resolves no tenant, so it sees
-	// every tenant's data unless a page filters by one.
+	// Scope is "tenant": every count and row is the resolved tenant's
+	// alone.
 	Scope string `json:"scope"`
 }
 
 func systemOverviewHandler(deps Deps) func(context.Context, tenantInput, contract.Principal) (overviewOutput, error) {
-	return func(ctx context.Context, in tenantInput, _ contract.Principal) (overviewOutput, error) {
+	return func(ctx context.Context, _ tenantInput, _ contract.Principal) (overviewOutput, error) {
 		const intent = "system.overview"
 		e := deps.Engine
-		out := overviewOutput{StalledAfterSeconds: int(StalledAfter.Seconds()), Scope: "all", NewestDocuments: []documentRow{}, Components: e.Components()}
+		out := overviewOutput{StalledAfterSeconds: int(deps.stalledAfter().Seconds()), Scope: "tenant", NewestDocuments: []documentRow{}, Components: e.Components()}
 		var err error
-		if out.Collections, err = e.CountCollections(ctx, &collection.CountFilter{Tenant: in.Tenant}); err != nil {
+		if out.Collections, err = e.CountCollections(ctx, &collection.CountFilter{}); err != nil {
 			return overviewOutput{}, deps.mapError(intent, err)
 		}
-		if out.Documents, err = e.CountDocuments(ctx, &document.CountFilter{Tenant: in.Tenant}); err != nil {
+		if out.Documents, err = e.CountDocuments(ctx, &document.CountFilter{}); err != nil {
 			return overviewOutput{}, deps.mapError(intent, err)
 		}
-		if out.DocumentsByState, err = countStates(ctx, e, id.Nil, in.Tenant); err != nil {
+		if out.DocumentsByState, err = countStates(ctx, e, id.Nil); err != nil {
 			return overviewOutput{}, deps.mapError(intent, err)
 		}
-		if out.Chunks, err = e.CountChunks(ctx, &chunk.CountFilter{Tenant: in.Tenant}); err != nil {
+		if out.Chunks, err = e.CountChunks(ctx, &chunk.CountFilter{}); err != nil {
 			return overviewOutput{}, deps.mapError(intent, err)
 		}
 		if out.Stalled, err = e.CountDocuments(ctx, &document.CountFilter{
-			State: document.StateProcessing, UpdatedBefore: deps.now().Add(-StalledAfter), Tenant: in.Tenant,
+			State: document.StateProcessing, UpdatedBefore: deps.now().Add(-deps.stalledAfter()),
 		}); err != nil {
 			return overviewOutput{}, deps.mapError(intent, err)
 		}
-		docs, err := e.ListDocuments(ctx, &document.ListFilter{SortDesc: true, Limit: overviewNewest, Tenant: in.Tenant})
+		docs, err := e.ListDocuments(ctx, &document.ListFilter{SortDesc: true, Limit: overviewNewest})
 		if err != nil {
 			return overviewOutput{}, deps.mapError(intent, err)
 		}

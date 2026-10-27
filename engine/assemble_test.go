@@ -26,7 +26,7 @@ func TestAssembleSkipsAndContinues(t *testing.T) {
 		hit(strings.Repeat("b", 40), 0.8), // 10 tokens: does not fit after the first
 		hit(strings.Repeat("c", 16), 0.7), // 4 tokens: fits
 	}
-	got, err := e.Assemble(context.Background(), hits, engine.AssembleParams{MaxTokens: 10})
+	got, err := e.Assemble(weave.WithTenant(context.Background(), "t1"), hits, engine.AssembleParams{MaxTokens: 10})
 	if err != nil {
 		t.Fatalf("assemble: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestAssembleSkipsAndContinues(t *testing.T) {
 		t.Errorf("context: %q", got.Context)
 	}
 
-	all, err := e.Assemble(context.Background(), hits, engine.AssembleParams{})
+	all, err := e.Assemble(weave.WithTenant(context.Background(), "t1"), hits, engine.AssembleParams{})
 	if err != nil {
 		t.Fatalf("assemble default budget: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestAssembleSkipsAndContinues(t *testing.T) {
 
 func TestAssembleRefsReadsChunksBack(t *testing.T) {
 	r := newRig(t)
-	ctx := context.Background()
+	ctx := weave.WithTenant(context.Background(), "t1")
 	col := mustTestCollection(t, r.Engine, "refs")
 	mustIngest(t, ctx, r.Engine, col.ID, "refunds", "refunds are issued within thirty days")
 	chunks, err := r.Engine.ListChunks(ctx, &chunk.ListFilter{CollectionID: col.ID})
@@ -81,7 +81,7 @@ func TestAssembleNilChunks(t *testing.T) {
 		{Chunk: nil, Score: 0.9},          // nil chunk, skipped
 		hit(strings.Repeat("x", 16), 0.8), // 4 tokens: fits
 	}
-	got, err := e.Assemble(context.Background(), hits, engine.AssembleParams{MaxTokens: 100})
+	got, err := e.Assemble(weave.WithTenant(context.Background(), "t1"), hits, engine.AssembleParams{MaxTokens: 100})
 	if err != nil {
 		t.Fatalf("assemble with nil chunk: %v", err)
 	}

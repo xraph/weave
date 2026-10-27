@@ -27,8 +27,8 @@ type GetCollectionRequest struct {
 
 // ListCollectionsRequest is the request for listing collections.
 type ListCollectionsRequest struct {
-	Limit  int `query:"limit" description:"Maximum number of results (default: 50)"`
-	Offset int `query:"offset" description:"Number of results to skip"`
+	Limit  int `query:"limit" optional:"true" description:"Maximum number of results (default: 50)"`
+	Offset int `query:"offset" optional:"true" description:"Number of results to skip"`
 }
 
 // DeleteCollectionRequest is the request for deleting a collection.
@@ -58,6 +58,7 @@ type IngestDocumentRequest struct {
 	SourceType   string            `json:"source_type,omitempty" description:"MIME type or format hint"`
 	Content      string            `json:"content" description:"Document text content"`
 	Metadata     map[string]string `json:"metadata,omitempty" description:"Custom metadata"`
+	SourceKey    string            `json:"source_key,omitempty" description:"Source this document is the current version of; ingesting the key again replaces it (up to 1024 bytes)"`
 }
 
 // IngestBatchRequest is the request body for batch document ingestion.
@@ -69,6 +70,7 @@ type IngestBatchRequest struct {
 		SourceType string            `json:"source_type,omitempty" description:"MIME type or format"`
 		Content    string            `json:"content" description:"Document text content"`
 		Metadata   map[string]string `json:"metadata,omitempty" description:"Custom metadata"`
+		SourceKey  string            `json:"source_key,omitempty" description:"Source this document is the current version of (up to 1024 bytes)"`
 	} `json:"documents" description:"Documents to ingest"`
 }
 
@@ -80,14 +82,21 @@ type GetDocumentRequest struct {
 // ListDocumentsRequest is the request for listing documents.
 type ListDocumentsRequest struct {
 	CollectionID string `path:"collectionId" description:"Collection ID"`
-	State        string `query:"state" description:"Filter by document state (pending, processing, ready, failed)"`
-	Limit        int    `query:"limit" description:"Maximum number of results (default: 50)"`
-	Offset       int    `query:"offset" description:"Number of results to skip"`
+	State        string `query:"state" optional:"true" description:"Filter by document state (pending, processing, ready, failed)"`
+	Limit        int    `query:"limit" optional:"true" description:"Maximum number of results (default: 50)"`
+	Offset       int    `query:"offset" optional:"true" description:"Number of results to skip"`
 }
 
 // DeleteDocumentRequest is the request for deleting a document.
 type DeleteDocumentRequest struct {
 	DocumentID string `path:"documentId" description:"Document ID"`
+}
+
+// DeleteDocumentsBySourceRequest is the request for deleting every document
+// of a source in a collection.
+type DeleteDocumentsBySourceRequest struct {
+	CollectionID string `path:"collectionId" description:"Collection ID"`
+	SourceKey    string `query:"source_key" optional:"true" description:"Source key whose documents to delete (required)"`
 }
 
 // ──────────────────────────────────────────────────

@@ -1,7 +1,6 @@
 package storetest
 
 import (
-	"context"
 	"errors"
 	"testing"
 
@@ -13,7 +12,7 @@ import (
 )
 
 func testDuplicates(t *testing.T, s store.Store) {
-	ctx := context.Background()
+	ctx := as("t1")
 
 	a := mustCollection(t, s, "dupes", "t1")
 	b := mustCollection(t, s, "elsewhere", "t1")
@@ -47,7 +46,7 @@ func testDuplicates(t *testing.T, s store.Store) {
 	otherTenant := *sameName
 	otherTenant.ID = id.NewCollectionID()
 	otherTenant.TenantID = "t2"
-	if err := s.CreateCollection(ctx, &otherTenant); err != nil {
+	if err := s.CreateCollection(as("t2"), &otherTenant); err != nil {
 		t.Errorf("same name, other tenant: got %v, want success", err)
 	}
 
