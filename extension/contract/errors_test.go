@@ -17,6 +17,7 @@ func TestMapError(t *testing.T) {
 		err  error
 		code dashcontract.ErrorCode
 	}{
+		{fmt.Errorf("weave: list collections: %w", weave.ErrTenantRequired), dashcontract.CodePermissionDenied},
 		{weave.ErrCollectionNotFound, dashcontract.CodeNotFound},
 		{fmt.Errorf("wrapped: %w", weave.ErrDocumentNotFound), dashcontract.CodeNotFound},
 		{weave.ErrChunkNotFound, dashcontract.CodeNotFound},

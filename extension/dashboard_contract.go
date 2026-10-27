@@ -26,7 +26,7 @@ func (e *Extension) RegisterContractContributor(
 		}
 		return nil
 	}
-	deps := weavecontract.Deps{Engine: e.eng}
+	deps := weavecontract.Deps{Engine: e.eng, Tenant: e.dashboardTenant}
 	if logger != nil {
 		deps.Logger = logger
 	}

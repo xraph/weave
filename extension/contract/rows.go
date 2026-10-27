@@ -10,11 +10,27 @@ import (
 	"github.com/xraph/weave/id"
 )
 
-// tenantInput is the input of an intent whose only parameter is the tenant
-// filter: absent means every tenant, present is an exact match.
+// tenantInput is the input of an intent whose only parameter is the
+// client's tenant. Every intent runs under the tenant the dashboard
+// resolves, so the field can only repeat it; see withTenant.
 type tenantInput struct {
 	Tenant *string `json:"tenant"`
 }
+
+// Every input with a `tenant` field must let withTenant check it.
+var (
+	_ tenantFilterer = tenantInput{}
+	_ tenantFilterer = collectionsListInput{}
+	_ tenantFilterer = documentsListInput{}
+	_ tenantFilterer = chunksListInput{}
+	_ tenantFilterer = runInput{}
+)
+
+func (in tenantInput) tenantFilter() *string          { return in.Tenant }
+func (in collectionsListInput) tenantFilter() *string { return in.Tenant }
+func (in documentsListInput) tenantFilter() *string   { return in.Tenant }
+func (in chunksListInput) tenantFilter() *string      { return in.Tenant }
+func (in runInput) tenantFilter() *string             { return in.Tenant }
 
 // stateCounts is how many documents sit in each state.
 type stateCounts struct {
@@ -24,7 +40,7 @@ type stateCounts struct {
 	Failed     int64 `json:"failed"`
 }
 
-func countStates(ctx context.Context, e *engine.Engine, colID id.CollectionID, tenant *string) (stateCounts, error) {
+func countStates(ctx context.Context, e *engine.Engine, colID id.CollectionID) (stateCounts, error) {
 	var out stateCounts
 	for _, s := range []struct {
 		state document.State
@@ -35,7 +51,7 @@ func countStates(ctx context.Context, e *engine.Engine, colID id.CollectionID, t
 		{document.StateReady, &out.Ready},
 		{document.StateFailed, &out.Failed},
 	} {
-		n, err := e.CountDocuments(ctx, &document.CountFilter{CollectionID: colID, State: s.state, Tenant: tenant})
+		n, err := e.CountDocuments(ctx, &document.CountFilter{CollectionID: colID, State: s.state})
 		if err != nil {
 			return stateCounts{}, err
 		}

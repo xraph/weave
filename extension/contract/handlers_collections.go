@@ -84,11 +84,11 @@ func collectionsListHandler(deps Deps) func(context.Context, collectionsListInpu
 		if err != nil {
 			return listOutput[collectionRow]{}, err
 		}
-		cols, err := deps.Engine.ListCollections(ctx, &collection.ListFilter{Search: in.Search, Limit: limit, Offset: offset, SortDesc: true, Tenant: in.Tenant})
+		cols, err := deps.Engine.ListCollections(ctx, &collection.ListFilter{Search: in.Search, Limit: limit, Offset: offset, SortDesc: true})
 		if err != nil {
 			return listOutput[collectionRow]{}, deps.mapError(intent, err)
 		}
-		total, err := deps.Engine.CountCollections(ctx, &collection.CountFilter{Search: in.Search, Tenant: in.Tenant})
+		total, err := deps.Engine.CountCollections(ctx, &collection.CountFilter{Search: in.Search})
 		if err != nil {
 			return listOutput[collectionRow]{}, deps.mapError(intent, err)
 		}
@@ -119,7 +119,7 @@ func collectionsGetHandler(deps Deps) func(context.Context, idInput, contract.Pr
 		if err != nil {
 			return collectionDetail{}, deps.mapError(intent, err)
 		}
-		states, err := countStates(ctx, deps.Engine, colID, nil)
+		states, err := countStates(ctx, deps.Engine, colID)
 		if err != nil {
 			return collectionDetail{}, deps.mapError(intent, err)
 		}

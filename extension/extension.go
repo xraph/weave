@@ -15,6 +15,7 @@ import (
 	"net/http"
 
 	"github.com/xraph/forge"
+	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
 	"github.com/xraph/grove"
 	"github.com/xraph/vessel"
 
@@ -47,6 +48,10 @@ type Extension struct {
 	apiHandler *api.API
 	engineOpts []engine.Option
 	useGrove   bool
+
+	// dashboardTenant resolves the tenant of a dashboard request; nil
+	// reads it from the request context.
+	dashboardTenant func(ctx context.Context, p dashcontract.Principal) (string, error)
 }
 
 // New creates a Weave Forge extension with the given options.
@@ -122,14 +127,17 @@ func (e *Extension) Register(fapp forge.App) error {
 	// Create the API handler.
 	e.apiHandler = api.New(e.eng, fapp.Router())
 
-	// Register HTTP routes unless disabled.
+	// Register HTTP routes unless disabled. A route the router refuses
+	// fails Register, so the app never serves part of the API.
 	if !e.config.DisableRoutes {
 		basePath := e.config.BasePath
 		if basePath == "" {
 			basePath = "/weave"
 		}
 
-		e.apiHandler.RegisterRoutes(fapp.Router().Group(basePath))
+		if err := e.apiHandler.RegisterRoutes(fapp.Router().Group(basePath)); err != nil {
+			return err
+		}
 	}
 
 	// Register the engine in the DI container so other extensions can use it.
@@ -189,7 +197,8 @@ func (e *Extension) Health(ctx context.Context) error {
 }
 
 // Handler returns the HTTP handler for all API routes.
-// Convenience for standalone use outside Forge.
+// Convenience for standalone use outside Forge. Like api.API.Handler, it
+// panics when a route fails to register.
 func (e *Extension) Handler() http.Handler {
 	if e.apiHandler == nil {
 		return http.NotFoundHandler()
@@ -197,11 +206,14 @@ func (e *Extension) Handler() http.Handler {
 	return e.apiHandler.Handler()
 }
 
-// RegisterRoutes registers all Weave API routes into a Forge router.
-func (e *Extension) RegisterRoutes(router forge.Router) {
-	if e.apiHandler != nil {
-		e.apiHandler.RegisterRoutes(router)
+// RegisterRoutes registers all Weave API routes into a Forge router. It
+// returns an error naming every route the router refused, and nil before
+// Register has run.
+func (e *Extension) RegisterRoutes(router forge.Router) error {
+	if e.apiHandler == nil {
+		return nil
 	}
+	return e.apiHandler.RegisterRoutes(router)
 }
 
 // --- Config Loading (mirrors grove extension pattern) ---

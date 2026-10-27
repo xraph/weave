@@ -153,7 +153,7 @@ app.Router().UseGlobal(func(next forge.Handler) forge.Handler {
 })
 ```
 
-Only creates, ingests and searches use the tenant. The list, get, delete, stats and reindex routes don't check it; see [multi-tenancy](/docs/concepts/multi-tenancy).
+Every route works inside that tenant, and a request without one gets a 403. See [multi-tenancy](/docs/concepts/multi-tenancy) for what each call does with it.
 
 ## Metrics, traces and logs
 
@@ -181,3 +181,26 @@ if err != nil {
 ## Dashboard
 
 The extension implements Forge's dashboard contract contributor (`RegisterContractContributor`), so when you run the Forge dashboard it discovers a Weave section on start.
+
+Every dashboard request runs under one tenant, and you tell the extension how to find it. `WithDashboardTenant` takes a function that gets the request context and the signed-in principal:
+
+```go
+import dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
+
+weaveext.New(
+    weaveext.WithDashboardTenant(func(ctx context.Context, p dashcontract.Principal) (string, error) {
+        if p.User == nil {
+            return "", nil // nobody signed in, so the request is refused
+        }
+        return workspaces.TenantFor(ctx, p.User.Subject)
+    }),
+)
+```
+
+What it returns scopes everything the pages do: the counts on the Overview, every list, a get by ID, ingest, edits, deletes and retrieval runs. Another tenant's collection, document or chunk is not found, which is the same answer you get for an ID that doesn't exist.
+
+Leave the option out and the dashboard reads `weave.TenantFromContext` instead, so a middleware that already puts the tenant on the request context keeps working.
+
+A request that ends up with no tenant is refused with `PERMISSION_DENIED`. So is one where your function returns an error. The error's text never reaches the browser (the extension logs its type at warn level), so it's fine to return one that names an organisation or the lookup that failed.
+
+The lists, the Overview and retrieval still accept a `tenant` field, so a page that sends one keeps working as long as it sends the tenant you resolved. Any other value, `""` included, is refused with `PERMISSION_DENIED`. The Overview's `scope` reads `"tenant"`.

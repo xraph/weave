@@ -80,7 +80,8 @@ func openSQLite(t *testing.T) store.Store {
 
 // newDeps builds an engine on s with a memory vector store, the hashing
 // embedder and the recursive chunker. opts are applied after those, so a
-// test can replace the embedder.
+// test can replace the embedder. Every dashboard request resolves to t1,
+// the tenant the helpers seed under.
 func newDeps(t *testing.T, s store.Store, opts ...engine.Option) Deps {
 	t.Helper()
 	base := []engine.Option{
@@ -93,8 +94,10 @@ func newDeps(t *testing.T, s store.Store, opts ...engine.Option) Deps {
 	if err != nil {
 		t.Fatalf("engine.New: %v", err)
 	}
-	return Deps{Engine: e}
+	return Deps{Engine: e, Tenant: resolveT1}
 }
+
+func resolveT1(context.Context, dashcontract.Principal) (string, error) { return "t1", nil }
 
 // forEachStore runs fn on the memory store and on a real SQLite store, so
 // every handler is checked against at least one real backend.

@@ -16,7 +16,9 @@ import (
 	"github.com/xraph/forge/extensions/dashboard/contract/dispatcher"
 	"github.com/xraph/forge/extensions/dashboard/contract/loader"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/engine"
+	"github.com/xraph/weave/internal/telemetry"
 )
 
 //go:embed manifest.yaml
@@ -45,6 +47,11 @@ type Deps struct {
 	// Now is the clock the stalled check reads. Optional; nil means
 	// time.Now.
 	Now func() time.Time
+
+	// Tenant resolves the Weave tenant for a dashboard request. Nil reads
+	// weave.TenantFromContext(ctx). An empty result or an error refuses the
+	// request with PERMISSION_DENIED.
+	Tenant func(ctx context.Context, p contract.Principal) (string, error)
 }
 
 func (d Deps) now() time.Time {
@@ -54,44 +61,101 @@ func (d Deps) now() time.Time {
 	return time.Now()
 }
 
+// noTenantMessage answers a request the dashboard can't place in a tenant.
+// It says nothing about why: a resolver's error can name an organisation
+// or a lookup the client has no business seeing.
+const noTenantMessage = "this dashboard request has no Weave tenant"
+
+// tenantFilterer is an input that carries the client's `tenant` field. The
+// tenant wrapper refuses one that differs from the resolved tenant, and no
+// handler reads it.
+type tenantFilterer interface {
+	tenantFilter() *string
+}
+
+// resolveTenant answers the tenant every intent runs under. A resolver's
+// error is logged by type only and never reaches the client.
+func (d Deps) resolveTenant(ctx context.Context, intent string, p contract.Principal) (string, error) {
+	if d.Tenant == nil {
+		if tenant := weave.TenantFromContext(ctx); tenant != "" {
+			return tenant, nil
+		}
+		return "", permissionDenied(noTenantMessage)
+	}
+	tenant, err := d.Tenant(ctx, p)
+	if err != nil {
+		if d.Logger != nil {
+			d.Logger.Warn("weave/contract: the dashboard tenant resolver failed",
+				forge.F("intent", intent),
+				forge.F("error_type", telemetry.ErrorType(err)),
+			)
+		}
+		return "", permissionDenied(noTenantMessage)
+	}
+	if tenant == "" {
+		return "", permissionDenied(noTenantMessage)
+	}
+	return tenant, nil
+}
+
+// withTenant runs fn under the tenant resolved for the request, so every
+// engine call fn makes is scoped to it. A request with no tenant is refused
+// before fn runs, and so is one whose `tenant` field names another tenant:
+// the field can only repeat the resolved tenant, never pick one.
+func withTenant[I, O any](deps Deps, intent string, fn func(context.Context, I, contract.Principal) (O, error)) func(context.Context, I, contract.Principal) (O, error) {
+	return func(ctx context.Context, in I, p contract.Principal) (O, error) {
+		var zero O
+		tenant, err := deps.resolveTenant(ctx, intent, p)
+		if err != nil {
+			return zero, err
+		}
+		if f, ok := any(in).(tenantFilterer); ok {
+			if named := f.tenantFilter(); named != nil && *named != tenant {
+				return zero, permissionDenied("this request names a tenant other than the one the dashboard resolved for you")
+			}
+		}
+		return fn(weave.WithTenant(ctx, tenant), in, p)
+	}
+}
+
 // binding registers one intent with the dispatcher.
 type binding struct {
 	intent string
 	bind   func(d *dispatcher.Dispatcher) error
 }
 
-func query[I, O any](intent string, fn func(context.Context, I, contract.Principal) (O, error)) binding {
+func query[I, O any](deps Deps, intent string, fn func(context.Context, I, contract.Principal) (O, error)) binding {
 	return binding{intent: intent, bind: func(d *dispatcher.Dispatcher) error {
-		return dispatcher.RegisterQuery(d, ContributorName, intent, 1, fn)
+		return dispatcher.RegisterQuery(d, ContributorName, intent, 1, withTenant(deps, intent, fn))
 	}}
 }
 
-func command[I, O any](intent string, fn func(context.Context, I, contract.Principal) (O, error)) binding {
+func command[I, O any](deps Deps, intent string, fn func(context.Context, I, contract.Principal) (O, error)) binding {
 	return binding{intent: intent, bind: func(d *dispatcher.Dispatcher) error {
-		return dispatcher.RegisterCommand(d, ContributorName, intent, 1, fn)
+		return dispatcher.RegisterCommand(d, ContributorName, intent, 1, withTenant(deps, intent, fn))
 	}}
 }
 
 // bindings lists every intent this package answers.
 func bindings(deps Deps) []binding {
 	return []binding{
-		query("system.overview", systemOverviewHandler(deps)),
-		query("system.components", systemComponentsHandler(deps)),
-		query("collections.list", collectionsListHandler(deps)),
-		query("collections.get", collectionsGetHandler(deps)),
-		command("collections.create", collectionsCreateHandler(deps)),
-		command("collections.update", collectionsUpdateHandler(deps)),
-		command("collections.delete", collectionsDeleteHandler(deps)),
-		command("collections.reindex", collectionsReindexHandler(deps)),
-		query("documents.list", documentsListHandler(deps)),
-		query("documents.get", documentsGetHandler(deps)),
-		query("documents.spans", documentsSpansHandler(deps)),
-		command("documents.ingest", documentsIngestHandler(deps)),
-		command("documents.delete", documentsDeleteHandler(deps)),
-		query("chunks.list", chunksListHandler(deps)),
-		query("chunks.get", chunksGetHandler(deps)),
-		command("retrieval.run", retrievalRunHandler(deps)),
-		command("retrieval.assemble", retrievalAssembleHandler(deps)),
+		query(deps, "system.overview", systemOverviewHandler(deps)),
+		query(deps, "system.components", systemComponentsHandler(deps)),
+		query(deps, "collections.list", collectionsListHandler(deps)),
+		query(deps, "collections.get", collectionsGetHandler(deps)),
+		command(deps, "collections.create", collectionsCreateHandler(deps)),
+		command(deps, "collections.update", collectionsUpdateHandler(deps)),
+		command(deps, "collections.delete", collectionsDeleteHandler(deps)),
+		command(deps, "collections.reindex", collectionsReindexHandler(deps)),
+		query(deps, "documents.list", documentsListHandler(deps)),
+		query(deps, "documents.get", documentsGetHandler(deps)),
+		query(deps, "documents.spans", documentsSpansHandler(deps)),
+		command(deps, "documents.ingest", documentsIngestHandler(deps)),
+		command(deps, "documents.delete", documentsDeleteHandler(deps)),
+		query(deps, "chunks.list", chunksListHandler(deps)),
+		query(deps, "chunks.get", chunksGetHandler(deps)),
+		command(deps, "retrieval.run", retrievalRunHandler(deps)),
+		command(deps, "retrieval.assemble", retrievalAssembleHandler(deps)),
 	}
 }
 

@@ -29,6 +29,8 @@ func mapError(err error) error {
 	switch {
 	case errors.As(err, &ce):
 		return ce
+	case errors.Is(err, weave.ErrTenantRequired):
+		return permissionDenied(noTenantMessage)
 	case errors.Is(err, weave.ErrCollectionNotFound):
 		return notFound("collection not found")
 	case errors.Is(err, weave.ErrDocumentNotFound):
@@ -84,6 +86,9 @@ func (d Deps) mapError(intent string, err error) error {
 
 func badRequest(msg string) error {
 	return &contract.Error{Code: contract.CodeBadRequest, Message: msg}
+}
+func permissionDenied(msg string) error {
+	return &contract.Error{Code: contract.CodePermissionDenied, Message: msg}
 }
 func notFound(msg string) error { return &contract.Error{Code: contract.CodeNotFound, Message: msg} }
 func conflict(msg string) error { return &contract.Error{Code: contract.CodeConflict, Message: msg} }

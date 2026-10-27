@@ -132,15 +132,17 @@ func New(opts ...ExtOption) *Extension
 func (e *Extension) Engine() *engine.Engine
 func (e *Extension) API() *api.API
 func (e *Extension) Handler() http.Handler
+func (e *Extension) RegisterRoutes(router forge.Router) error
+func WithDashboardTenant(fn func(ctx context.Context, p dashcontract.Principal) (string, error)) ExtOption
 ```
 
-Options: `WithStore`, `WithVectorStore`, `WithEngineOption`, `WithExtension`, `WithConfig`, `WithBasePath`, `WithDisableRoutes`, `WithDisableMigrate`, `WithGroveDatabase`, `WithRequireConfig`.
+Options: `WithStore`, `WithVectorStore`, `WithEngineOption`, `WithExtension`, `WithConfig`, `WithBasePath`, `WithDisableRoutes`, `WithDisableMigrate`, `WithGroveDatabase`, `WithRequireConfig`, `WithDashboardTenant`.
 
 ### `github.com/xraph/weave/api`
 
 ```go
 func New(eng *engine.Engine, router forge.Router) *API
-func (a *API) RegisterRoutes(router forge.Router)
+func (a *API) RegisterRoutes(router forge.Router) error
 func (a *API) Handler() http.Handler
 ```
 

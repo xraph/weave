@@ -43,7 +43,7 @@ func TestSystemOverview(t *testing.T) {
 		if out.Collections != 1 || out.Documents != 3 || out.DocumentsByState.Ready != 2 || out.DocumentsByState.Processing != 1 {
 			t.Errorf("counts: %+v", out)
 		}
-		if out.Chunks < 2 || out.Stalled != 1 || out.StalledAfterSeconds != int(StalledAfter.Seconds()) || out.Scope != "all" {
+		if out.Chunks < 2 || out.Stalled != 1 || out.StalledAfterSeconds != int(StalledAfter.Seconds()) || out.Scope != "tenant" {
 			t.Errorf("chunks/stalled/scope: %+v", out)
 		}
 		if len(out.NewestDocuments) != 3 || out.NewestDocuments[0].ID.String() != stuck.ID.String() ||

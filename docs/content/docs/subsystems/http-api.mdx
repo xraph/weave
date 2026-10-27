@@ -28,10 +28,14 @@ Without the extension, build an `api.API` and register it on a router or group y
 
 ```go
 a := api.New(eng, router)
-a.RegisterRoutes(router.Group("/weave")) // /weave/v1/...
+if err := a.RegisterRoutes(router.Group("/weave")); err != nil { // /weave/v1/...
+    log.Fatal(err)
+}
 ```
 
-`a.Handler()` returns an `http.Handler` with the routes registered on the router you passed (or a new Forge router when you passed nil), with no prefix.
+`RegisterRoutes` tries every route and returns an error naming each one the router refused. The extension's `Register` fails with the same error, so your app doesn't boot with part of the API missing.
+
+`a.Handler()` returns an `http.Handler` with the routes registered on the router you passed (or a new Forge router when you passed nil), with no prefix. It panics if a route fails to register, the way `http.ServeMux` does on a conflicting pattern.
 
 ## Routes
 

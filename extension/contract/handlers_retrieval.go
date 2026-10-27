@@ -6,7 +6,6 @@ import (
 
 	"github.com/xraph/forge/extensions/dashboard/contract"
 
-	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/id"
@@ -100,15 +99,7 @@ func retrievalRunHandler(deps Deps) func(context.Context, runInput, contract.Pri
 			return runOutput{}, unavailable("retrieval needs Weave's own embedder and vector store; this deployment has no vector store configured")
 		}
 
-		// The tenant comes from the context, as for every other intent. A
-		// requested tenant is only checked against it (the engine refuses a
-		// different one); with no context tenant it is dropped, so it can't
-		// stand in for one and the engine refuses the call.
-		var tenant *string
-		if weave.TenantFromContext(ctx) != "" {
-			tenant = in.Tenant
-		}
-		res, err := deps.Engine.RetrieveCompare(ctx, query, engine.CompareParams{CollectionID: colID, Tenant: tenant, TopK: topK, MinScore: in.MinScore})
+		res, err := deps.Engine.RetrieveCompare(ctx, query, engine.CompareParams{CollectionID: colID, TopK: topK, MinScore: in.MinScore})
 		if err != nil {
 			return runOutput{}, deps.mapError(intent, err)
 		}

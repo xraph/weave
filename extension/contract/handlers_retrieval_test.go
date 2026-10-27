@@ -12,7 +12,6 @@ import (
 	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/chunker"
-	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/retriever"
 	"github.com/xraph/weave/store/memory"
@@ -262,30 +261,37 @@ func TestRetrievalAssemble_NullChunkParity(t *testing.T) {
 	}
 }
 
-// An untenanted request can't name a tenant and get its hits: the requested
-// tenant never stands in for a missing context tenant.
-func TestRetrievalRun_RequestedTenantNeverReplacesTheContext(t *testing.T) {
+// A requested tenant never stands in for the resolved one. With no tenant
+// the run is refused whatever it names; with one, naming another tenant is
+// refused, and naming none finds nothing of the other tenant's.
+func TestRetrievalRun_RequestedTenantNeverReplacesTheResolvedOne(t *testing.T) {
 	deps := newDeps(t, openMemory(t))
-	t2 := weave.WithTenant(context.Background(), "t2")
-	col := &collection.Collection{Name: "theirs", ChunkSize: 512}
-	if err := deps.Engine.CreateCollection(t2, col); err != nil {
-		t.Fatal(err)
-	}
-	mustIngest(t, t2, deps, col.ID, "secret", "refunds are issued within thirty days")
+	seedTenant(t, deps, "t2", "theirs", "refunds are issued within thirty days")
+	naming := `{"query":"refunds thirty days","top_k":5,"tenant":"t2"}`
 
-	out, err := retrievalRunHandler(deps)(context.Background(), runInput{Query: "refunds thirty days", Tenant: text("t2"), TopK: 5}, principal())
-	if err == nil {
-		t.Fatalf("untenanted run naming t2: got %d hits, want a refusal", len(out.Result.Hits))
+	untenanted := deps
+	untenanted.Tenant = nil
+	if data, err := dispatchFor(t, untenanted)(context.Background(), "retrieval.run", naming, as("alice")); codeOf(err) != dashcontract.CodePermissionDenied {
+		t.Fatalf("untenanted run naming t2: %v (%s), want PERMISSION_DENIED", err, data)
 	}
 
-	// Under t1, naming t2 is refused, and naming nothing finds none of t2's.
-	t1 := weave.WithTenant(context.Background(), "t1")
-	if _, runErr := retrievalRunHandler(deps)(t1, runInput{Query: "refunds thirty days", Tenant: text("t2"), TopK: 5}, principal()); codeOf(runErr) != dashcontract.CodeBadRequest {
-		t.Errorf("t1 run naming t2: %v, want bad request", runErr)
+	deps.Tenant = tenantsBySubject(map[string]string{"alice": "t1"})
+	call := dispatchFor(t, deps)
+	if data, err := call(context.Background(), "retrieval.run", naming, as("alice")); codeOf(err) != dashcontract.CodePermissionDenied {
+		t.Errorf("t1 run naming t2: %v (%s), want PERMISSION_DENIED", err, data)
 	}
-	out, err = retrievalRunHandler(deps)(t1, runInput{Query: "refunds thirty days", TopK: 5}, principal())
+	data, err := call(context.Background(), "retrieval.run", `{"query":"refunds thirty days","top_k":5}`, as("alice"))
 	if err != nil {
 		t.Fatalf("t1 run: %v", err)
+	}
+	var out struct {
+		Result struct {
+			Hits          []json.RawMessage `json:"hits"`
+			VectorMatches int               `json:"vector_matches"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("decode: %v (%s)", err, data)
 	}
 	if len(out.Result.Hits) != 0 || out.Result.VectorMatches != 0 {
 		t.Errorf("t1 run: %d hits, %d vector matches from t2's collection, want none", len(out.Result.Hits), out.Result.VectorMatches)

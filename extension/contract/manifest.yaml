@@ -6,10 +6,12 @@ contributor:
     preferred: v1
   capabilities: [weave.read, weave.write]
 
-# Weave resolves no tenant on the dashboard path, so this dashboard is
-# operator-wide: it sees every tenant's data. Every list and retrieval
-# intent takes an optional `tenant`. Absent means every tenant; present is
-# an exact match, and "" means rows written with no tenant.
+# Every intent answers for one tenant: the one the host's resolver gives
+# for the signed-in principal (extension.WithDashboardTenant), or the
+# tenant on the request context when there is no resolver. A request with
+# no tenant is refused with PERMISSION_DENIED. The lists, the overview and
+# retrieval still accept `tenant`, but it can only repeat the resolved
+# tenant; any other value, "" included, is refused the same way.
 #
 # retrieval.run is a command although it writes nothing: every run calls
 # the embedder, usually a paid API, and a query could be cached and

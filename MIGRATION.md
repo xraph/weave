@@ -72,16 +72,13 @@ the module.
 The contributor, the extension and the plugin are all named `weave`. The
 contributor's capabilities are `weave.read` and `weave.write`.
 
-The dashboard is operator-wide. Its requests carry no tenant, so you see every
-tenant's rows. Lists and retrieval take an optional tenant filter. Leave it out
-and you get every tenant; set it and it's an exact match, so an empty string
-gives you only the untenanted rows.
-
-Ingest from the dashboard is the one place a tenant gets set. The handler reads
-the collection first and ingests under the collection's own tenant and app, so a
-document you ingest into a collection owned by `acme` is an `acme` document, and
-so are its chunks and vectors. Without that it would have landed untenanted, and
-a list filtered to `acme` would never show it.
+The dashboard answers for one tenant at a time. Give the extension
+`WithDashboardTenant` so it can find the signed-in user's tenant, or put the
+tenant on the request context in a middleware of your own. A request with
+neither is refused with `PERMISSION_DENIED`. Lists and retrieval still take a
+`tenant` field, but it can only repeat the tenant you resolved. Ingest runs under
+that tenant too, so the document you ingest is yours, and so are its chunks and
+vectors.
 
 Your YAML now reaches the engine. The extension used to keep its config to
 itself, so the engine ran on its built-in defaults whatever you wrote. From
@@ -191,6 +188,17 @@ things that were wrong, and that the templ pages had been hiding.
   They store an empty map now.
 - Every list sorted `created_at` ascending, so every "recent" list was the
   oldest rows. `SortDesc` exists now, and the dashboard asks for it.
+
+- The dashboard answered for every tenant. Anyone who could sign in to it could
+  list, read, edit and delete any tenant's collections, and ingest into them,
+  because its requests carried no tenant and an absent `tenant` meant all of
+  them. Every intent now runs under the tenant the host resolves for the
+  signed-in principal, through `extension.WithDashboardTenant` (or the tenant on
+  the request context when you don't set it). No tenant, or a resolver error, is
+  `PERMISSION_DENIED`, and the resolver's error text stays on the server. A
+  `tenant` in the request can only repeat the resolved one. Another tenant's ID
+  is not found, and ingest into another tenant's collection writes nothing. The
+  Overview's `scope` reads `"tenant"` now.
 
 One finding carries into the open list below: `pipeline/steps.go` omits
 `tenant_id` from the vector metadata for untenanted rows.
@@ -817,9 +825,6 @@ These are known gaps. None of them is a regression from the templ pages.
   retrieval page does. Your app may assemble its own way, so "Context sent to
   the model" is what Weave's default assembler would build, not necessarily what
   you sent.
-- Only dashboard ingest sets a tenant on the dashboard path. Every read runs
-  with none, and an empty tenant searches everything: every vector store skips
-  the tenant filter when `TenantKey` is empty.
 - There are no component registries or getters for the loader, chunker,
   embedder, vector store or retriever. `Components()` works by type switch, and
   an unknown type is reported by its Go type name.
