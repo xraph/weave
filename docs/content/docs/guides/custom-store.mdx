@@ -215,6 +215,19 @@ Weave relies on the store to keep tenants apart, so your store has to do what th
 
 Treat `""` as no tenant everywhere. Rows a v1.8 install wrote with an empty tenant must stay unreachable.
 
+### Replacing a source's document
+
+`ReplaceSourceDocument(ctx, doc, chunks)` finishes the ingest of a new version of a source. It's the one store method that changes several rows at once, and it has to be atomic: a reader sees the old version or the new one, never both and never neither. Your store has to do all of this:
+
+- Check the tenant first, like every other method. Then read the stored document under the context tenant, inside the same transaction as the writes. Missing, another tenant's, or in another collection than `doc.CollectionID` is `ErrDocumentNotFound`.
+- `doc.SourceKey` empty, or different from the stored one, is `ErrInvalidArgument`. So is a chunk whose tenant, document or collection isn't `doc`'s.
+- The stored document must be `processing`. Anything else is `ErrInvalidState`, returned before you write anything.
+- Mark every `ready` or `failed` document with the same tenant, collection and source key `superseded`, delete their chunks, insert `chunks`, and move `doc` to `ready` with `ChunkCount` set to `len(chunks)`. Return the superseded IDs.
+- If any step fails, none of it sticks. A chunk ID that repeats inside the batch or already exists (the superseded version's included) fails the call.
+- Concurrent replaces of one source must serialize. Six replicas replacing the same source at once all succeed, and the source ends with one `ready` document, the last to finish. The built-in stores take a Postgres advisory lock on tenant, collection and key, hold a writer mutex on SQLite, retry Mongo's transaction on a write conflict, and run under the mutex in memory.
+
+A unique index on `(collection_id, source_key)` over ready, keyed rows is a good backstop. The built-in SQL and Mongo stores have one.
+
 ### Testing a custom store
 
 `store/storetest` is the conformance suite the built-in stores run. Point it at yours from a test:
@@ -227,4 +240,4 @@ func TestMyStore(t *testing.T) {
 }
 ```
 
-It checks filters, ordering, duplicates, timestamps and nil metadata handling, and every rule in the list above. The tenant cases call every method with no tenant, and try each read, update and delete as one tenant with another tenant's IDs. When `store.Store` gains a method, the tenant case fails until it covers that method too.
+It checks filters, ordering, duplicates, timestamps and nil metadata handling, every rule in the list above, and the replace contract, concurrent replaces included. The tenant cases call every method with no tenant, and try each read, update and delete as one tenant with another tenant's IDs. When `store.Store` gains a method, the tenant case fails until it covers that method too.

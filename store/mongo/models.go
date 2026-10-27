@@ -94,8 +94,12 @@ type documentModel struct {
 	Metadata      map[string]string `grove:"metadata" bson:"metadata"`
 	State         string            `grove:"state,notnull" bson:"state"`
 	Error         string            `grove:"error" bson:"error"`
-	CreatedAt     time.Time         `grove:"created_at,notnull" bson:"created_at"`
-	UpdatedAt     time.Time         `grove:"updated_at,notnull" bson:"updated_at"`
+	// SourceKey is not notnull: documents written before v1.9 lack the
+	// field, and a required field in the validator would refuse updates to
+	// them.
+	SourceKey string    `grove:"source_key" bson:"source_key"`
+	CreatedAt time.Time `grove:"created_at,notnull" bson:"created_at"`
+	UpdatedAt time.Time `grove:"updated_at,notnull" bson:"updated_at"`
 }
 
 func documentToModel(d *document.Document) *documentModel {
@@ -112,6 +116,7 @@ func documentToModel(d *document.Document) *documentModel {
 		Metadata:      orEmpty(d.Metadata),
 		State:         string(d.State),
 		Error:         d.Error,
+		SourceKey:     d.SourceKey,
 		CreatedAt:     d.CreatedAt,
 		UpdatedAt:     d.UpdatedAt,
 	}
@@ -140,6 +145,7 @@ func documentFromModel(m *documentModel) (*document.Document, error) {
 		Metadata:      m.Metadata,
 		State:         document.State(m.State),
 		Error:         m.Error,
+		SourceKey:     m.SourceKey,
 	}, nil
 }
 

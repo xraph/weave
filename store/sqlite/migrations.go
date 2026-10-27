@@ -110,5 +110,54 @@ CREATE INDEX IF NOT EXISTS idx_weave_chunks_tenant ON weave_chunks (tenant_id);
 				return err
 			},
 		},
+		&migrate.Migration{
+			Name:    "add_weave_documents_source_key",
+			Version: "20261024000100",
+			Up: func(ctx context.Context, exec migrate.Executor) error {
+				// SQLite has no ADD COLUMN IF NOT EXISTS, so the column is
+				// looked up first and the migration stays safe to rerun.
+				has, err := hasColumn(ctx, exec, "weave_documents", "source_key")
+				if err != nil {
+					return err
+				}
+				if !has {
+					if _, err = exec.Exec(ctx, `ALTER TABLE weave_documents ADD COLUMN source_key TEXT NOT NULL DEFAULT ''`); err != nil {
+						return err
+					}
+				}
+				_, err = exec.Exec(ctx, `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_weave_documents_source_ready
+    ON weave_documents (collection_id, source_key) WHERE source_key <> '' AND state = 'ready';
+CREATE INDEX IF NOT EXISTS idx_weave_documents_source
+    ON weave_documents (tenant_id, collection_id, source_key) WHERE source_key <> '';
+`)
+				return err
+			},
+			Down: func(ctx context.Context, exec migrate.Executor) error {
+				_, err := exec.Exec(ctx, `
+DROP INDEX IF EXISTS idx_weave_documents_source;
+DROP INDEX IF EXISTS idx_weave_documents_source_ready;
+ALTER TABLE weave_documents DROP COLUMN source_key;
+`)
+				return err
+			},
+		},
 	)
+}
+
+// hasColumn reports whether table has a column named column.
+func hasColumn(ctx context.Context, exec migrate.Executor, table, column string) (bool, error) {
+	rows, err := exec.Query(ctx, `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	var n int
+	if rows.Next() {
+		err = rows.Scan(&n)
+		if err != nil {
+			return false, err
+		}
+	}
+	return n > 0, rows.Err()
 }

@@ -346,6 +346,9 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 		if filter.State != "" {
 			q = q.Filter(bson.M{"state": string(filter.State)})
 		}
+		if filter.SourceKey != "" {
+			q = q.Filter(bson.M{"source_key": filter.SourceKey})
+		}
 		if filter.Search != "" {
 			q = q.Filter(bson.M{"title": containsCI(filter.Search)})
 		}
@@ -416,6 +419,132 @@ func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.Collec
 	return nil
 }
 
+// ReplaceSourceDocument runs in a multi-document transaction, so it needs a
+// replica set (or mongos); on a standalone server it fails with an error
+// that says so. The session's WithTransaction reruns the whole step when the
+// server reports a transient conflict, which is how two replaces of one
+// source that collide end up one after the other. The document read and the
+// chunk ID check happen inside the transaction, and every refusal comes
+// before the first write.
+func (s *Store) ReplaceSourceDocument(ctx context.Context, doc *document.Document, chunks []*chunk.Chunk) ([]id.DocumentID, error) {
+	tenant, err := tenancy.SourceReplace(ctx, doc, chunks)
+	if err != nil {
+		return nil, err
+	}
+	sess, err := s.mdb.Client().StartSession()
+	if err != nil {
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+	defer sess.EndSession(ctx)
+
+	var now time.Time
+	out, err := sess.WithTransaction(ctx, func(txCtx context.Context) (any, error) {
+		now = time.Now().UTC()
+		return s.replaceSource(txCtx, tenant, doc, chunks, now)
+	})
+	if err != nil {
+		if cerr, ok := transactionsUnsupported(err); ok {
+			return nil, fmt.Errorf("weave: replace source document needs a MongoDB replica set: %w", cerr)
+		}
+		return nil, err
+	}
+	replaced, ok := out.([]id.DocumentID)
+	if !ok {
+		return nil, fmt.Errorf("weave: replace source document: unexpected result %T", out)
+	}
+	doc.State, doc.ChunkCount, doc.UpdatedAt = document.StateReady, len(chunks), now
+	return replaced, nil
+}
+
+// replaceSource is one attempt at ReplaceSourceDocument. txCtx carries the
+// session, so every query here joins its transaction.
+func (s *Store) replaceSource(txCtx context.Context, tenant string, doc *document.Document, chunks []*chunk.Chunk, now time.Time) ([]id.DocumentID, error) {
+	stored := new(documentModel)
+	err := s.mdb.NewFind(stored).Filter(bson.M{"_id": doc.ID.String(), "tenant_id": tenant}).Scan(txCtx)
+	if err != nil {
+		if isNotFound(err) {
+			return nil, weave.ErrDocumentNotFound
+		}
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+	colID := doc.CollectionID.String()
+	switch {
+	case stored.CollectionID != colID:
+		return nil, weave.ErrDocumentNotFound
+	case stored.SourceKey != doc.SourceKey:
+		return nil, fmt.Errorf("%w: source key does not match the stored document's", weave.ErrInvalidArgument)
+	case stored.State != string(document.StateProcessing):
+		return nil, fmt.Errorf("%w: document is %s, not processing", weave.ErrInvalidState, stored.State)
+	}
+	if len(chunks) > 0 {
+		err = s.checkChunkIDs(txCtx, chunks)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var old []documentModel
+	sourceFilter := bson.M{
+		"tenant_id":     tenant,
+		"collection_id": colID,
+		"source_key":    doc.SourceKey,
+		"state":         bson.M{"$in": bson.A{string(document.StateReady), string(document.StateFailed)}},
+	}
+	if err = s.mdb.NewFind(&old).Filter(sourceFilter).Scan(txCtx); err != nil {
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+	replaced := make([]id.DocumentID, 0, len(old))
+	oldIDs := make(bson.A, 0, len(old))
+	for i := range old {
+		oldDoc, convErr := documentFromModel(&old[i])
+		if convErr != nil {
+			return nil, fmt.Errorf("weave: replace source document: %w", convErr)
+		}
+		replaced = append(replaced, oldDoc.ID)
+		oldIDs = append(oldIDs, old[i].ID)
+	}
+	if len(oldIDs) > 0 {
+		_, err = s.mdb.NewUpdate((*documentModel)(nil)).
+			Filter(bson.M{"_id": bson.M{"$in": oldIDs}, "tenant_id": tenant}).
+			SetUpdate(bson.M{"$set": bson.M{"state": string(document.StateSuperseded), "updated_at": now}}).
+			Many().
+			Exec(txCtx)
+		if err != nil {
+			return nil, fmt.Errorf("weave: replace source document: %w", err)
+		}
+		_, err = s.mdb.NewDelete((*chunkModel)(nil)).
+			Filter(bson.M{"document_id": bson.M{"$in": oldIDs}, "tenant_id": tenant}).
+			Many().
+			Exec(txCtx)
+		if err != nil {
+			return nil, fmt.Errorf("weave: replace source document: %w", err)
+		}
+	}
+
+	if len(chunks) > 0 {
+		models := make([]chunkModel, len(chunks))
+		for i, ch := range chunks {
+			ch.CreatedAt = now
+			models[i] = *chunkToModel(ch)
+		}
+		if _, err = s.mdb.NewInsert(&models).Exec(txCtx); err != nil {
+			return nil, fmt.Errorf("weave: replace source document: %w", err)
+		}
+	}
+
+	res, err := s.mdb.NewUpdate((*documentModel)(nil)).
+		Filter(bson.M{"_id": doc.ID.String(), "tenant_id": tenant, "state": string(document.StateProcessing)}).
+		SetUpdate(bson.M{"$set": bson.M{"state": string(document.StateReady), "chunk_count": len(chunks), "updated_at": now}}).
+		Exec(txCtx)
+	if err != nil {
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+	if res.MatchedCount() == 0 {
+		return nil, fmt.Errorf("%w: document is no longer processing", weave.ErrInvalidState)
+	}
+	return replaced, nil
+}
+
 // ──────────────────────────────────────────────────
 // Chunk operations
 // ──────────────────────────────────────────────────
@@ -462,8 +591,10 @@ func (s *Store) CreateChunkBatch(ctx context.Context, chunks []*chunk.Chunk) err
 
 // checkChunkIDs refuses a batch that repeats a chunk ID or reuses one already
 // stored, under any tenant, so a batch never half-lands on a duplicate key.
-// The store has no transaction here, so a concurrent insert of the same ID
-// can still slip between this check and the insert.
+// CreateChunkBatch runs it without a transaction, so that it keeps working
+// on a standalone server, and a concurrent insert of the same ID can still
+// slip between this check and the insert there. ReplaceSourceDocument runs
+// it inside its transaction, where it can't.
 func (s *Store) checkChunkIDs(ctx context.Context, chunks []*chunk.Chunk) error {
 	ids := make([]string, 0, len(chunks))
 	seen := make(map[string]bool, len(chunks))

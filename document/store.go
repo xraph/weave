@@ -15,6 +15,8 @@ type ListFilter struct {
 	State State
 	// Search filters documents by title (case-insensitive substring match).
 	Search string
+	// SourceKey filters by exact source key. Empty means any.
+	SourceKey string
 	// Limit is the maximum number of documents to return. Zero means no limit.
 	Limit int
 	// Offset is the number of documents to skip.

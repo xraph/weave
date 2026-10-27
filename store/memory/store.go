@@ -361,6 +361,9 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 			if filter.State != "" && doc.State != filter.State {
 				continue
 			}
+			if filter.SourceKey != "" && doc.SourceKey != filter.SourceKey {
+				continue
+			}
 			if filter.Search != "" && !strings.Contains(strings.ToLower(doc.Title), strings.ToLower(filter.Search)) {
 				continue
 			}
@@ -450,6 +453,72 @@ func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.Collec
 		}
 	}
 	return nil
+}
+
+// ReplaceSourceDocument supersedes the source's ready and failed documents,
+// swaps their chunks for chunks and makes doc ready, all under the store
+// mutex. Everything is checked before the first change, so a refused call
+// leaves the store as it was.
+func (s *Store) ReplaceSourceDocument(ctx context.Context, doc *document.Document, chunks []*chunk.Chunk) ([]id.DocumentID, error) {
+	tenant, err := tenancy.SourceReplace(ctx, doc, chunks)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := doc.ID.String()
+	stored, ok := s.documents[key]
+	if !ok || stored.TenantID != tenant || stored.CollectionID.String() != doc.CollectionID.String() {
+		return nil, weave.ErrDocumentNotFound
+	}
+	if stored.SourceKey != doc.SourceKey {
+		return nil, fmt.Errorf("%w: source key does not match the stored document's", weave.ErrInvalidArgument)
+	}
+	if stored.State != document.StateProcessing {
+		return nil, fmt.Errorf("%w: document is %s, not processing", weave.ErrInvalidState, stored.State)
+	}
+	seen := make(map[string]bool, len(chunks))
+	for _, ch := range chunks {
+		chunkKey := ch.ID.String()
+		if _, exists := s.chunks[chunkKey]; exists || seen[chunkKey] {
+			return nil, fmt.Errorf("weave: replace source document: chunk %s already exists", chunkKey)
+		}
+		seen[chunkKey] = true
+	}
+
+	now := time.Now().UTC()
+	var replaced []id.DocumentID
+	for dk, d := range s.documents {
+		if d.TenantID != tenant || d.CollectionID.String() != stored.CollectionID.String() ||
+			d.SourceKey != stored.SourceKey ||
+			(d.State != document.StateReady && d.State != document.StateFailed) {
+			continue
+		}
+		superseded := *d
+		superseded.State = document.StateSuperseded
+		superseded.UpdatedAt = now
+		s.documents[dk] = &superseded
+		replaced = append(replaced, d.ID)
+		for ck, ch := range s.chunks {
+			if ch.DocumentID.String() == dk {
+				delete(s.chunks, ck)
+			}
+		}
+	}
+	sort.Slice(replaced, func(i, j int) bool { return replaced[i].String() < replaced[j].String() })
+
+	for _, ch := range chunks {
+		ch.CreatedAt = now
+		s.chunks[ch.ID.String()] = ch
+	}
+	ready := *stored
+	ready.State = document.StateReady
+	ready.ChunkCount = len(chunks)
+	ready.UpdatedAt = now
+	s.documents[key] = &ready
+	doc.State, doc.ChunkCount, doc.UpdatedAt = ready.State, ready.ChunkCount, now
+	return replaced, nil
 }
 
 // ──────────────────────────────────────────────────

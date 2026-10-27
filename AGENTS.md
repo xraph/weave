@@ -56,12 +56,15 @@ There are no testcontainers here. You start throwaway containers on a non-defaul
 
 ```bash
 docker run -d --rm --name weave-pg -p 55432:5432 -e POSTGRES_PASSWORD=weave postgres
-docker run -d --rm --name weave-mongo -p 57017:27017 mongo
+docker run -d --rm --name weave-mongo -p 57017:27017 mongo --replSet rs0
+docker exec weave-mongo mongosh --quiet --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
 
 WEAVE_TEST_POSTGRES_DSN='postgres://postgres:weave@localhost:55432/postgres?sslmode=disable' \
-WEAVE_TEST_MONGO_DSN='mongodb://localhost:57017' \
+WEAVE_TEST_MONGO_DSN='mongodb://localhost:57017/?directConnection=true' \
 GOWORK=off go test -v -count=1 ./store/...
 ```
+
+Run Mongo as a replica set. A single node is enough. `ReplaceSourceDocument` needs a transaction, so on a standalone server the source cases in the conformance suite fail. Give `rs.initiate` a second or two after the container starts, and keep `directConnection=true` in the DSN: the member is named `localhost:27017` inside the container, which your machine can't reach on that port.
 
 Each Postgres test gets a random `weave_test_*` schema with `search_path` pinned to it, and each Mongo test gets a random database. Both are dropped on cleanup, so parallel packages don't collide.
 

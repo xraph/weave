@@ -407,6 +407,9 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 		if filter.State != "" {
 			q = q.Where("state = ?", string(filter.State))
 		}
+		if filter.SourceKey != "" {
+			q = q.Where("source_key = ?", filter.SourceKey)
+		}
 		if filter.Search != "" {
 			q = q.Where("title ILIKE '%' || ? || '%' ESCAPE '\\'", sqllike.Escape(filter.Search))
 		}
@@ -469,6 +472,137 @@ func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.Collec
 		Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("weave: delete documents by collection: %w", err)
+	}
+	return nil
+}
+
+// ReplaceSourceDocument runs in one transaction. It first takes a
+// transaction-scoped advisory lock on the tenant, collection and source key,
+// so concurrent replaces of one source wait for each other instead of
+// colliding on the one-ready-document index, then reads doc FOR UPDATE.
+// Every refusal happens before the first write; any later failure rolls the
+// whole replace back.
+func (s *Store) ReplaceSourceDocument(ctx context.Context, doc *document.Document, chunks []*chunk.Chunk) ([]id.DocumentID, error) {
+	tenant, err := tenancy.SourceReplace(ctx, doc, chunks)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	models := make([]chunkModel, len(chunks))
+	for i, ch := range chunks {
+		ch.CreatedAt = now
+		models[i] = *chunkToModel(ch)
+	}
+	colID := doc.CollectionID.String()
+
+	tx, err := s.pg.BeginTxQuery(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+	defer rollback(tx)
+	lockKey := tenant + "/" + colID + "/" + doc.SourceKey
+	if _, err = tx.NewRaw(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey).Exec(ctx); err != nil {
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+
+	stored := new(documentModel)
+	err = tx.NewSelect(stored).
+		Where("id = ?", doc.ID.String()).
+		Where("tenant_id = ?", tenant).
+		ForUpdate().
+		Scan(ctx)
+	if err != nil {
+		if isNoRows(err) {
+			return nil, weave.ErrDocumentNotFound
+		}
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+	err = checkReplaceable(stored, colID, doc.SourceKey)
+	if err != nil {
+		return nil, err
+	}
+
+	var old []documentModel
+	err = tx.NewSelect(&old).
+		Where("tenant_id = ?", tenant).
+		Where("collection_id = ?", colID).
+		Where("source_key = ?", doc.SourceKey).
+		Where("state IN (?, ?)", string(document.StateReady), string(document.StateFailed)).
+		ForUpdate().
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+	replaced := make([]id.DocumentID, 0, len(old))
+	for i := range old {
+		replaced = append(replaced, documentFromModel(&old[i]).ID)
+		_, err = tx.NewUpdate((*documentModel)(nil)).
+			Set("state = ?", string(document.StateSuperseded)).
+			Set("updated_at = ?", now).
+			Where("id = ?", old[i].ID).
+			Where("tenant_id = ?", tenant).
+			Exec(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("weave: replace source document: %w", err)
+		}
+	}
+
+	// The new chunks go in before the old ones are deleted, so a batch that
+	// reuses a superseded chunk's ID fails like any other reused ID.
+	if len(models) > 0 {
+		if _, err = tx.NewInsert(&models).Exec(ctx); err != nil {
+			return nil, fmt.Errorf("weave: replace source document: %w", err)
+		}
+	}
+	for _, docID := range replaced {
+		_, err = tx.NewDelete((*chunkModel)(nil)).
+			Where("document_id = ?", docID.String()).
+			Where("tenant_id = ?", tenant).
+			Exec(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("weave: replace source document: %w", err)
+		}
+	}
+
+	res, err := tx.NewUpdate((*documentModel)(nil)).
+		Set("state = ?", string(document.StateReady)).
+		Set("chunk_count = ?", len(chunks)).
+		Set("updated_at = ?", now).
+		Where("id = ?", doc.ID.String()).
+		Where("tenant_id = ?", tenant).
+		Where("state = ?", string(document.StateProcessing)).
+		Exec(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("weave: replace source document rows affected: %w", err)
+	}
+	if n == 0 {
+		return nil, fmt.Errorf("%w: document is no longer processing", weave.ErrInvalidState)
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, fmt.Errorf("weave: replace source document: %w", err)
+	}
+	doc.State, doc.ChunkCount, doc.UpdatedAt = document.StateReady, len(chunks), now
+	return replaced, nil
+}
+
+// checkReplaceable refuses a stored document that ReplaceSourceDocument may
+// not finish: one in another collection than the caller named
+// (ErrDocumentNotFound, as a document never moves), one whose source key
+// differs (ErrInvalidArgument) and one that isn't processing
+// (ErrInvalidState).
+func checkReplaceable(stored *documentModel, colID, sourceKey string) error {
+	if stored.CollectionID != colID {
+		return weave.ErrDocumentNotFound
+	}
+	if stored.SourceKey != sourceKey {
+		return fmt.Errorf("%w: source key does not match the stored document's", weave.ErrInvalidArgument)
+	}
+	if stored.State != string(document.StateProcessing) {
+		return fmt.Errorf("%w: document is %s, not processing", weave.ErrInvalidState, stored.State)
 	}
 	return nil
 }

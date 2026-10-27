@@ -18,6 +18,9 @@ const (
 	StateReady State = "ready"
 	// StateFailed means the document processing failed.
 	StateFailed State = "failed"
+	// StateSuperseded means a newer version of the document's source
+	// replaced it. The engine purges it right after the swap.
+	StateSuperseded State = "superseded"
 )
 
 // Document represents an ingested document within a collection.
@@ -36,4 +39,7 @@ type Document struct {
 	Metadata      map[string]string `json:"metadata" bun:"metadata,notnull,default:'{}'"`
 	State         State             `json:"state" bun:"state,notnull,default:'pending'"`
 	Error         string            `json:"error,omitempty" bun:"error"`
+	// SourceKey identifies the source this document is the current version
+	// of within its collection. Empty means the document is not source-managed.
+	SourceKey string `json:"source_key,omitempty" bun:"source_key,notnull,default:''"`
 }

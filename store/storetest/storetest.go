@@ -28,4 +28,10 @@ func Run(t *testing.T, open Opener) {
 	t.Run("Stalled", func(t *testing.T) { testStalled(t, open(t)) })
 	t.Run("Chunks", func(t *testing.T) { testChunks(t, open(t)) })
 	t.Run("NilMetadata", func(t *testing.T) { testNilMetadata(t, open(t)) })
+	t.Run("SourceReplace", func(t *testing.T) { testSourceReplace(t, open(t)) })
+	t.Run("SourceReplaceRefuses", func(t *testing.T) { testSourceReplaceRefuses(t, open(t)) })
+	t.Run("SourceReplaceAtomic", func(t *testing.T) { testSourceReplaceAtomic(t, open(t)) })
+	t.Run("SourceReplaceSharedChunkID", func(t *testing.T) { testSourceReplaceSharedChunkID(t, open(t)) })
+	t.Run("OneReadyPerSource", func(t *testing.T) { testOneReadyDocumentPerSource(t, open(t)) })
+	t.Run("SourceKeyFilter", func(t *testing.T) { testSourceKeyFilter(t, open(t)) })
 }

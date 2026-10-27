@@ -90,3 +90,30 @@ func ChunkCount(ctx context.Context, f *chunk.CountFilter) (string, error) {
 	}
 	return Scope(ctx, f.Tenant) //nolint:staticcheck // checked against the context, never used to widen it
 }
+
+// SourceReplace runs the checks ReplaceSourceDocument makes before it reads
+// anything and returns the context tenant. A doc labelled with another
+// tenant is ErrDocumentNotFound, as the stored row would be. A doc without a
+// SourceKey, and a chunk that doesn't belong to doc, its collection and the
+// context tenant, are ErrInvalidArgument.
+func SourceReplace(ctx context.Context, doc *document.Document, chunks []*chunk.Chunk) (string, error) {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return "", err
+	}
+	if doc.TenantID != tenant {
+		return "", weave.ErrDocumentNotFound
+	}
+	if doc.SourceKey == "" {
+		return "", fmt.Errorf("%w: the document has no source key", weave.ErrInvalidArgument)
+	}
+	for _, ch := range chunks {
+		if _, err := Owner(ctx, "chunk", ch.TenantID); err != nil {
+			return "", err
+		}
+		if ch.DocumentID.String() != doc.ID.String() || ch.CollectionID.String() != doc.CollectionID.String() {
+			return "", fmt.Errorf("%w: chunk does not belong to the document being replaced", weave.ErrInvalidArgument)
+		}
+	}
+	return tenant, nil
+}

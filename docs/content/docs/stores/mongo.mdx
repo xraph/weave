@@ -37,7 +37,7 @@ if err := st.Migrate(ctx); err != nil {
 | Collection | Holds | Indexes |
 |------------|-------|---------|
 | `weave_collections` | Collections | unique `(tenant_id, name)`, `tenant_id`, `created_at` |
-| `weave_documents` | Documents | unique `(collection_id, content_hash)`, `(collection_id, state)`, `tenant_id`, `created_at` |
+| `weave_documents` | Documents | unique `(collection_id, content_hash)`, `(collection_id, state)`, `tenant_id`, `created_at`, unique `(collection_id, source_key)` over ready keyed documents, `(tenant_id, collection_id, source_key)` over keyed documents |
 | `weave_chunks` | Chunk text and offsets | `(document_id, index)`, `collection_id` |
 
 It runs `mongostore.Migrations`, a Grove migration group named `weave`, through Grove's orchestrator, which records each version in a `grove_migrations` collection. A second call applies nothing.
@@ -47,6 +47,19 @@ Weave v1.8 and earlier ran every `Up` on each start and recorded nothing. Creati
 Grove's Mongo lock is a single document in `grove_migration_locks`, and it has no lease. If a replica dies while it holds the lock, the document stays locked. Every later start then waits out Grove's five-minute lock timeout and fails, until you set `locked` back to `false` on that document.
 
 The unique indexes give you `weave.ErrCollectionAlreadyExists` and `weave.ErrDuplicateDocument`, the same as the SQL stores.
+
+## Source keys need a replica set
+
+Replacing a source's document (`ReplaceSourceDocument`, which a source-keyed ingest calls) runs in a multi-document transaction, and MongoDB only has those on a replica set or behind `mongos`. A single-node replica set is enough. On a standalone server the call fails with `weave: replace source document needs a MongoDB replica set`, and nothing is written. Everything else, plain ingest included, still works on a standalone server.
+
+The transaction retries on its own when two replaces of one source collide, so replicas that ingest the same source at boot end with one ready document. To try it locally:
+
+```bash
+docker run -d --name weave-mongo -p 57017:27017 mongo --replSet rs0
+docker exec weave-mongo mongosh --quiet --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
+```
+
+Then connect with `mongodb://localhost:57017/?directConnection=true`.
 
 ## Pairing with a vector store
 

@@ -189,6 +189,7 @@ func testTenantRequired(t *testing.T, s store.Store) {
 	col := mustCollection(t, s, "required", "t1")
 	doc := mustDocument(t, s, col, "required doc", document.StateReady)
 	chs := mustChunks(t, s, doc, 2)
+	src := mustSourceDocument(t, s, col, "docs/required.md", document.StateProcessing)
 
 	newCol := func(tenant string) *collection.Collection {
 		return &collection.Collection{
@@ -260,6 +261,10 @@ func testTenantRequired(t *testing.T, s store.Store) {
 			_, err := s.CountChunks(ctx, &chunk.CountFilter{})
 			return err
 		}},
+		{"ReplaceSourceDocument", func(ctx context.Context) error {
+			_, err := s.ReplaceSourceDocument(ctx, src, chunksFor(src, 1))
+			return err
+		}},
 	}
 
 	// The table covers every method of store.Store but notScoped, so a
@@ -300,13 +305,14 @@ func testTenantRequired(t *testing.T, s store.Store) {
 	if gotDoc.Title != doc.Title {
 		t.Errorf("untenanted update changed the document: title %q", gotDoc.Title)
 	}
+	assertDocument(t, s, "t1", src.ID, document.StateProcessing, nil)
 	got, err := s.ListChunks(t1, &chunk.ListFilter{CollectionID: col.ID})
 	if err != nil {
 		t.Fatalf("t1 lists its chunks: %v", err)
 	}
 	sameSet(t, "chunks after untenanted calls", chunkIDs(got), chunkIDs(chs))
 	assertCount(t, "collections after untenanted calls", 1)(s.CountCollections(t1, &collection.CountFilter{}))
-	assertCount(t, "documents after untenanted calls", 1)(s.CountDocuments(t1, &document.CountFilter{}))
+	assertCount(t, "documents after untenanted calls", 2)(s.CountDocuments(t1, &document.CountFilter{}))
 
 	// As t1, writing rows labelled t2 is refused and writes nothing.
 	other := newCol("t2")
@@ -323,7 +329,7 @@ func testTenantRequired(t *testing.T, s store.Store) {
 	for _, w := range []struct {
 		tenant             string
 		cols, docs, chunks int64
-	}{{"t1", 1, 1, int64(len(chs))}, {"t2", 0, 0, 0}} {
+	}{{"t1", 1, 2, int64(len(chs))}, {"t2", 0, 0, 0}} {
 		ctx := as(w.tenant)
 		assertCount(t, w.tenant+" collections after refused writes", w.cols)(s.CountCollections(ctx, &collection.CountFilter{}))
 		assertCount(t, w.tenant+" documents after refused writes", w.docs)(s.CountDocuments(ctx, &document.CountFilter{}))

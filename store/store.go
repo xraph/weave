@@ -9,6 +9,7 @@ import (
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
+	"github.com/xraph/weave/id"
 )
 
 // Store is the composite metadata store interface for Weave.
@@ -29,6 +30,22 @@ type Store interface {
 	document.Store
 	collection.Store
 	chunk.Store
+
+	// ReplaceSourceDocument finishes a source-keyed ingest atomically: it marks
+	// every ready or failed document with doc's collection, tenant and SourceKey
+	// superseded and deletes their chunks, inserts chunks, and moves doc from
+	// processing to ready with ChunkCount set. It returns the superseded IDs.
+	// doc must be processing (ErrInvalidState otherwise, nothing written) and
+	// have a SourceKey (ErrInvalidArgument).
+	//
+	// The stored document is read under the context tenant before anything is
+	// written: missing, another tenant's or in another collection is
+	// weave.ErrDocumentNotFound, and a SourceKey that differs from the stored
+	// one is weave.ErrInvalidArgument. Every chunk must belong to doc, its
+	// collection and the context tenant (weave.ErrInvalidArgument) and carry a
+	// new ID. Concurrent replaces of one source serialize, so the source ends
+	// with one ready document, the last to finish.
+	ReplaceSourceDocument(ctx context.Context, doc *document.Document, chunks []*chunk.Chunk) ([]id.DocumentID, error)
 
 	// Migrate runs any pending database migrations.
 	Migrate(ctx context.Context) error

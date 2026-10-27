@@ -95,6 +95,7 @@ type documentModel struct {
 	Metadata      map[string]string `grove:"metadata,type:jsonb"`
 	State         string            `grove:"state,notnull"`
 	Error         string            `grove:"error"`
+	SourceKey     string            `grove:"source_key,notnull"`
 	CreatedAt     time.Time         `grove:"created_at,notnull"`
 	UpdatedAt     time.Time         `grove:"updated_at,notnull"`
 }
@@ -113,6 +114,7 @@ func documentToModel(d *document.Document) *documentModel {
 		Metadata:      orEmpty(d.Metadata),
 		State:         string(d.State),
 		Error:         d.Error,
+		SourceKey:     d.SourceKey,
 		CreatedAt:     d.CreatedAt,
 		UpdatedAt:     d.UpdatedAt,
 	}
@@ -135,6 +137,7 @@ func documentFromModel(m *documentModel) *document.Document {
 		Metadata:      m.Metadata,
 		State:         document.State(m.State),
 		Error:         m.Error,
+		SourceKey:     m.SourceKey,
 	}
 }
 
