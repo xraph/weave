@@ -42,6 +42,8 @@ func Run(t *testing.T, open Opener) {
 	t.Run("ListStalledSpansTenants", func(t *testing.T) { testListStalledSpansTenants(t, open(t)) })
 	t.Run("TouchDocument", func(t *testing.T) { testTouchDocument(t, open(t)) })
 	t.Run("FailDocument", func(t *testing.T) { testFailDocument(t, open(t)) })
+	t.Run("CompleteDocument", func(t *testing.T) { testCompleteDocument(t, open(t)) })
+	t.Run("CompleteOrFailOnce", func(t *testing.T) { testCompleteOrFailOnce(t, open(t)) })
 	t.Run("ClaimOnce", func(t *testing.T) { testClaimOnce(t, open(t)) })
 	t.Run("Chunks", func(t *testing.T) { testChunks(t, open(t)) })
 	t.Run("NilMetadata", func(t *testing.T) { testNilMetadata(t, open(t)) })

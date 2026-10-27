@@ -188,7 +188,8 @@ import "github.com/xraph/weave/store"
 // - document.Store (CreateDocument, GetDocument, UpdateDocument, ListDocuments, DeleteDocument, ...)
 // - chunk.Store (CreateChunkBatch, ListChunksByDocument, DeleteChunksByDocument, ...)
 // - store.Store (ReplaceSourceDocument, TouchDocument, FailDocument,
-//   ListStalledDocuments, CountStalledUntenanted, Migrate, Ping, Close)
+//   CompleteDocument, ListStalledDocuments, CountStalledUntenanted,
+//   Migrate, Ping, Close)
 
 type MyStore struct{ /* ... */ }
 
@@ -232,15 +233,16 @@ A unique index on `(collection_id, source_key)` over ready, keyed rows is a good
 
 ### Heartbeats and recovery
 
-Two methods let ingest and [recovery](/docs/subsystems/ingestion#recovery) move a document's state without stepping on each other, and a third finds the documents recovery should look at. Each move is a single guarded write, a compare-and-set on the stored state. A read followed by an update leaves a gap another replica can land in.
+Three methods let ingest and [recovery](/docs/subsystems/ingestion#recovery) move a document's state without stepping on each other, and a fourth finds the documents recovery should look at. Each move is a single guarded write, a compare-and-set on the stored state. A read followed by an update leaves a gap another replica can land in.
 
 - `TouchDocument(ctx, docID, staleBefore)` moves a `pending` or `processing` document to `processing` and sets `UpdatedAt` to now. With a non-zero `staleBefore` it only does that when the stored `UpdatedAt` is older than `staleBefore`. That's what makes a claim safe: when eight replicas find one stalled document, exactly one touch matches and the other seven get `ErrInvalidState`.
 - `FailDocument(ctx, docID, errText, staleBefore)` moves a `pending` or `processing` document to `failed` with `Error` set to `errText`, under the same `staleBefore` rule. It must never touch a `ready` document, because that's how a failing attempt is kept from overwriting a version another attempt has just finished.
 - Both answer `ErrInvalidState` for a document in any other state, or one updated since `staleBefore`, and `ErrDocumentNotFound` for a missing document or another tenant's. Neither writes anything when it refuses.
+- `CompleteDocument(ctx, docID, chunkCount)` ends an ingest without a source key. It moves a `processing` document, and only a `processing` one, to `ready` with `ChunkCount` set and `UpdatedAt` now. Anything else is `ErrInvalidState` with nothing written, and the same not-found rule applies. This is the write that keeps a document recovery has already failed from coming back as `ready`, so it can't be a read and then an update.
 - `ListStalledDocuments(ctx, before, limit)` returns `pending`, `processing` and `superseded` documents with `UpdatedAt` before `before`, from every tenant, oldest first by `UpdatedAt` then ID. Leave out rows with an empty tenant: recovery can't scope them, and v1.8 installs can hold enough of them to fill every batch. A `limit` of zero or less means 100. An index on `(state, updated_at)` keeps it cheap; the built-in stores add one in migration `20261024000200`.
 - `CountStalledUntenanted(ctx, before)` counts exactly the rows that rule leaves out: same states, same age, empty tenant. Recovery only reports the number.
 
-In SQL each of the two moves is one `UPDATE ... WHERE id = $1 AND tenant_id = $2 AND state IN ('pending', 'processing') AND updated_at < $3`, and zero rows affected means you read the row once to tell not-found from the wrong state. In Mongo it's one `UpdateOne` with the same filter.
+In SQL each of these moves is one `UPDATE ... WHERE id = $1 AND tenant_id = $2 AND state IN ('pending', 'processing') AND updated_at < $3` (for `CompleteDocument`, `state = 'processing'` and no age check), and zero rows affected means you read the row once to tell not-found from the wrong state. In Mongo it's one `UpdateOne` with the same filter.
 
 ### Testing a custom store
 

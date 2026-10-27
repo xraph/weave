@@ -53,10 +53,10 @@ result, err := eng.Ingest(ctx, &engine.IngestInput{
 8. Embed all chunk texts in one `Embed` call, fire `OnIngestEmbedded` and send a heartbeat.
 9. Write the chunks to the metadata store.
 10. Upsert one vector per chunk, with `collection_id`, `document_id`, `tenant_id` and `chunk_index` in its metadata.
-11. Send a last heartbeat, then update the document to `State=ready` with its `ChunkCount`.
+11. Send a last heartbeat, then move the document to `State=ready` with its `ChunkCount`, through the store's guarded `CompleteDocument`.
 12. Fire `OnIngestCompleted` with the elapsed time.
 
-A heartbeat is the store's `TouchDocument`: it bumps the document's `UpdatedAt`, but only while the document is still `pending` or `processing`. If [recovery](#recovery) has marked it `failed` in the meantime, or someone deleted it, the heartbeat is refused and `Ingest` stops with `weave.ErrIngestInterrupted`. It deletes the chunk rows and vectors it already wrote and leaves the document as it found it. The last heartbeat sits right before the move to `ready` for exactly that reason: a document recovery has given up on never turns `ready` with half its chunks.
+A heartbeat is the store's `TouchDocument`: it bumps the document's `UpdatedAt`, but only while the document is still `pending` or `processing`. If [recovery](#recovery) has marked it `failed` in the meantime, or someone deleted it, the heartbeat is refused and `Ingest` stops with `weave.ErrIngestInterrupted`. It deletes the chunk rows and vectors it already wrote and leaves the document as it found it. The move to `ready` is guarded the same way: it only goes through while the document is still `processing`. So a document recovery has given up on never turns `ready`, even when recovery gets there between the last heartbeat and that write; you get `weave.ErrIngestInterrupted` and the chunks and vectors are cleared as above. The write ignores your context's cancellation, like the failure write below. If it fails for any other reason (the store dropped the connection), that's a failure like the ones below, and `Ingest` returns the error. It never answers `ready` for a document that is still `processing`.
 
 That's the path for an input without a `SourceKey`. A keyed ingest runs a different order, covered in [Upsert by source](#upsert-by-source).
 

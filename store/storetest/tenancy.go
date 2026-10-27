@@ -271,6 +271,7 @@ func testTenantRequired(t *testing.T, s store.Store) {
 		}},
 		{"TouchDocument", func(ctx context.Context) error { return s.TouchDocument(ctx, src.ID, time.Time{}) }},
 		{"FailDocument", func(ctx context.Context) error { return s.FailDocument(ctx, src.ID, "taken over", time.Time{}) }},
+		{"CompleteDocument", func(ctx context.Context) error { return s.CompleteDocument(ctx, src.ID, 1) }},
 	}
 
 	// The table covers every method of store.Store but notScoped, so a

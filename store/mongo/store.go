@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"slices"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -423,20 +424,31 @@ func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.Collec
 // TouchDocument records an ingest's heartbeat with one filtered UpdateOne,
 // so of several claims of one stalled document only the first matches.
 func (s *Store) TouchDocument(ctx context.Context, docID id.DocumentID, staleBefore time.Time) error {
-	return s.transition(ctx, "touch document", docID, staleBefore, bson.M{"state": string(document.StateProcessing)})
+	return s.transition(ctx, "touch document", docID, staleBefore, inProgress, bson.M{"state": string(document.StateProcessing)})
 }
 
 // FailDocument marks a pending or processing document failed with one
 // filtered UpdateOne.
 func (s *Store) FailDocument(ctx context.Context, docID id.DocumentID, errText string, staleBefore time.Time) error {
-	return s.transition(ctx, "fail document", docID, staleBefore, bson.M{"state": string(document.StateFailed), "error": errText})
+	return s.transition(ctx, "fail document", docID, staleBefore, inProgress, bson.M{"state": string(document.StateFailed), "error": errText})
 }
 
+// CompleteDocument moves a processing document to ready with one filtered
+// UpdateOne.
+func (s *Store) CompleteDocument(ctx context.Context, docID id.DocumentID, chunkCount int) error {
+	return s.transition(ctx, "complete document", docID, time.Time{}, []string{string(document.StateProcessing)},
+		bson.M{"state": string(document.StateReady), "chunk_count": chunkCount})
+}
+
+// inProgress are the states TouchDocument and FailDocument move a document
+// from.
+var inProgress = []string{string(document.StatePending), string(document.StateProcessing)}
+
 // transition sets fields, and updated_at, on docID within the context
-// tenant, but only while the document is pending or processing and, when
-// staleBefore is set, last updated before it. When nothing matches, it reads
-// the document to tell a missing one from one in the wrong state.
-func (s *Store) transition(ctx context.Context, op string, docID id.DocumentID, staleBefore time.Time, fields bson.M) error {
+// tenant, but only while the document is in one of the from states and,
+// when staleBefore is set, last updated before it. When nothing matches, it
+// reads the document to tell a missing one from one in the wrong state.
+func (s *Store) transition(ctx context.Context, op string, docID id.DocumentID, staleBefore time.Time, from []string, fields bson.M) error {
 	tenant, err := weave.RequireTenant(ctx)
 	if err != nil {
 		return err
@@ -444,7 +456,7 @@ func (s *Store) transition(ctx context.Context, op string, docID id.DocumentID, 
 	filter := bson.M{
 		"_id":       docID.String(),
 		"tenant_id": tenant,
-		"state":     bson.M{"$in": bson.A{string(document.StatePending), string(document.StateProcessing)}},
+		"state":     bson.M{"$in": from},
 	}
 	if !staleBefore.IsZero() {
 		filter["updated_at"] = bson.M{"$lt": staleBefore.UTC()}
@@ -465,7 +477,7 @@ func (s *Store) transition(ctx context.Context, op string, docID id.DocumentID, 
 		return weave.ErrDocumentNotFound
 	case err != nil:
 		return fmt.Errorf("weave: %s: %w", op, err)
-	case stored.State != string(document.StatePending) && stored.State != string(document.StateProcessing):
+	case !slices.Contains(from, stored.State):
 		return fmt.Errorf("%w: document is %s", weave.ErrInvalidState, stored.State)
 	}
 	return fmt.Errorf("%w: document was updated since it stalled", weave.ErrInvalidState)

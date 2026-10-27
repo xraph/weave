@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/xraph/grove"
@@ -460,7 +462,7 @@ func (s *Store) TouchDocument(ctx context.Context, docID id.DocumentID, staleBef
 	set := func(q *sqlitedriver.UpdateQuery) *sqlitedriver.UpdateQuery {
 		return q.Set("state = ?", string(document.StateProcessing))
 	}
-	return s.transition(ctx, "touch document", tenant, docID, staleBefore, set)
+	return s.transition(ctx, "touch document", tenant, docID, staleBefore, inProgress, set)
 }
 
 // FailDocument marks a pending or processing document failed with one
@@ -473,21 +475,47 @@ func (s *Store) FailDocument(ctx context.Context, docID id.DocumentID, errText s
 	set := func(q *sqlitedriver.UpdateQuery) *sqlitedriver.UpdateQuery {
 		return q.Set("state = ?", string(document.StateFailed)).Set("error = ?", errText)
 	}
-	return s.transition(ctx, "fail document", tenant, docID, staleBefore, set)
+	return s.transition(ctx, "fail document", tenant, docID, staleBefore, inProgress, set)
+}
+
+// CompleteDocument moves a processing document to ready with one guarded
+// UPDATE.
+func (s *Store) CompleteDocument(ctx context.Context, docID id.DocumentID, chunkCount int) error {
+	tenant, err := weave.RequireTenant(ctx)
+	if err != nil {
+		return err
+	}
+	set := func(q *sqlitedriver.UpdateQuery) *sqlitedriver.UpdateQuery {
+		return q.Set("state = ?", string(document.StateReady)).Set("chunk_count = ?", chunkCount)
+	}
+	return s.transition(ctx, "complete document", tenant, docID, time.Time{}, []string{string(document.StateProcessing)}, set)
+}
+
+// inProgress are the states TouchDocument and FailDocument move a document
+// from.
+var inProgress = []string{string(document.StatePending), string(document.StateProcessing)}
+
+// stateArgs turns states into query arguments.
+func stateArgs(states []string) []any {
+	args := make([]any, len(states))
+	for i, st := range states {
+		args[i] = st
+	}
+	return args
 }
 
 // transition runs an UPDATE of docID within tenant, with set adding the new
-// state, but only while the row is pending or processing and, when
+// state, but only while the row is in one of the from states and, when
 // staleBefore is set, last updated before it. When no row matches, it reads
 // the row in the same transaction to tell a missing document from one in the
 // wrong state.
-func (s *Store) transition(ctx context.Context, op, tenant string, docID id.DocumentID, staleBefore time.Time, set func(*sqlitedriver.UpdateQuery) *sqlitedriver.UpdateQuery) error {
+func (s *Store) transition(ctx context.Context, op, tenant string, docID id.DocumentID, staleBefore time.Time, from []string, set func(*sqlitedriver.UpdateQuery) *sqlitedriver.UpdateQuery) error {
 	return s.inWriteTx(ctx, op, func(tx *sqlitedriver.SqliteTx) error {
 		q := set(tx.NewUpdate((*documentModel)(nil))).
 			Set("updated_at = ?", time.Now().UTC()).
 			Where("id = ?", docID.String()).
 			Where("tenant_id = ?", tenant).
-			Where("state IN (?, ?)", string(document.StatePending), string(document.StateProcessing))
+			Where("state IN (?"+strings.Repeat(", ?", len(from)-1)+")", stateArgs(from)...)
 		if !staleBefore.IsZero() {
 			q = q.Where("updated_at < ?", staleBefore.UTC())
 		}
@@ -509,7 +537,7 @@ func (s *Store) transition(ctx context.Context, op, tenant string, docID id.Docu
 			return weave.ErrDocumentNotFound
 		case err != nil:
 			return fmt.Errorf("weave: %s: %w", op, err)
-		case stored.State != string(document.StatePending) && stored.State != string(document.StateProcessing):
+		case !slices.Contains(from, stored.State):
 			return fmt.Errorf("%w: document is %s", weave.ErrInvalidState, stored.State)
 		}
 		return fmt.Errorf("%w: document was updated since it stalled", weave.ErrInvalidState)

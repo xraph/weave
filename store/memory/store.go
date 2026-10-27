@@ -5,6 +5,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -458,7 +459,7 @@ func (s *Store) DeleteDocumentsByCollection(ctx context.Context, colID id.Collec
 // TouchDocument records an ingest's heartbeat under the store mutex, so of
 // several claims of one stalled document only the first finds it stalled.
 func (s *Store) TouchDocument(ctx context.Context, docID id.DocumentID, staleBefore time.Time) error {
-	return s.transition(ctx, docID, staleBefore, func(d *document.Document) {
+	return s.transition(ctx, docID, staleBefore, inProgress, func(d *document.Document) {
 		d.State = document.StateProcessing
 	})
 }
@@ -466,17 +467,31 @@ func (s *Store) TouchDocument(ctx context.Context, docID id.DocumentID, staleBef
 // FailDocument marks a pending or processing document failed under the
 // store mutex.
 func (s *Store) FailDocument(ctx context.Context, docID id.DocumentID, errText string, staleBefore time.Time) error {
-	return s.transition(ctx, docID, staleBefore, func(d *document.Document) {
+	return s.transition(ctx, docID, staleBefore, inProgress, func(d *document.Document) {
 		d.State = document.StateFailed
 		d.Error = errText
 	})
 }
 
-// transition applies change to a copy of a pending or processing document
-// of the context tenant, last updated before staleBefore when that is set,
-// and stores the copy with UpdatedAt now. The stored pointer is replaced,
-// never edited, because callers hold the documents GetDocument returned.
-func (s *Store) transition(ctx context.Context, docID id.DocumentID, staleBefore time.Time, change func(*document.Document)) error {
+// CompleteDocument moves a processing document to ready under the store
+// mutex.
+func (s *Store) CompleteDocument(ctx context.Context, docID id.DocumentID, chunkCount int) error {
+	return s.transition(ctx, docID, time.Time{}, []document.State{document.StateProcessing}, func(d *document.Document) {
+		d.State = document.StateReady
+		d.ChunkCount = chunkCount
+	})
+}
+
+// inProgress are the states TouchDocument and FailDocument move a document
+// from.
+var inProgress = []document.State{document.StatePending, document.StateProcessing}
+
+// transition applies change to a copy of a document of the context tenant
+// in one of the from states, last updated before staleBefore when that is
+// set, and stores the copy with UpdatedAt now. The stored pointer is
+// replaced, never edited, because callers hold the documents GetDocument
+// returned.
+func (s *Store) transition(ctx context.Context, docID id.DocumentID, staleBefore time.Time, from []document.State, change func(*document.Document)) error {
 	tenant, err := weave.RequireTenant(ctx)
 	if err != nil {
 		return err
@@ -489,7 +504,7 @@ func (s *Store) transition(ctx context.Context, docID id.DocumentID, staleBefore
 	if !ok || stored.TenantID != tenant {
 		return weave.ErrDocumentNotFound
 	}
-	if stored.State != document.StatePending && stored.State != document.StateProcessing {
+	if !slices.Contains(from, stored.State) {
 		return fmt.Errorf("%w: document is %s", weave.ErrInvalidState, stored.State)
 	}
 	if !staleBefore.IsZero() && !stored.UpdatedAt.Before(staleBefore) {

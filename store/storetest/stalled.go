@@ -353,3 +353,97 @@ func testStalledSkipsUntenanted(t *testing.T, s store.Store, plant Planter) {
 		t.Errorf("stalled without a tenant: %d, want 4 (two processing, one pending, one superseded)", n)
 	}
 }
+
+// testCompleteDocument pins the guarded move to ready that ends an unkeyed
+// ingest: a processing document becomes ready with its chunk count, a newer
+// UpdatedAt and every other field kept. A pending, ready, failed or
+// superseded document is ErrInvalidState and keeps its state, chunk count
+// and UpdatedAt, so a document recovery has failed never comes back as
+// ready. Another tenant's or an unknown document is ErrDocumentNotFound.
+func testCompleteDocument(t *testing.T, s store.Store) {
+	t1 := as("t1")
+	col := mustCollection(t, s, "complete", "t1")
+
+	processing := mustDocument(t, s, col, "processing", document.StateProcessing)
+	was := mustGet(t, s, "t1", processing.ID)
+	time.Sleep(tick)
+	if err := s.CompleteDocument(t1, processing.ID, 3); err != nil {
+		t.Fatalf("complete a processing document: %v", err)
+	}
+	got := mustGet(t, s, "t1", processing.ID)
+	if got.State != document.StateReady || got.ChunkCount != 3 {
+		t.Errorf("completed document: state %q chunk count %d, want ready 3", got.State, got.ChunkCount)
+	}
+	if !got.UpdatedAt.After(was.UpdatedAt) {
+		t.Errorf("completed document: UpdatedAt %v, want after %v", got.UpdatedAt, was.UpdatedAt)
+	}
+	if got.Title != processing.Title || got.ContentHash != processing.ContentHash || got.Metadata["lang"] != "en" || got.Error != "" {
+		t.Errorf("completed document lost fields: %+v", got)
+	}
+
+	recovered := mustDocument(t, s, col, "recovered", document.StateProcessing)
+	if err := s.FailDocument(t1, recovered.ID, "weave: ingest interrupted before it finished", time.Time{}); err != nil {
+		t.Fatalf("fail the recovered document: %v", err)
+	}
+	refused := []*document.Document{
+		mustDocument(t, s, col, "pending", document.StatePending),
+		mustDocument(t, s, col, "ready", document.StateReady),
+		mustDocument(t, s, col, "failed", document.StateFailed),
+		mustDocument(t, s, col, "superseded", document.StateSuperseded),
+		recovered,
+	}
+	for _, d := range refused {
+		before := mustGet(t, s, "t1", d.ID)
+		if err := s.CompleteDocument(t1, d.ID, 5); !errors.Is(err, weave.ErrInvalidState) {
+			t.Errorf("complete a %s document: got %v, want ErrInvalidState", before.State, err)
+		}
+		after := mustGet(t, s, "t1", d.ID)
+		if after.State != before.State || after.ChunkCount != before.ChunkCount || after.Error != before.Error || !after.UpdatedAt.Equal(before.UpdatedAt) {
+			t.Errorf("refused complete changed a %s document: state %q chunk count %d error %q updated %v",
+				before.State, after.State, after.ChunkCount, after.Error, after.UpdatedAt)
+		}
+	}
+
+	other := mustDocument(t, s, mustCollection(t, s, "complete-t2", "t2"), "t2 processing", document.StateProcessing)
+	for name, docID := range map[string]id.DocumentID{"t2's document": other.ID, "an unknown document": id.NewDocumentID()} {
+		if err := s.CompleteDocument(t1, docID, 1); !errors.Is(err, weave.ErrDocumentNotFound) {
+			t.Errorf("complete %s as t1: got %v, want ErrDocumentNotFound", name, err)
+		}
+	}
+	if got := mustGet(t, s, "t2", other.ID); got.State != document.StateProcessing {
+		t.Errorf("t1's complete reached t2's document: state %q", got.State)
+	}
+}
+
+// testCompleteOrFailOnce races CompleteDocument against FailDocument on
+// one processing document, as an ingest finishing and a recovery sweep
+// would: exactly one wins, the loser is ErrInvalidState, and the stored
+// state is the winner's.
+func testCompleteOrFailOnce(t *testing.T, s store.Store) {
+	col := mustCollection(t, s, "complete-or-fail", "t1")
+	const rounds = 8
+	for round := range rounds {
+		d := mustDocument(t, s, col, fmt.Sprintf("race %d", round), document.StateProcessing)
+		var completeErr, failErr error
+		var wg sync.WaitGroup
+		wg.Go(func() { completeErr = s.CompleteDocument(as("t1"), d.ID, 2) })
+		wg.Go(func() {
+			failErr = s.FailDocument(as("t1"), d.ID, "weave: ingest interrupted before it finished", time.Time{})
+		})
+		wg.Wait()
+
+		got := mustGet(t, s, "t1", d.ID)
+		switch {
+		case completeErr == nil && errors.Is(failErr, weave.ErrInvalidState):
+			if got.State != document.StateReady || got.ChunkCount != 2 {
+				t.Errorf("round %d: complete won, stored state %q chunk count %d", round, got.State, got.ChunkCount)
+			}
+		case failErr == nil && errors.Is(completeErr, weave.ErrInvalidState):
+			if got.State != document.StateFailed {
+				t.Errorf("round %d: fail won, stored state %q", round, got.State)
+			}
+		default:
+			t.Errorf("round %d: complete %v, fail %v; want exactly one to win and the other ErrInvalidState", round, completeErr, failErr)
+		}
+	}
+}

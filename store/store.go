@@ -71,6 +71,14 @@ type Store interface {
 	// and nothing written.
 	FailDocument(ctx context.Context, docID id.DocumentID, errText string, staleBefore time.Time) error
 
+	// CompleteDocument finishes an unkeyed ingest: it moves a processing
+	// document to ready, with ChunkCount set to chunkCount and UpdatedAt to
+	// now, in one guarded write. A document in any other state (recovery
+	// failed it, say) is weave.ErrInvalidState and nothing is written, so a
+	// failed document never comes back as ready; a missing document or
+	// another tenant's is weave.ErrDocumentNotFound.
+	CompleteDocument(ctx context.Context, docID id.DocumentID, chunkCount int) error
+
 	// ListStalledDocuments is the one read that spans tenants, for recovery:
 	// documents in pending or processing, or superseded, last updated before
 	// before, oldest first. limit <= 0 means 100. It needs no context tenant.

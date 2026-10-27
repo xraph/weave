@@ -151,7 +151,7 @@ failed underneath it.
 
 ## If you wrote your own store
 
-`store.Store` grew five methods, and a custom store doesn't compile until it has
+`store.Store` grew six methods, and a custom store doesn't compile until it has
 all of them. The built-in stores (memory, SQLite, Postgres, Mongo) already do.
 
 - `ReplaceSourceDocument(ctx, doc, chunks)` swaps in a new version of a
@@ -160,13 +160,17 @@ all of them. The built-in stores (memory, SQLite, Postgres, Mongo) already do.
   cutoff it's a claim only one caller wins.
 - `FailDocument(ctx, docID, errText, staleBefore)` moves a pending or processing
   document to failed, and never touches a ready one.
+- `CompleteDocument(ctx, docID, chunkCount)` moves a processing document to
+  ready with its chunk count. It's how an ingest without a source key
+  finishes, and it refuses any other state, so a document recovery has
+  already failed can't come back as ready.
 - `ListStalledDocuments(ctx, before, limit)` is recovery's read across tenants.
   It works with no tenant on the context and leaves out rows with an empty
   tenant.
 - `CountStalledUntenanted(ctx, before)` counts the rows that listing leaves out.
 
 The last two are the only methods besides `Migrate`, `Ping` and `Close` that run
-without a tenant. The two moves have to be single guarded writes (a
+without a tenant. The three moves have to be single guarded writes (a
 compare-and-set on the stored state), not a read and then an update, or two
 replicas can both win. [Writing a custom store](docs/content/docs/guides/custom-store.mdx)
 spells out each rule, and `storetest.Run` checks them. If your store ever held

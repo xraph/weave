@@ -467,15 +467,16 @@ func (e *Engine) ingest(ctx context.Context, span trace.Span, tenantID string, i
 		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("upsert vectors: %w", upsertErr))
 	}
 
-	// The last heartbeat, right before the move to ready, is the final
-	// check: a document recovery failed meanwhile never turns ready, and
-	// this ingest takes back the chunks and vectors it wrote.
+	// The last heartbeat, right before the move to ready, keeps the document
+	// clear of recovery's cutoff. The move itself is the final check: it is
+	// guarded, so a document recovery failed meanwhile never turns ready,
+	// and this ingest takes back the chunks and vectors it wrote.
 	if beatErr := beat(); beatErr != nil {
 		return e.endIngest(ctx, doc, entries, true, beatErr)
 	}
-	doc.State = document.StateReady
-	doc.ChunkCount = len(chunks)
-	_ = e.store.UpdateDocument(ctx, doc) //nolint:errcheck // best-effort status update
+	if readyErr := e.completeDocument(ctx, doc.ID, len(chunks)); readyErr != nil {
+		return e.endIngest(ctx, doc, entries, true, readyErr)
+	}
 
 	elapsed := time.Since(start)
 	e.extensions.EmitIngestCompleted(ctx, input.CollectionID, 1, len(chunks), elapsed)
@@ -485,6 +486,26 @@ func (e *Engine) ingest(ctx context.Context, span trace.Span, tenantID string, i
 		ChunkCount: len(chunks),
 		State:      document.StateReady,
 	}, nil
+}
+
+// completeDocument moves an unkeyed ingest's document from processing to
+// ready with chunkCount, through the store's guarded CompleteDocument. The
+// write runs on a cleanup context (see cleanupContext), like failIngest's,
+// so a request cancelled this late can't leave the document processing for
+// recovery to fail after the caller was told it succeeded. A document that
+// is no longer processing, or is gone, is weave.ErrIngestInterrupted; any
+// other error is the store's, for failIngest.
+func (e *Engine) completeDocument(ctx context.Context, docID id.DocumentID, chunkCount int) error {
+	cleanup, cancel := cleanupContext(ctx)
+	defer cancel()
+	err := e.store.CompleteDocument(cleanup, docID, chunkCount)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, weave.ErrInvalidState), errors.Is(err, weave.ErrDocumentNotFound):
+		return weave.ErrIngestInterrupted
+	}
+	return fmt.Errorf("mark ready: %w", err)
 }
 
 // contentHash is the hex SHA-256 of content, the document's ContentHash.
