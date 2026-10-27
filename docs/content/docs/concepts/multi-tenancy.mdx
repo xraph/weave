@@ -31,7 +31,7 @@ The metadata store reads the tenant from the context on every call except `Migra
 | `CollectionStats` | Reads the collection and its counts within `t` |
 | `ReindexCollection` | Reads the collection within `t` first, then re-embeds `t`'s documents. Another tenant's collection is `ErrCollectionNotFound` and nothing is touched |
 | `DeleteCollection`, `DeleteDocument` | Read the collection or document within `t` first, then delete its rows and the vectors labelled with both its ID and `t`. Another tenant's ID is not-found and nothing is deleted |
-| `Retrieve`, `HybridSearch`, `RetrieveCompare` | Filter the vector search to `tenant_id` and read each hit back within `t` |
+| `Retrieve`, `HybridSearch`, `RetrieveCompare` | Read any collection they're given within `t` first (another tenant's is `ErrCollectionNotFound`, with nothing embedded), filter the vector search to `tenant_id` and read each hit back within `t` |
 
 Another tenant's ID is not-found on purpose: if it gave a different error, anyone holding a list of IDs could work out which of them exist.
 

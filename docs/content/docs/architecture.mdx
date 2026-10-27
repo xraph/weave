@@ -84,7 +84,7 @@ If step 5 or anything after it fails, the document is set to `failed` with the e
 3. Build a filter: `tenant_id` from the context tenant, and `collection_id` from `WithCollection`.
 4. If a retriever is configured, call it with that filter. Otherwise embed the query and call `VectorStore.Search` directly.
 5. Read each hit's chunk back from the metadata store by ID, within the tenant. A hit whose chunk row is gone stays in the results with `Orphaned` set, and a hit from another tenant is dropped.
-5. Fire `OnRetrievalCompleted`, or `OnRetrievalFailed` on an error.
+6. Fire `OnRetrievalCompleted`, or `OnRetrievalFailed` on an error.
 
 ## Extension system
 

@@ -8,6 +8,7 @@ import (
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
+	"github.com/xraph/weave/id"
 )
 
 // tenant is the entry check every engine method that touches data runs
@@ -50,6 +51,25 @@ func (e *Engine) tenantNamed(ctx context.Context, named ...*string) (context.Con
 		return ctx, "", fmt.Errorf("%w: tenant option does not match the context tenant", weave.ErrInvalidArgument)
 	}
 	return e.tenant(ctx)
+}
+
+// ownedCollections checks that every collection in ids exists within
+// tenant, or returns ErrCollectionNotFound. The search paths call it
+// before they embed anything, so a request naming another tenant's
+// collection is refused, not answered with an empty result.
+func (e *Engine) ownedCollections(ctx context.Context, tenant string, ids ...id.CollectionID) error {
+	if e.store == nil {
+		return nil
+	}
+	for _, colID := range ids {
+		if colID.IsNil() {
+			return weave.ErrCollectionNotFound
+		}
+		if _, err := e.getCollection(ctx, tenant, colID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // The checks below guard against a custom store that ignores the context

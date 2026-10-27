@@ -10,6 +10,10 @@ import (
 	"github.com/xraph/weave/id"
 )
 
+// maxTopK caps top_k on the retrieve and search routes, as the list routes
+// cap limit.
+const maxTopK = 1000
+
 func (a *API) retrieve(ctx forge.Context, req *RetrieveRequest) (*struct{}, error) {
 	colID, err := id.ParseCollectionID(ctx.Param("collectionId"))
 	if err != nil {
@@ -22,7 +26,7 @@ func (a *API) retrieve(ctx forge.Context, req *RetrieveRequest) (*struct{}, erro
 
 	results, err := a.eng.Retrieve(ctx.Context(), req.Query,
 		engine.WithCollection(colID),
-		engine.WithTopK(req.TopK),
+		engine.WithTopK(min(req.TopK, maxTopK)),
 		engine.WithMinScore(req.MinScore),
 		engine.WithStrategy(req.Strategy),
 	)
@@ -40,7 +44,7 @@ func (a *API) hybridSearch(ctx forge.Context, req *HybridSearchRequest) (*struct
 
 	results, err := a.eng.HybridSearch(ctx.Context(), req.Query, &engine.HybridSearchParams{
 		Collections: req.Collections,
-		TopK:        req.TopK,
+		TopK:        min(req.TopK, maxTopK),
 		Strategy:    req.Strategy,
 		MinScore:    req.MinScore,
 	})

@@ -31,7 +31,7 @@ case errors.Is(err, weave.ErrDuplicateDocument):
 | `weave.ErrNoEmbedder` | `Ingest` or `ReindexCollection` without an embedder |
 | `weave.ErrNoChunker` | `Ingest` without a chunker |
 | `weave.ErrEmptyContent` | `Ingest` with empty `Content` |
-| `weave.ErrCollectionNotFound` | No collection with that ID in the context tenant (from get, update, delete, stats, ingest, and creating a document in it). Another tenant's collection gets this too |
+| `weave.ErrCollectionNotFound` | No collection with that ID in the context tenant (from get, update, delete, stats, reindex, ingest, creating a document in it, and a retrieve, hybrid search or compare that names it). Another tenant's collection gets this too |
 | `weave.ErrDocumentNotFound` | No document with that ID in the context tenant, including when you create chunks on it |
 | `weave.ErrChunkNotFound` | No chunk with that ID in the context tenant |
 | `weave.ErrCollectionAlreadyExists` | A collection with that name already exists for the tenant, on create or rename |

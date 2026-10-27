@@ -173,7 +173,7 @@ Each document takes the same fields as the single ingest route. Any empty `conte
 | `limit` | int | Maximum results. Default 50, capped at 1000. |
 | `offset` | int | Results to skip |
 
-**Response** `200 OK`: an array of document objects, oldest first.
+**Response** `200 OK`: an array of document objects, oldest first. `404` when the tenant has no such collection.
 
 ---
 
@@ -227,7 +227,7 @@ Semantic retrieval within one collection.
 }
 ```
 
-`query` is required. Send `top_k`: when you leave it out the engine is asked for 0 results, the built-in vector stores turn that into 10, and the MMR retriever returns nothing. `default_top_k` isn't applied on this route. A `strategy` field is accepted and ignored.
+`query` is required. Send `top_k`: when you leave it out the engine is asked for 0 results, the built-in vector stores turn that into 10, and the MMR retriever returns nothing. `default_top_k` isn't applied on this route, and anything above 1000 is cut to 1000. A `strategy` field is accepted and ignored. A collection the tenant doesn't have is a 404, and the query isn't embedded.
 
 **Response** `200 OK`
 
@@ -277,7 +277,7 @@ Search across collections.
 }
 ```
 
-With `collections`, each one is searched separately and the hits are merged, sorted by score and cut to `top_k`. Without it, one search runs over every collection of the request's tenant. `top_k` defaults to `default_top_k` here. `strategy` is accepted and ignored.
+With `collections`, each one is searched separately and the hits are merged, sorted by score and cut to `top_k`. Without it, one search runs over every collection of the request's tenant. `top_k` defaults to `default_top_k` here and is capped at 1000. `strategy` is accepted and ignored. If any collection in `collections` isn't the tenant's, the whole request is a 404 before anything is searched.
 
 **Response** `200 OK`: an array of scored chunks, as for retrieve.
 
@@ -294,8 +294,8 @@ With `collections`, each one is searched separately and the hits are merged, sor
 | Status | When |
 |--------|------|
 | `400` | A malformed ID, a missing `name`, `content` or `query`, or an argument the engine refuses |
-| `403` | The request has no tenant. The body says `weave: this request has no tenant` |
-| `404` | The collection or document isn't there in the request's tenant, on the get, delete, stats, reindex and ingest routes |
+| `403` | The request has no tenant. The body says `weave: this request has no tenant`. It wins over every other error, so a malformed request without a tenant is a 403 too |
+| `404` | The collection or document isn't there in the request's tenant, on every route that names one: get, delete, stats, reindex, ingest, list documents, retrieve, and search with `collections` |
 | `500` | Anything else, including duplicate names or content, and embedder or store failures |
 
 A 500 goes through Forge's error handling, which by default doesn't put the error text in the response.

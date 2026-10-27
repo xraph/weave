@@ -57,7 +57,8 @@ You get hits from the context tenant and from nobody else, whatever the query, t
 
 - No tenant on the context (and no deprecated option naming one) is `weave.ErrTenantRequired`, returned before the query is embedded.
 - `WithTenantID`, `WithTenantFilter` or `CompareParams.Tenant` naming a tenant other than the context's is `weave.ErrInvalidArgument`. They can't widen the search or switch it to someone else.
-- The search filter always carries `tenant_id`, and `TenantKey` is always set. Naming another tenant's collection with `WithCollection` finds nothing.
+- The search filter always carries `tenant_id`, and `TenantKey` is always set.
+- A collection you name with `WithCollection`, in `HybridSearchParams.Collections` or in `CompareParams.CollectionID` is read within the tenant first. Another tenant's collection, or one that doesn't exist, is `weave.ErrCollectionNotFound`, and the query is never embedded. `HybridSearch` checks every named collection before it searches any of them.
 - Each hit is read back within the tenant. A hit labelled with another tenant is dropped, and so is an orphan whose vector isn't labelled with yours.
 - `HybridSearch` and `RetrieveCompare` follow the same rules.
 

@@ -84,6 +84,11 @@ func TestRoutesAnswerForbiddenWithoutTenant(t *testing.T) {
 		{http.MethodDelete, "/v1/documents/" + doc.String(), ""},
 		{http.MethodPost, "/v1/collections/" + col.String() + "/retrieve", `{"query":"refunds"}`},
 		{http.MethodPost, "/v1/search", `{"query":"refunds"}`},
+		// Malformed requests are refused for the missing tenant first.
+		{http.MethodGet, "/v1/collections/nope", ""},
+		{http.MethodPost, "/v1/collections/" + col.String() + "/retrieve", `{"query":""}`},
+		{http.MethodPost, "/v1/collections/" + col.String() + "/documents", `{"content":""}`},
+		{http.MethodPost, "/v1/collections/nope/documents/batch", `{"documents":[{"content":""}]}`},
 	}
 	for _, rt := range routes {
 		rec := do(t, h, rt.method, rt.path, rt.body)
@@ -143,6 +148,9 @@ func TestRoutesUseTheRequestTenant(t *testing.T) {
 		{http.MethodDelete, "/v1/collections/" + theirCol.String(), ""},
 		{http.MethodPost, "/v1/collections/" + theirCol.String() + "/documents", `{"content":"more words"}`},
 		{http.MethodPost, "/v1/collections/" + theirCol.String() + "/documents/batch", `{"documents":[{"content":"more words"}]}`},
+		{http.MethodGet, "/v1/collections/" + theirCol.String() + "/documents", ""},
+		{http.MethodPost, "/v1/collections/" + theirCol.String() + "/retrieve", `{"query":"refunds","top_k":5}`},
+		{http.MethodPost, "/v1/search", `{"query":"refunds","collections":["` + theirCol.String() + `"]}`},
 	} {
 		if got := do(t, h, rt.method, rt.path, rt.body); got.Code != http.StatusNotFound {
 			t.Errorf("%s %s: status %d (%s), want 404", rt.method, rt.path, got.Code, got.Body.String())
@@ -171,5 +179,30 @@ func TestRoutesUseTheRequestTenant(t *testing.T) {
 	var created collection.Collection
 	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil || created.TenantID != "t1" {
 		t.Errorf("created collection: tenant %q, %v; want t1", created.TenantID, err)
+	}
+}
+
+func TestEmptyResultsAreArrays(t *testing.T) {
+	e := newEngine(t)
+	col, _ := seed(t, e, "t1", "docs")
+	router := forge.NewRouter()
+	router.Use(func(next forge.Handler) forge.Handler {
+		return func(c forge.Context) error {
+			c.WithContext(weave.WithTenant(c.Context(), "t1"))
+			return next(c)
+		}
+	})
+	h := api.New(e, router).Handler()
+
+	for _, rt := range []struct{ method, path, body string }{
+		{http.MethodGet, "/v1/collections?offset=10", ""},
+		{http.MethodGet, "/v1/collections/" + col.String() + "/documents?state=failed", ""},
+		{http.MethodPost, "/v1/search", `{"query":"nothing matches","collections":["` + col.String() + `"],"min_score":0.99}`},
+		{http.MethodPost, "/v1/collections/" + col.String() + "/retrieve", `{"query":"nothing matches","top_k":5,"min_score":0.99}`},
+	} {
+		rec := do(t, h, rt.method, rt.path, rt.body)
+		if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
+			t.Errorf("%s %s: status %d, body %q; want 200 []", rt.method, rt.path, rec.Code, rec.Body.String())
+		}
 	}
 }

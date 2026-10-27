@@ -85,6 +85,9 @@ func (a *API) listDocuments(ctx forge.Context, req *ListDocumentsRequest) (*stru
 		return nil, forge.BadRequest(fmt.Sprintf("invalid collection ID: %v", err))
 	}
 
+	if _, err = a.eng.GetCollection(ctx.Context(), colID); err != nil {
+		return nil, mapStoreError(err)
+	}
 	docs, err := a.eng.ListDocuments(ctx.Context(), &document.ListFilter{
 		CollectionID: colID,
 		State:        document.State(req.State),
@@ -95,6 +98,9 @@ func (a *API) listDocuments(ctx forge.Context, req *ListDocumentsRequest) (*stru
 		return nil, mapStoreError(err)
 	}
 
+	if docs == nil {
+		docs = []*document.Document{}
+	}
 	return nil, ctx.JSON(http.StatusOK, docs)
 }
 

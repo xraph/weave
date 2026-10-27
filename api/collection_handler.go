@@ -57,6 +57,9 @@ func (a *API) listCollections(ctx forge.Context, req *ListCollectionsRequest) (*
 		return nil, mapStoreError(err)
 	}
 
+	if cols == nil {
+		cols = []*collection.Collection{}
+	}
 	return nil, ctx.JSON(http.StatusOK, cols)
 }
 

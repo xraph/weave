@@ -617,7 +617,9 @@ type ScoredChunk struct {
 }
 
 // Retrieve performs a semantic retrieval query within the context tenant,
-// and never returns another tenant's chunks. Each hit is read back from the
+// and never returns another tenant's chunks. A collection named with
+// WithCollection that the tenant doesn't have is ErrCollectionNotFound,
+// before the query is embedded. Each hit is read back from the
 // metadata store by chunk ID; a hit whose row is missing is kept and marked
 // Orphaned, as long as its vector is labelled with the tenant.
 func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOption) ([]ScoredChunk, error) {
@@ -634,6 +636,11 @@ func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOpt
 	}
 
 	colID, _ := id.ParseCollectionID(params.CollectionID) //nolint:errcheck // empty for cross-collection search
+	if params.CollectionID != "" {
+		if colErr := e.ownedCollections(ctx, tenant, colID); colErr != nil {
+			return nil, colErr
+		}
+	}
 
 	// The query text never reaches the span: it is the user's question.
 	attrs := []attribute.KeyValue{
@@ -784,7 +791,7 @@ func (e *Engine) hydrateHit(ctx context.Context, tenant string, h *ScoredChunk) 
 		return true, nil
 	}
 	label, labelled := h.Chunk.Metadata["tenant_id"]
-	if labelled && label != tenant {
+	if labelled && label != tenant || h.Chunk.TenantID != "" && h.Chunk.TenantID != tenant {
 		return false, nil
 	}
 	if e.store == nil || h.Chunk.ID.String() == "" {
@@ -1037,11 +1044,20 @@ type HybridSearchParams struct {
 }
 
 // HybridSearch performs retrieval across one or more of the context
-// tenant's collections, or all of them when none is named.
+// tenant's collections, or all of them when none is named. A named
+// collection the tenant doesn't have is ErrCollectionNotFound, before
+// anything is embedded.
 func (e *Engine) HybridSearch(ctx context.Context, query string, params *HybridSearchParams) ([]ScoredChunk, error) {
-	ctx, _, err := e.tenant(ctx)
+	ctx, tenant, err := e.tenant(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if params != nil {
+		// Every named collection is checked before any of them is searched,
+		// so a bad one is refused before the query is embedded at all.
+		if colErr := e.ownedCollections(ctx, tenant, params.Collections...); colErr != nil {
+			return nil, colErr
+		}
 	}
 	if params == nil {
 		params = &HybridSearchParams{}
@@ -1052,7 +1068,7 @@ func (e *Engine) HybridSearch(ctx context.Context, query string, params *HybridS
 
 	// If specific collections are given, search each and merge.
 	if len(params.Collections) > 0 {
-		var all []ScoredChunk
+		all := []ScoredChunk{}
 		for _, colID := range params.Collections {
 			results, err := e.Retrieve(ctx, query,
 				WithCollection(colID),

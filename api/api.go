@@ -6,6 +6,7 @@ import (
 
 	"github.com/xraph/forge"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/engine"
@@ -39,9 +40,21 @@ func (a *API) RegisterRoutes(router forge.Router) {
 	a.registerRetrievalRoutes(router)
 }
 
+// requireTenant answers 403 for a request whose context has no tenant,
+// before the request is bound or validated, so every route refuses it the
+// same way whatever the body or path holds.
+func requireTenant(next forge.Handler) forge.Handler {
+	return func(c forge.Context) error {
+		if weave.TenantFromContext(c.Context()) == "" {
+			return mapStoreError(weave.ErrTenantRequired)
+		}
+		return next(c)
+	}
+}
+
 // registerCollectionRoutes registers collection management routes.
 func (a *API) registerCollectionRoutes(router forge.Router) {
-	g := router.Group("/v1", forge.WithGroupTags("collections"))
+	g := router.Group("/v1", forge.WithGroupTags("collections"), forge.WithGroupMiddleware(requireTenant))
 
 	_ = g.POST("/collections", a.createCollection, //nolint:errcheck // route registration
 		forge.WithSummary("Create collection"),
@@ -96,7 +109,7 @@ func (a *API) registerCollectionRoutes(router forge.Router) {
 
 // registerDocumentRoutes registers document management routes.
 func (a *API) registerDocumentRoutes(router forge.Router) {
-	g := router.Group("/v1", forge.WithGroupTags("documents"))
+	g := router.Group("/v1", forge.WithGroupTags("documents"), forge.WithGroupMiddleware(requireTenant))
 
 	_ = g.POST("/collections/:collectionId/documents", a.ingestDocument, //nolint:errcheck // route registration
 		forge.WithSummary("Ingest document"),
@@ -144,7 +157,7 @@ func (a *API) registerDocumentRoutes(router forge.Router) {
 
 // registerRetrievalRoutes registers retrieval routes.
 func (a *API) registerRetrievalRoutes(router forge.Router) {
-	g := router.Group("/v1", forge.WithGroupTags("retrieval"))
+	g := router.Group("/v1", forge.WithGroupTags("retrieval"), forge.WithGroupMiddleware(requireTenant))
 
 	_ = g.POST("/collections/:collectionId/retrieve", a.retrieve, //nolint:errcheck // route registration
 		forge.WithSummary("Retrieve chunks"),

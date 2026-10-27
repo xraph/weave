@@ -172,9 +172,9 @@ The engine relies on a few things from a vector store:
 - `Upsert` refuses a batch with any entry lacking `metadata["tenant_id"]` with `weave.ErrTenantRequired`, before it writes any of it.
 - `SearchResult.ID` is the entry ID you were given, which is the chunk ID. The engine reads the chunk back by it.
 - `DeleteByMetadata` deletes every entry matching all the pairs, and refuses an empty filter with `weave.ErrInvalidArgument`. Document and collection deletes call it with `tenant_id` next to `document_id` or `collection_id`.
+- Return `SearchResult.Vector` if you can. The MMR retriever needs it.
 
 The engine also drops any hit labelled with another tenant, but a store that skips the filter then hands back short pages, so apply it.
-- Return `SearchResult.Vector` if you can. The MMR retriever needs it.
 
 ## Custom MetadataStore
 

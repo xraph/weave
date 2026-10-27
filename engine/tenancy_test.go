@@ -14,6 +14,7 @@ import (
 	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/id"
+	"github.com/xraph/weave/retriever"
 	"github.com/xraph/weave/store"
 	"github.com/xraph/weave/store/memory"
 	"github.com/xraph/weave/vectorstore"
@@ -306,14 +307,31 @@ func TestRetrieveNeverCrossesTenants(t *testing.T) {
 	}
 	onlyTenant(t, "hybrid search", hybrid, "t1")
 
-	// Naming t2's collection under t1 finds nothing rather than t2's chunks.
-	named, err := r.Engine.Retrieve(tenantCtx("t1"), sharedText, engine.WithCollection(theirs.ID))
+	// Naming t2's collection, or one that doesn't exist, under t1 is
+	// refused before the query is embedded.
+	t1 := tenantCtx("t1")
+	embeds := r.Embed.Calls()
+	for _, colID := range []id.CollectionID{theirs.ID, id.NewCollectionID()} {
+		if got, gotErr := r.Engine.Retrieve(t1, sharedText, engine.WithCollection(colID)); !errors.Is(gotErr, weave.ErrCollectionNotFound) {
+			t.Errorf("retrieve %s under t1: %d hits, %v; want ErrCollectionNotFound", colID, len(got), gotErr)
+		}
+		if got, gotErr := r.Engine.HybridSearch(t1, sharedText, &engine.HybridSearchParams{Collections: []id.CollectionID{mine.ID, colID}}); !errors.Is(gotErr, weave.ErrCollectionNotFound) {
+			t.Errorf("hybrid search with %s under t1: %d hits, %v; want ErrCollectionNotFound", colID, len(got), gotErr)
+		}
+		if res, gotErr := r.Engine.RetrieveCompare(t1, sharedText, engine.CompareParams{CollectionID: colID}); !errors.Is(gotErr, weave.ErrCollectionNotFound) {
+			t.Errorf("compare %s under t1: %+v, %v; want ErrCollectionNotFound", colID, res, gotErr)
+		}
+	}
+	if got := r.Embed.Calls(); got != embeds {
+		t.Errorf("embedder: %d calls during refused searches, want 0", got-embeds)
+	}
+
+	// Naming its own collection still works.
+	own, err := r.Engine.Retrieve(t1, sharedText, engine.WithCollection(mine.ID), engine.WithTopK(10))
 	if err != nil {
-		t.Fatalf("retrieve t2's collection: %v", err)
+		t.Fatalf("retrieve own collection: %v", err)
 	}
-	if len(named) != 0 {
-		t.Errorf("retrieve t2's collection under t1: %d hits, want none", len(named))
-	}
+	onlyTenant(t, "retrieve own collection", own, "t1")
 }
 
 func TestChunkerMetadataCannotRelabelAVector(t *testing.T) {
@@ -512,7 +530,27 @@ func TestRetrieveDropsAnotherTenantsHits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compare: %v", err)
 	}
-	if len(res.Hits) != 0 || len(res.LeftOut) != 0 {
-		t.Errorf("compare under t1: hits %+v, left out %+v; want none of t2's", res.Hits, res.LeftOut)
+	if len(res.Hits) != 0 || len(res.LeftOut) != 0 || res.VectorMatches != 0 || res.BestVectorScore != 0 {
+		t.Errorf("compare under t1: hits %+v, left out %+v, %d vector matches (best %.3f); want nothing of t2's", res.Hits, res.LeftOut, res.VectorMatches, res.BestVectorScore)
+	}
+}
+
+// strayRetriever returns another tenant's chunk with no ID and no metadata
+// label, only its TenantID, as a custom retriever that ignores the tenant
+// might.
+type strayRetriever struct{}
+
+func (strayRetriever) Retrieve(context.Context, string, *retriever.Options) ([]retriever.Result, error) {
+	return []retriever.Result{{Chunk: &chunk.Chunk{TenantID: "t2", Content: "t2 secret text"}, Score: 0.9}}, nil
+}
+
+func TestRetrieveDropsAnUnlabelledHitFromAnotherTenant(t *testing.T) {
+	e := newTestEngine(t, engine.WithRetriever(strayRetriever{}))
+	hits, err := e.Retrieve(tenantCtx("t1"), sharedText)
+	if err != nil {
+		t.Fatalf("retrieve: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("retrieve under t1: got %+v, want t2's hit dropped", hits[0].Chunk)
 	}
 }

@@ -70,7 +70,7 @@ app.Router().UseGlobal(func(next forge.Handler) forge.Handler {
 
 Don't take it from a header the caller sets, like `X-Tenant-ID`: anyone could name any tenant.
 
-A request whose context has no tenant gets a 403 on every route, before anything is read or embedded. With a tenant, every route works inside it. `GET /collections` lists only that tenant's collections, and the get, delete, stats, reindex and ingest routes answer 404 for another tenant's ID, exactly as for one that doesn't exist. See [multi-tenancy](/docs/concepts/multi-tenancy).
+A request whose context has no tenant gets a 403 on every route. The check runs before the request is even parsed, so a malformed ID or an empty body gets the 403 too, and nothing is read or embedded. With a tenant, every route works inside it. `GET /collections` lists only that tenant's collections, and every route that names a collection or document answers 404 for another tenant's ID, exactly as for one that doesn't exist. That includes retrieve and a search naming `collections`, which refuse before the query is embedded. See [multi-tenancy](/docs/concepts/multi-tenancy).
 
 ## Errors
 
@@ -78,7 +78,7 @@ A request whose context has no tenant gets a 403 on every route, before anything
 |--------|------|
 | 400 | A malformed ID, a missing `name`, `content` or `query`, or an engine `ErrInvalidArgument` |
 | 403 | The request context has no tenant |
-| 404 | The collection or document isn't there in the request's tenant: get, delete, stats, reindex, ingest and batch ingest |
+| 404 | The collection or document isn't there in the request's tenant: get, delete, stats, reindex, ingest, batch ingest, list documents, retrieve, and search with `collections` |
 | 500 | Anything else |
 
 400, 403 and 404 have this body:
@@ -87,6 +87,6 @@ A request whose context has no tenant gets a 403 on every route, before anything
 { "error": "weave: collection not found", "code": 404 }
 ```
 
-The 403 always says `weave: this request has no tenant`.
+The 403 always says `weave: this request has no tenant`. An empty list or search result is `[]`, never `null`.
 
 Everything else comes back as a 500 through Forge's error handling, which by default leaves the error text out of the response. That covers a duplicate collection name, duplicate document content and embedder or vector store failures.

@@ -84,6 +84,11 @@ func (e *Engine) RetrieveCompare(ctx context.Context, query string, p ComparePar
 	if err != nil {
 		return nil, err
 	}
+	if !p.CollectionID.IsNil() {
+		if colErr := e.ownedCollections(ctx, tenant, p.CollectionID); colErr != nil {
+			return nil, colErr
+		}
+	}
 	topK := p.TopK
 	if topK <= 0 {
 		topK = e.config.DefaultTopK
@@ -222,12 +227,14 @@ func (e *Engine) hydrateCompare(ctx context.Context, tenant string, hits []Compa
 	return kept, nil
 }
 
-// ownVectors drops search results labelled with a tenant other than
-// tenant, which only a vector store that ignores the tenant filter returns.
+// ownVectors keeps only the search results labelled with tenant. Every
+// built-in store labels every entry, so only a vector store that ignores
+// the tenant filter loses anything here, and then no count, score or rank
+// of another tenant's vectors reaches the result.
 func ownVectors(results []vectorstore.SearchResult, tenant string) []vectorstore.SearchResult {
 	kept := results[:0]
 	for _, r := range results {
-		if label, ok := r.Metadata["tenant_id"]; ok && label != tenant {
+		if r.Metadata["tenant_id"] != tenant {
 			continue
 		}
 		kept = append(kept, r)
