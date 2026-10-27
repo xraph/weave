@@ -22,7 +22,7 @@ func TestRegisterRoutesReportsEveryRouteThatFailsToRegister(t *testing.T) {
 	}
 	for _, op := range []string{
 		"createCollection", "listCollections", "getCollection", "deleteCollection", "collectionStats", "reindexCollection",
-		"ingestDocument", "ingestBatch", "listDocuments", "getDocument", "deleteDocument",
+		"ingestDocument", "ingestBatch", "listDocuments", "deleteDocumentsBySource", "getDocument", "deleteDocument",
 		"retrieve", "hybridSearch",
 	} {
 		if !strings.Contains(err.Error(), "weave: register route "+op+": ") {
@@ -36,8 +36,8 @@ func TestRegisterRoutesSucceedsOnAWorkingRouter(t *testing.T) {
 	if err := api.New(newEngine(t), nil).RegisterRoutes(router.Group("/weave")); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	if n := len(router.Routes()); n != 13 {
-		t.Errorf("registered %d routes, want 13", n)
+	if n := len(router.Routes()); n != 14 {
+		t.Errorf("registered %d routes, want 14", n)
 	}
 }
 

@@ -1,6 +1,6 @@
 ---
 title: HTTP API Reference
-description: Complete reference for all 13 Weave REST endpoints for collections, documents, retrieval and search.
+description: Complete reference for all 14 Weave REST endpoints for collections, documents, retrieval and search.
 ---
 
 The Forge extension mounts these routes under its base path, `/weave` by default, so every path below starts with `/weave/v1`. Change the prefix with `base_path` or `extension.WithBasePath`. All bodies are JSON.
@@ -126,11 +126,14 @@ Ingest one document. Runs the whole load, chunk, embed and store pipeline before
   "content": "Our return policy allows returns within 30 days...",
   "source": "policy.md",
   "source_type": "text/markdown",
-  "metadata": { "category": "support" }
+  "metadata": { "category": "support" },
+  "source_key": "docs/return-policy.md"
 }
 ```
 
 `content` is required. `source_type` only matters when the engine has a loader that supports it.
+
+`source_key` is optional. Set it and the request is an upsert of that source: the content replaces the source's current document in the collection, or comes back unchanged when it's the same. It's up to 1024 bytes and can't be blank. See [Upsert by source](/docs/subsystems/ingestion#upsert-by-source).
 
 **Response** `201 Created`
 
@@ -138,11 +141,14 @@ Ingest one document. Runs the whole load, chunk, embed and store pipeline before
 {
   "document_id": "doc_01h455vbjdx6ycf56rnatbxqki",
   "chunk_count": 12,
-  "state": "ready"
+  "state": "ready",
+  "replaced": ["doc_01h455vbjdx6ycf56rnatbxqkj"]
 }
 ```
 
-Empty `content` is a 400. A collection the tenant doesn't have is a 404, and nothing is embedded. Content already in the collection and embedder or store failures are 500s.
+`replaced` lists the previous versions a keyed ingest replaced, and is left out when there were none. When the source already holds this content you get `"unchanged": true` with the existing document's ID, and nothing was embedded. Its `state` can be `pending` or `processing` if another request is still ingesting that content.
+
+Empty `content` and a blank or over-long `source_key` are 400s. A collection the tenant doesn't have is a 404, and nothing is embedded. Content already in the collection under another source key (or none) and embedder or store failures are 500s.
 
 ---
 
@@ -153,13 +159,13 @@ Empty `content` is a 400. A collection the tenant doesn't have is a 404, and not
 ```json
 {
   "documents": [
-    { "title": "Doc A", "content": "..." },
+    { "title": "Doc A", "content": "...", "source_key": "docs/a.md" },
     { "title": "Doc B", "content": "..." }
   ]
 }
 ```
 
-Each document takes the same fields as the single ingest route. Any empty `content` fails the whole request with a 400 before anything is ingested.
+Each document takes the same fields as the single ingest route, `source_key` included. Any empty `content` fails the whole request with a 400 before anything is ingested.
 
 **Response** `201 Created`: an array of ingest results, in order. Documents are ingested one at a time, and the first failure ends the request with an error. The documents before it stay ingested.
 
@@ -174,6 +180,18 @@ Each document takes the same fields as the single ingest route. Any empty `conte
 | `offset` | int | Results to skip |
 
 **Response** `200 OK`: an array of document objects, oldest first. `404` when the tenant has no such collection.
+
+---
+
+### `DELETE /weave/v1/collections/:collectionId/documents?source_key=...`
+
+Deletes every document of a source key in the collection, in any state, with their chunks and vectors. Operation ID `deleteDocumentsBySource`.
+
+| Query param | Type | Description |
+|-------------|------|-------------|
+| `source_key` | string | Required. The source whose documents to delete. |
+
+**Response** `204 No Content`, also when the source has nothing to delete. A missing, empty or blank `source_key` is a `400` and nothing is deleted. `404` when the tenant has no such collection, which is what you get for another tenant's collection too.
 
 ---
 
@@ -195,11 +213,12 @@ Each document takes the same fields as the single ingest route. Any empty `conte
   "content_length": 1024,
   "chunk_count": 12,
   "metadata": { "category": "support" },
-  "state": "ready"
+  "state": "ready",
+  "source_key": "docs/return-policy.md"
 }
 ```
 
-`content_hash` is the hex SHA-256 of the raw content. `error` appears when `state` is `failed`.
+`content_hash` is the hex SHA-256 of the raw content. `source_key` is there only for a document ingested with one. `error` appears when `state` is `failed`.
 
 ---
 
@@ -293,9 +312,9 @@ With `collections`, each one is searched separately and the hits are merged, sor
 
 | Status | When |
 |--------|------|
-| `400` | A malformed ID, a missing `name`, `content` or `query`, or an argument the engine refuses |
+| `400` | A malformed ID, a missing `name`, `content`, `query` or `source_key` (on delete by source), or an argument the engine refuses |
 | `403` | The request has no tenant. The body says `weave: this request has no tenant`. It wins over every other error, so a malformed request without a tenant is a 403 too |
-| `404` | The collection or document isn't there in the request's tenant, on every route that names one: get, delete, stats, reindex, ingest, list documents, retrieve, and search with `collections` |
+| `404` | The collection or document isn't there in the request's tenant, on every route that names one: get, delete, stats, reindex, ingest, list documents, delete by source, retrieve, and search with `collections` |
 | `500` | Anything else, including duplicate names or content, and embedder or store failures |
 
 A 500 goes through Forge's error handling, which by default doesn't put the error text in the response.

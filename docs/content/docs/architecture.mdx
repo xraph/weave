@@ -70,7 +70,7 @@ eng, err := engine.New(
 6. Chunk the content and fire `OnIngestChunked`.
 7. Embed every chunk in one `Embed` call and fire `OnIngestEmbedded`.
 8. Write the chunks to the metadata store with `CreateChunkBatch`.
-9. Upsert one vector per chunk. Its ID is the chunk ID and its metadata carries `collection_id`, `document_id`, `tenant_id` and `chunk_index`, plus the chunk's own metadata.
+9. Upsert one vector per chunk. Its ID is the chunk ID and its metadata carries `collection_id`, `document_id`, `tenant_id` and `chunk_index` (and `source_key` for a source-keyed document), plus the chunk's own metadata.
 10. Set `State=ready` and `ChunkCount`, then fire `OnIngestCompleted`.
 
 If step 5 or anything after it fails, the document is set to `failed` with the error text in `Error`, and `OnIngestFailed` fires.

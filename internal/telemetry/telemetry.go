@@ -66,6 +66,8 @@ const (
 	RetrieveOrphaned = attribute.Key("weave.retrieve.orphaned")
 	ReindexDocuments = attribute.Key("weave.reindex.documents")
 	ReindexChunks    = attribute.Key("weave.reindex.chunks")
+	IngestUnchanged  = attribute.Key("weave.ingest.unchanged")
+	IngestReplaced   = attribute.Key("weave.ingest.replaced")
 )
 
 // OperationEmbeddings is gen_ai.operation.name for an embedding call.

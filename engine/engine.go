@@ -323,16 +323,24 @@ type IngestInput struct {
 	Content string `json:"content"`
 	// Metadata is optional document metadata.
 	Metadata map[string]string `json:"metadata,omitempty"`
+	// SourceKey makes the ingest an upsert: the new content replaces this
+	// source's current document in the collection. Up to 1024 bytes, not blank.
+	SourceKey string `json:"source_key,omitempty"`
 }
 
 // IngestResult contains the outcome of a document ingestion.
 type IngestResult struct {
-	DocumentID id.DocumentID  `json:"document_id"`
-	ChunkCount int            `json:"chunk_count"`
-	State      document.State `json:"state"`
+	DocumentID id.DocumentID   `json:"document_id"`
+	ChunkCount int             `json:"chunk_count"`
+	State      document.State  `json:"state"`
+	Unchanged  bool            `json:"unchanged,omitempty"` // same source, same content: nothing was embedded
+	Replaced   []id.DocumentID `json:"replaced,omitempty"`  // previous versions this ingest superseded
 }
 
-// Ingest processes a single document: load, chunk, embed, and store.
+// Ingest processes a single document: load, chunk, embed, and store. With a
+// SourceKey it is an upsert of that source (see IngestInput.SourceKey): the
+// same content again embeds nothing and answers Unchanged, and new content
+// replaces the source's current document, whose ID is then in Replaced.
 func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult, error) {
 	if e.store == nil {
 		return nil, weave.ErrNoStore
@@ -353,6 +361,11 @@ func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult,
 	if input.Content == "" {
 		return nil, weave.ErrEmptyContent
 	}
+	if input.SourceKey != "" {
+		if keyErr := checkSourceKey(input.SourceKey); keyErr != nil {
+			return nil, keyErr
+		}
+	}
 
 	ctx, span := telemetry.Tracer().Start(ctx, "ingest document", trace.WithAttributes(
 		telemetry.CollectionID.String(input.CollectionID.String()),
@@ -363,7 +376,18 @@ func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult,
 	defer span.End()
 
 	start := time.Now()
-	res, err := e.ingest(ctx, span, tenant, input)
+	var res *IngestResult
+	if input.SourceKey != "" {
+		res, err = e.ingestSource(ctx, span, tenant, input)
+		if res != nil {
+			span.SetAttributes(
+				telemetry.IngestUnchanged.Bool(res.Unchanged),
+				telemetry.IngestReplaced.Int(len(res.Replaced)),
+			)
+		}
+	} else {
+		res, err = e.ingest(ctx, span, tenant, input)
+	}
 
 	result := telemetry.ResultOK
 	switch {
@@ -396,24 +420,7 @@ func (e *Engine) ingest(ctx context.Context, span trace.Span, tenantID string, i
 		return nil, err
 	}
 
-	// Compute content hash.
-	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(input.Content)))
-
-	// Create the document record.
-	doc := &document.Document{
-		Entity:        weave.NewEntity(),
-		ID:            id.NewDocumentID(),
-		CollectionID:  input.CollectionID,
-		TenantID:      tenantID,
-		Title:         input.Title,
-		Source:        input.Source,
-		SourceType:    input.SourceType,
-		ContentHash:   hash,
-		ContentLength: len(input.Content),
-		Metadata:      input.Metadata,
-		State:         document.StatePending,
-	}
-
+	doc := newDocument(tenantID, input, contentHash(input.Content))
 	if createErr := e.store.CreateDocument(ctx, doc); createErr != nil {
 		return nil, fmt.Errorf("weave: create document: %w", createErr)
 	}
@@ -424,70 +431,9 @@ func (e *Engine) ingest(ctx context.Context, span trace.Span, tenantID string, i
 	doc.State = document.StateProcessing
 	_ = e.store.UpdateDocument(ctx, doc) //nolint:errcheck // best-effort status update
 
-	// Optionally load/extract text.
-	content := input.Content
-	if e.loader != nil && input.SourceType != "" && e.loader.Supports(input.SourceType) {
-		result, loadErr := e.loader.Load(ctx, strings.NewReader(content))
-		if loadErr != nil {
-			return e.failIngest(ctx, doc, input.CollectionID, loadErr)
-		}
-		content = result.Content
-	}
-
-	// Chunk the content.
-	chunkOpts := &chunker.Options{
-		ChunkSize:    col.ChunkSize,
-		ChunkOverlap: col.ChunkOverlap,
-		Strategy:     col.ChunkStrategy,
-	}
-	chunkResults, err := e.chunk(ctx, content, chunkOpts)
+	chunks, entries, err := e.embedChunks(ctx, span, col, doc, input)
 	if err != nil {
-		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("chunk: %w", err))
-	}
-	span.SetAttributes(telemetry.ChunkCount.Int(len(chunkResults)))
-
-	// Build chunk entities.
-	chunks := make([]*chunk.Chunk, len(chunkResults))
-	for i, cr := range chunkResults {
-		chunks[i] = &chunk.Chunk{
-			ID:           id.NewChunkID(),
-			DocumentID:   doc.ID,
-			CollectionID: input.CollectionID,
-			TenantID:     tenantID,
-			Content:      cr.Content,
-			Index:        cr.Index,
-			StartOffset:  cr.StartOffset,
-			EndOffset:    cr.EndOffset,
-			TokenCount:   cr.TokenCount,
-			Metadata:     cr.Metadata,
-			CreatedAt:    time.Now().UTC(),
-		}
-	}
-
-	e.extensions.EmitIngestChunked(ctx, chunks)
-
-	// Embed the chunks.
-	texts := make([]string, len(chunks))
-	for i, ch := range chunks {
-		texts[i] = ch.Content
-	}
-
-	embedResults, err := e.embed(ctx, telemetry.EmbedIngest, texts)
-	if err != nil {
-		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("embed: %w", err))
-	}
-
-	e.extensions.EmitIngestEmbedded(ctx, chunks)
-
-	// Build vector entries.
-	entries := make([]vectorstore.Entry, len(chunks))
-	for i, ch := range chunks {
-		entries[i] = vectorstore.Entry{
-			ID:       ch.ID.String(),
-			Vector:   embedResults[i].Vector,
-			Content:  ch.Content,
-			Metadata: vectorMetadata(ch),
-		}
+		return e.failIngest(ctx, doc, input.CollectionID, err)
 	}
 
 	// Store chunks in metadata store.
@@ -515,6 +461,102 @@ func (e *Engine) ingest(ctx context.Context, span trace.Span, tenantID string, i
 	}, nil
 }
 
+// contentHash is the hex SHA-256 of content, the document's ContentHash.
+func contentHash(content string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+}
+
+// newDocument builds the pending document record for input under tenantID.
+func newDocument(tenantID string, input *IngestInput, hash string) *document.Document {
+	return &document.Document{
+		Entity:        weave.NewEntity(),
+		ID:            id.NewDocumentID(),
+		CollectionID:  input.CollectionID,
+		TenantID:      tenantID,
+		Title:         input.Title,
+		Source:        input.Source,
+		SourceType:    input.SourceType,
+		ContentHash:   hash,
+		ContentLength: len(input.Content),
+		Metadata:      input.Metadata,
+		SourceKey:     input.SourceKey,
+		State:         document.StatePending,
+	}
+}
+
+// embedChunks loads, chunks and embeds input's content for doc, and returns
+// the chunk rows and their vector entries, which carry doc's source key. It
+// sets weave.chunk.count on span once the content is chunked and fires the
+// chunked and embedded hooks. Its error is ready for failIngest.
+func (e *Engine) embedChunks(ctx context.Context, span trace.Span, col *collection.Collection, doc *document.Document, input *IngestInput) ([]*chunk.Chunk, []vectorstore.Entry, error) {
+	// Optionally load/extract text.
+	content := input.Content
+	if e.loader != nil && input.SourceType != "" && e.loader.Supports(input.SourceType) {
+		result, loadErr := e.loader.Load(ctx, strings.NewReader(content))
+		if loadErr != nil {
+			return nil, nil, loadErr
+		}
+		content = result.Content
+	}
+
+	// Chunk the content.
+	chunkOpts := &chunker.Options{
+		ChunkSize:    col.ChunkSize,
+		ChunkOverlap: col.ChunkOverlap,
+		Strategy:     col.ChunkStrategy,
+	}
+	chunkResults, err := e.chunk(ctx, content, chunkOpts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("chunk: %w", err)
+	}
+	span.SetAttributes(telemetry.ChunkCount.Int(len(chunkResults)))
+
+	// Build chunk entities.
+	chunks := make([]*chunk.Chunk, len(chunkResults))
+	for i, cr := range chunkResults {
+		chunks[i] = &chunk.Chunk{
+			ID:           id.NewChunkID(),
+			DocumentID:   doc.ID,
+			CollectionID: doc.CollectionID,
+			TenantID:     doc.TenantID,
+			Content:      cr.Content,
+			Index:        cr.Index,
+			StartOffset:  cr.StartOffset,
+			EndOffset:    cr.EndOffset,
+			TokenCount:   cr.TokenCount,
+			Metadata:     cr.Metadata,
+			CreatedAt:    time.Now().UTC(),
+		}
+	}
+
+	e.extensions.EmitIngestChunked(ctx, chunks)
+
+	// Embed the chunks.
+	texts := make([]string, len(chunks))
+	for i, ch := range chunks {
+		texts[i] = ch.Content
+	}
+
+	embedResults, err := e.embed(ctx, telemetry.EmbedIngest, texts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("embed: %w", err)
+	}
+
+	e.extensions.EmitIngestEmbedded(ctx, chunks)
+
+	// Build vector entries.
+	entries := make([]vectorstore.Entry, len(chunks))
+	for i, ch := range chunks {
+		entries[i] = vectorstore.Entry{
+			ID:       ch.ID.String(),
+			Vector:   embedResults[i].Vector,
+			Content:  ch.Content,
+			Metadata: vectorMetadata(ch, doc.SourceKey),
+		}
+	}
+	return chunks, entries, nil
+}
+
 // IngestBatch ingests multiple documents into a collection.
 func (e *Engine) IngestBatch(ctx context.Context, inputs []*IngestInput) ([]*IngestResult, error) {
 	ctx, _, err := e.tenant(ctx)
@@ -532,11 +574,14 @@ func (e *Engine) IngestBatch(ctx context.Context, inputs []*IngestInput) ([]*Ing
 	return results, nil
 }
 
-// failIngest marks a document as failed and emits the failure event.
+// failIngest marks a document as failed and emits the failure event. It
+// writes a copy of doc, so a store that keeps the pointer it was handed
+// (the memory store does) never sees the caller's value change under it.
 func (e *Engine) failIngest(ctx context.Context, doc *document.Document, colID id.CollectionID, ingestErr error) (*IngestResult, error) {
-	doc.State = document.StateFailed
-	doc.Error = ingestErr.Error()
-	_ = e.store.UpdateDocument(ctx, doc) //nolint:errcheck // best-effort status update
+	failed := *doc
+	failed.State = document.StateFailed
+	failed.Error = ingestErr.Error()
+	_ = e.store.UpdateDocument(ctx, &failed) //nolint:errcheck // best-effort status update
 
 	e.extensions.EmitIngestFailed(ctx, colID, ingestErr)
 
@@ -612,7 +657,9 @@ type ScoredChunk struct {
 	// ID, so every field on it is real.
 	Hydrated bool `json:"hydrated"`
 	// Orphaned is true when the vector store returned a chunk ID that has no
-	// row in the metadata store. The hit keeps its rank and its text.
+	// row in the metadata store. The hit keeps its rank and its text. A
+	// source-keyed document's vector with no row is dropped instead, since
+	// it belongs to a version not yet swapped in or already replaced.
 	Orphaned bool `json:"orphaned,omitempty"`
 }
 
@@ -621,7 +668,8 @@ type ScoredChunk struct {
 // WithCollection that the tenant doesn't have is ErrCollectionNotFound,
 // before the query is embedded. Each hit is read back from the
 // metadata store by chunk ID; a hit whose row is missing is kept and marked
-// Orphaned, as long as its vector is labelled with the tenant.
+// Orphaned, as long as its vector is labelled with the tenant and carries no
+// source_key. A source-keyed hit without a row is dropped.
 func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOption) ([]ScoredChunk, error) {
 	if e.retriever == nil && (e.embedder == nil || e.vectorStore == nil) {
 		return nil, fmt.Errorf("weave: no retriever or embedder+vectorstore configured")
@@ -782,7 +830,8 @@ func (e *Engine) hydrate(ctx context.Context, tenant string, hits []ScoredChunk)
 // hydrateHit reads h's chunk back within tenant and reports whether to keep
 // the hit. A hit whose vector is labelled with another tenant is dropped,
 // and so is a missing row whose vector isn't labelled with tenant, so an
-// Orphaned hit never carries another tenant's text. The built-in stores
+// Orphaned hit never carries another tenant's text. A missing row whose
+// vector carries a source_key is dropped as well (see the case below). The built-in stores
 // never return either; a custom vector store or retriever that ignores the
 // tenant filter can. A hit with no chunk, or no chunk ID (a custom
 // retriever that sets none), is otherwise left as it is, unhydrated.
@@ -803,7 +852,10 @@ func (e *Engine) hydrateHit(ctx context.Context, tenant string, h *ScoredChunk) 
 	}
 	switch {
 	case errors.Is(err, weave.ErrChunkNotFound):
-		if label != tenant {
+		// A source-keyed vector with no row is a version that isn't swapped
+		// in yet, or one already replaced, so it is never shown: Retrieve
+		// never returns two versions of one source.
+		if label != tenant || h.Chunk.Metadata["source_key"] != "" {
 			return false, nil
 		}
 		h.Orphaned = true
@@ -828,7 +880,10 @@ func hydratedCopy(row *chunk.Chunk, vectorMeta map[string]string) *chunk.Chunk {
 	maps.Copy(out.Metadata, row.Metadata)
 	maps.Copy(out.Metadata, vectorMetadata(&chunk.Chunk{
 		CollectionID: row.CollectionID, DocumentID: row.DocumentID, TenantID: row.TenantID, Index: row.Index,
-	}))
+	}, vectorMeta["source_key"]))
+	if vectorMeta["source_key"] == "" {
+		delete(out.Metadata, "source_key")
+	}
 	return &out
 }
 
@@ -1011,7 +1066,7 @@ func (e *Engine) reindex(ctx context.Context, tenant string, colID id.Collection
 				ID:       ch.ID.String(),
 				Vector:   embedResults[i].Vector,
 				Content:  ch.Content,
-				Metadata: vectorMetadata(ch),
+				Metadata: vectorMetadata(ch, doc.SourceKey),
 			}
 		}
 

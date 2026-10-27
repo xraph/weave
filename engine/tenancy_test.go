@@ -60,6 +60,11 @@ func TestEveryEngineCallRefusesAMissingTenant(t *testing.T) {
 			_, err := r.Engine.Ingest(ctx, &engine.IngestInput{CollectionID: col.ID, Content: "new words"})
 			return err
 		}},
+		{"Ingest keyed", func(ctx context.Context) error {
+			_, err := r.Engine.Ingest(ctx, &engine.IngestInput{CollectionID: col.ID, SourceKey: "a", Content: "new words"})
+			return err
+		}},
+		{"DeleteBySource", func(ctx context.Context) error { return r.Engine.DeleteBySource(ctx, col.ID, "a") }},
 		{"IngestBatch", func(ctx context.Context) error {
 			_, err := r.Engine.IngestBatch(ctx, []*engine.IngestInput{{CollectionID: col.ID, Content: "new words"}})
 			return err

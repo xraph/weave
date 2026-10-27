@@ -1,6 +1,6 @@
 ---
 title: HTTP API
-description: How the 13 Weave routes are mounted, scoped to tenants and mapped to errors.
+description: How the 14 Weave routes are mounted, scoped to tenants and mapped to errors.
 ---
 
 The `api` package turns engine calls into Forge routes with OpenAPI metadata. The Forge extension mounts them under `/weave`, so the full paths start with `/weave/v1`. Every route takes and returns JSON. The [HTTP API reference](/docs/api-reference/http-api) has each route's request and response.
@@ -50,10 +50,13 @@ if err := a.RegisterRoutes(router.Group("/weave")); err != nil { // /weave/v1/..
 | `POST /weave/v1/collections/:collectionId/documents` | Ingest one document |
 | `POST /weave/v1/collections/:collectionId/documents/batch` | Ingest several |
 | `GET /weave/v1/collections/:collectionId/documents` | List documents |
+| `DELETE /weave/v1/collections/:collectionId/documents?source_key=...` | Delete every document of a source, with chunks and vectors |
 | `GET /weave/v1/documents/:documentId` | Get a document |
 | `DELETE /weave/v1/documents/:documentId` | Delete a document and its chunks and vectors |
 | `POST /weave/v1/collections/:collectionId/retrieve` | Retrieve from one collection |
 | `POST /weave/v1/search` | Search across collections |
+
+Both ingest routes take an optional `source_key` per document, which turns the ingest into an upsert of that source (see [Upsert by source](/docs/subsystems/ingestion#upsert-by-source)). The delete route answers 204 even when the source has nothing under it, and 400 when `source_key` is missing or blank.
 
 The routes are tagged `collections`, `documents` and `retrieval` in the OpenAPI spec.
 
@@ -80,9 +83,9 @@ A request whose context has no tenant gets a 403 on every route. The check runs 
 
 | Status | When |
 |--------|------|
-| 400 | A malformed ID, a missing `name`, `content` or `query`, or an engine `ErrInvalidArgument` |
+| 400 | A malformed ID, a missing `name`, `content`, `query` or `source_key`, or an engine `ErrInvalidArgument` (a `source_key` over 1024 bytes, say) |
 | 403 | The request context has no tenant |
-| 404 | The collection or document isn't there in the request's tenant: get, delete, stats, reindex, ingest, batch ingest, list documents, retrieve, and search with `collections` |
+| 404 | The collection or document isn't there in the request's tenant: get, delete, stats, reindex, ingest, batch ingest, list documents, delete by source, retrieve, and search with `collections` |
 | 500 | Anything else |
 
 400, 403 and 404 have this body:

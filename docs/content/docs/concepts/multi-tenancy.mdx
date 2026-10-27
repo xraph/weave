@@ -58,7 +58,7 @@ Weave v1.8 let you write with no tenant, and its dashboard always did, so an exi
 
 ## Retrieval
 
-At ingest, each vector's metadata gets `tenant_id`, `collection_id`, `document_id` and `chunk_index`. Weave writes those four after it copies the chunker's own metadata, so a chunker that emits a `tenant_id` key can't move a vector into another tenant's search.
+At ingest, each vector's metadata gets `tenant_id`, `collection_id`, `document_id` and `chunk_index`. Weave writes those four after it copies the chunker's own metadata, so a chunker that emits a `tenant_id` key can't move a vector into another tenant's search. A source-keyed document's vectors also get `source_key`, written the same way, and a chunker's own `source_key` key is removed from every vector.
 
 `Retrieve` checks the tenant before it embeds anything. Without one it returns `ErrTenantRequired` and the embedder is never called. With one, it searches only that tenant's vectors and reads each hit back within it:
 

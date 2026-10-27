@@ -27,7 +27,7 @@ Every span below comes from the tracer `github.com/xraph/weave` and is `Internal
 
 | Span | Parent | Attributes |
 |------|--------|------------|
-| `ingest document` | the caller's span | `weave.collection.id`, `weave.document.id`, `weave.chunker.kind`, `weave.vectorstore.kind`, `weave.content.bytes`, `weave.chunk.count` (once the content is chunked, so a later failure keeps it), `weave.result` |
+| `ingest document` | the caller's span | `weave.collection.id`, `weave.document.id`, `weave.chunker.kind`, `weave.vectorstore.kind`, `weave.content.bytes`, `weave.chunk.count` (once the content is chunked, so a later failure keeps it), `weave.result`, and on a source-keyed ingest `weave.ingest.unchanged` (true when the source already held the content and nothing was embedded) and `weave.ingest.replaced` (how many previous versions it replaced) |
 | `chunk document` | `ingest document` | `weave.chunker.kind`, `weave.chunk.count` |
 | `embed texts` | `ingest document`, `retrieve chunks`, `reindex collection` or the caller's span | `gen_ai.operation.name` (`embeddings`), `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `weave.embed.operation`, `weave.embed.inputs` |
 | `upsert vectors` | `ingest document` or `reindex collection` | `weave.vectorstore.kind`, `weave.vector.count` |
@@ -38,7 +38,7 @@ Every span below comes from the tracer `github.com/xraph/weave` and is `Internal
 
 `embed texts` and `search vectors` sit straight under the caller's span when `RetrieveCompare` makes them (the dashboard's retrieval page). `gen_ai.request.model` is the `model` param an embedder reports through `weave.Describer`, so an embedder that doesn't describe itself has no model on its span. `gen_ai.usage.input_tokens` doesn't depend on that: it's the sum of the `TokenCount` values the embedder returns, set whenever that sum is above zero. The OpenAI embedder sets both.
 
-`retrieve chunks` reads each hit back with one `GetChunk`. You'll see those as grove spans, and the totals as `weave.retrieve.hydrated` and `weave.retrieve.orphaned`. An orphan is a hit whose chunk row is gone from the metadata store.
+`retrieve chunks` reads each hit back with one `GetChunk`. You'll see those as grove spans, and the totals as `weave.retrieve.hydrated` and `weave.retrieve.orphaned`. An orphan is a hit whose chunk row is gone from the metadata store. A source-keyed hit without a chunk row isn't an orphan: it belongs to a version mid-swap, retrieval drops it, and it counts toward neither total.
 
 When you configure a retriever, it embeds the query and searches with its own embedder and vector store. Those calls happen inside `retrieve chunks` but get no `embed texts` or `search vectors` span of their own, and they don't count towards the GenAI metrics. The OpenAI embedder's `POST` span still shows the provider call.
 

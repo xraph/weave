@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/xraph/forge"
 
@@ -28,6 +29,7 @@ func (a *API) ingestDocument(ctx forge.Context, req *IngestDocumentRequest) (*en
 		SourceType:   req.SourceType,
 		Content:      req.Content,
 		Metadata:     req.Metadata,
+		SourceKey:    req.SourceKey,
 	})
 	if err != nil {
 		return nil, mapStoreError(err)
@@ -54,6 +56,7 @@ func (a *API) ingestBatch(ctx forge.Context, req *IngestBatchRequest) (*struct{}
 			SourceType:   doc.SourceType,
 			Content:      doc.Content,
 			Metadata:     doc.Metadata,
+			SourceKey:    doc.SourceKey,
 		}
 	}
 
@@ -111,6 +114,22 @@ func (a *API) deleteDocument(ctx forge.Context, _ *DeleteDocumentRequest) (*stru
 	}
 
 	if err := a.eng.DeleteDocument(ctx.Context(), docID); err != nil {
+		return nil, mapStoreError(err)
+	}
+
+	return nil, ctx.NoContent(http.StatusNoContent)
+}
+
+func (a *API) deleteDocumentsBySource(ctx forge.Context, req *DeleteDocumentsBySourceRequest) (*struct{}, error) {
+	colID, err := id.ParseCollectionID(ctx.Param("collectionId"))
+	if err != nil {
+		return nil, forge.BadRequest(fmt.Sprintf("invalid collection ID: %v", err))
+	}
+	if strings.TrimSpace(req.SourceKey) == "" {
+		return nil, forge.BadRequest("source_key is required")
+	}
+
+	if err := a.eng.DeleteBySource(ctx.Context(), colID, req.SourceKey); err != nil {
 		return nil, mapStoreError(err)
 	}
 

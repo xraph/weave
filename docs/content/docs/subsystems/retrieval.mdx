@@ -49,6 +49,8 @@ type ScoredChunk struct {
 
 After the search, the engine reads every hit's chunk back from the metadata store by ID, so `Chunk` carries the real `DocumentID`, `Index`, offsets and metadata, and `Hydrated` is `true`. If the vector store returns a chunk ID the metadata store doesn't have, the hit keeps its place and its text, and `Orphaned` is `true`, as long as the vector is labelled with your tenant. A custom retriever that returns chunks without IDs gets them back unhydrated.
 
+There's one exception to keeping orphans. A hit whose chunk row is missing and whose vector carries a non-empty `source_key` is dropped from the results, not marked `Orphaned`. During a [source upsert](/docs/subsystems/ingestion#upsert-by-source) the new version's vectors are written before its chunk rows exist, and once the swap commits the old version's chunk rows are gone while its vectors wait to be purged. Either way the vector belongs to a version that isn't the current one, and `Retrieve` drops it, so you never get two versions of one source back, or a half-written one. Orphans without `source_key` behave as before. A dropped hit can leave you with fewer than `TopK` results for the moment it takes the swap to finish.
+
 What `Score` means depends on the setup. The in-memory and pgvector stores return cosine similarity, MMR keeps that score but reorders, hybrid returns an RRF sum, and the reranker returns the reranker's score. `eng.Components().Score` tells you which one an engine produces.
 
 ## Retrieve never crosses tenants
@@ -59,7 +61,7 @@ You get hits from the context tenant and from nobody else, whatever the query, t
 - `WithTenantID`, `WithTenantFilter` or `CompareParams.Tenant` naming a tenant other than the context's is `weave.ErrInvalidArgument`. They can't widen the search or switch it to someone else.
 - The search filter always carries `tenant_id`, and `TenantKey` is always set.
 - A collection you name with `WithCollection`, in `HybridSearchParams.Collections` or in `CompareParams.CollectionID` is read within the tenant first. Another tenant's collection, or one that doesn't exist, is `weave.ErrCollectionNotFound`, and the query is never embedded. `HybridSearch` checks every named collection before it searches any of them.
-- Each hit is read back within the tenant. A hit labelled with another tenant is dropped, and so is an orphan whose vector isn't labelled with yours.
+- Each hit is read back within the tenant. A hit labelled with another tenant is dropped, and so is an orphan whose vector isn't labelled with yours. A source-keyed orphan is dropped too, see above.
 - `HybridSearch` and `RetrieveCompare` follow the same rules.
 
 To search a collection several tenants share, such as product docs, keep it under a tenant of its own and call `Retrieve` again under that tenant's context, then merge:

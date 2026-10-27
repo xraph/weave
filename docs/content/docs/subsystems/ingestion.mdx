@@ -37,6 +37,7 @@ result, err := eng.Ingest(ctx, &engine.IngestInput{
 | `SourceType` | `string` | MIME type. Runs the loader when it supports this type. |
 | `Content` | `string` | Raw content. Empty content returns `weave.ErrEmptyContent`. |
 | `Metadata` | `map[string]string` | Stored on the document |
+| `SourceKey` | `string` | Makes the ingest an upsert of this source. Up to 1024 bytes and not blank, or `weave.ErrInvalidArgument`. See [Upsert by source](#upsert-by-source). |
 
 ## Ingestion pipeline
 
@@ -52,12 +53,14 @@ result, err := eng.Ingest(ctx, &engine.IngestInput{
 8. Embed all chunk texts in one `Embed` call and fire `OnIngestEmbedded`.
 9. Write the chunks to the metadata store.
 10. Upsert one vector per chunk, with `collection_id`, `document_id`, `tenant_id` and `chunk_index` in its metadata.
+
+That's the path for an input without a `SourceKey`. A keyed ingest runs a different order, covered below.
 11. Update the document to `State=ready` with its `ChunkCount`.
 12. Fire `OnIngestCompleted` with the elapsed time.
 
 If step 6 or anything after it fails, the document is set to `State=failed`, the error text goes in `Document.Error`, `OnIngestFailed` fires, and `Ingest` returns an `IngestResult` with the document ID and `State=failed` alongside an error wrapped as `weave: ingest failed: ...`.
 
-A failed ingest doesn't clean up after itself. The document row stays, and if the failure came after step 9 the chunks stay too. Delete it with `DeleteDocument` before you retry, because the leftover row holds the same content hash.
+A failed ingest doesn't clean up after itself. The document row stays, and if the failure came after step 9 the chunks stay too. Delete it with `DeleteDocument` before you retry, because the leftover row holds the same content hash. A keyed ingest clears its own failed copy, see [Upsert by source](#upsert-by-source).
 
 The state updates in steps 5 and 11 are best effort: if the store write fails, `Ingest` doesn't notice.
 
@@ -73,6 +76,57 @@ if errors.Is(err, weave.ErrDuplicateDocument) {
 ```
 
 The same content in a different collection is fine.
+
+## Upsert by source
+
+Set `SourceKey` when the same thing gets ingested again and again, like a docs page you re-read on every deploy. You name the source, and Weave keeps one current version of it per collection:
+
+```go
+res, err := eng.Ingest(ctx, &engine.IngestInput{
+    CollectionID: colID,
+    SourceKey:    "docs/getting-started.md",
+    Title:        "Getting started",
+    Content:      page,
+})
+switch {
+case err != nil:
+    return err
+case res.Unchanged:
+    // same content as the current version: nothing was embedded
+case len(res.Replaced) > 0:
+    // res.Replaced holds the IDs of the versions this one replaced
+}
+```
+
+Three outcomes:
+
+- Same content as before: `Ingest` returns the existing document's ID with `Unchanged: true` and a nil error. Nothing is chunked or embedded, so re-ingesting a whole docs set at boot costs no embedding calls when nothing changed. If the same content is still being ingested by another call, you get that document's ID with its `pending` or `processing` state, also `Unchanged`.
+- New content: the new version is embedded beside the old one, then swapped in. `Replaced` lists the old version's ID, and that version is gone by the time `Ingest` returns: row, chunks and vectors.
+- Content that already lives under another key, or under no key: that's still `weave.ErrDuplicateDocument`, because the content hash rule doesn't care about keys. Treat it as "already indexed".
+
+The tenant and the collection are checked before anything else, so a keyed ingest into a collection your tenant doesn't have is `weave.ErrCollectionNotFound` with no embedding call.
+
+Here's the keyed order. It differs from the plain one so a search never sees two versions of one source, or neither:
+
+1. Purge any document of the source left `superseded` by a replace that stopped before it finished.
+2. Look for a document of the source with this content hash. A `ready`, `pending` or `processing` one is the `Unchanged` answer. A `failed` one is purged, so the retry can go ahead.
+3. Create the new document with the key. If the insert hits the content hash rule, the source is listed again: a concurrent ingest of the same content won the insert, and you get its document as `Unchanged`. Otherwise the error is `weave.ErrDuplicateDocument`.
+4. Mark it `processing`, load, chunk and embed as usual. Every vector's metadata also carries `source_key`.
+5. Upsert the vectors. No chunk rows are written yet, and retrieval drops a source-keyed vector without a chunk row, so the new version stays invisible.
+6. Call the store's `ReplaceSourceDocument`. In one step it marks the old `ready` and `failed` versions `superseded`, deletes their chunks, writes the new chunks and makes the new document `ready`. From here the old vectors have no rows and are the ones retrieval drops.
+7. Purge each superseded version's vectors and row.
+
+If anything from step 4 on fails, the new document ends `failed`, the vectors it wrote are deleted, and the old version keeps answering searches. Ingest the same content again and step 2 clears the failed copy. A purge that fails in step 7 is only logged at warn level; the next ingest of the source finishes it in step 1.
+
+Several replicas can run the same keyed ingest at once. With the same content, one call does the work and the rest come back `Unchanged`. With different content, every call succeeds and the source ends with one `ready` document, whichever finished last. On MongoDB this needs a replica set, see [MongoDB](/docs/stores/mongo).
+
+To remove a source, use `DeleteBySource`:
+
+```go
+err := eng.DeleteBySource(ctx, colID, "docs/getting-started.md")
+```
+
+It deletes every document of the key in the collection, in any state, with their chunks and vectors. A key with nothing under it returns nil. Another tenant's collection is `weave.ErrCollectionNotFound`, and an empty or blank key is `weave.ErrInvalidArgument`.
 
 ## Batch ingestion
 
@@ -96,8 +150,10 @@ To re-embed a collection with the engine's current embedder:
 err := eng.ReindexCollection(ctx, colID)
 ```
 
-Reindex fires `OnReindexStarted`, lists the collection's `ready` documents, deletes every vector with that `collection_id`, then embeds each document's stored chunks again and upserts them. `OnReindexCompleted` fires at the end. The chunks themselves aren't rebuilt, so changing a collection's chunk size has no effect on documents already ingested.
+Reindex fires `OnReindexStarted`, lists the collection's `ready` documents, deletes every vector with that `collection_id`, then embeds each document's stored chunks again and upserts them, with the same metadata keys ingest writes (`source_key` included, for a keyed document). `OnReindexCompleted` fires at the end. The chunks themselves aren't rebuilt, so changing a collection's chunk size has no effect on documents already ingested.
 
 ## Deleting
 
 `DeleteDocument` removes the document's vectors (by `document_id`), its chunks and the document row, then fires `OnDocumentDeleted`. `DeleteCollection` does the same for a whole collection. A failed vector delete is logged at warn level and doesn't stop the metadata delete.
+
+`DeleteBySource` is stricter about that. It deletes the source's vectors first, filtered by collection, `source_key` and tenant, and a failure there returns the error before any row is touched, so you can just call it again. It fires `OnDocumentDeleted` once per document it removes.

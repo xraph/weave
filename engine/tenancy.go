@@ -115,9 +115,11 @@ func chunkTenant(c *chunk.Chunk) string                { return c.TenantID }
 
 // vectorMetadata builds a vector entry's metadata: the chunk's own keys
 // first, then the reserved keys tenancy and hydration rest on, so a
-// chunker's metadata can never overwrite them.
-func vectorMetadata(ch *chunk.Chunk) map[string]string {
-	meta := make(map[string]string, len(ch.Metadata)+4)
+// chunker's metadata can never overwrite them. source_key is reserved too:
+// it is set to sourceKey, the document's, and removed when that is empty, so
+// only a source-keyed document's vectors ever carry it.
+func vectorMetadata(ch *chunk.Chunk, sourceKey string) map[string]string {
+	meta := make(map[string]string, len(ch.Metadata)+5)
 	for k, v := range ch.Metadata {
 		meta[k] = v
 	}
@@ -125,5 +127,10 @@ func vectorMetadata(ch *chunk.Chunk) map[string]string {
 	meta["document_id"] = ch.DocumentID.String()
 	meta["tenant_id"] = ch.TenantID
 	meta["chunk_index"] = fmt.Sprintf("%d", ch.Index)
+	if sourceKey != "" {
+		meta["source_key"] = sourceKey
+	} else {
+		delete(meta, "source_key")
+	}
 	return meta
 }

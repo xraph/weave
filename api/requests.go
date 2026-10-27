@@ -58,6 +58,7 @@ type IngestDocumentRequest struct {
 	SourceType   string            `json:"source_type,omitempty" description:"MIME type or format hint"`
 	Content      string            `json:"content" description:"Document text content"`
 	Metadata     map[string]string `json:"metadata,omitempty" description:"Custom metadata"`
+	SourceKey    string            `json:"source_key,omitempty" description:"Source this document is the current version of; ingesting the key again replaces it (up to 1024 bytes)"`
 }
 
 // IngestBatchRequest is the request body for batch document ingestion.
@@ -69,6 +70,7 @@ type IngestBatchRequest struct {
 		SourceType string            `json:"source_type,omitempty" description:"MIME type or format"`
 		Content    string            `json:"content" description:"Document text content"`
 		Metadata   map[string]string `json:"metadata,omitempty" description:"Custom metadata"`
+		SourceKey  string            `json:"source_key,omitempty" description:"Source this document is the current version of (up to 1024 bytes)"`
 	} `json:"documents" description:"Documents to ingest"`
 }
 
@@ -88,6 +90,13 @@ type ListDocumentsRequest struct {
 // DeleteDocumentRequest is the request for deleting a document.
 type DeleteDocumentRequest struct {
 	DocumentID string `path:"documentId" description:"Document ID"`
+}
+
+// DeleteDocumentsBySourceRequest is the request for deleting every document
+// of a source in a collection.
+type DeleteDocumentsBySourceRequest struct {
+	CollectionID string `path:"collectionId" description:"Collection ID"`
+	SourceKey    string `query:"source_key" optional:"true" description:"Source key whose documents to delete (required)"`
 }
 
 // ──────────────────────────────────────────────────

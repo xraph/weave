@@ -14,6 +14,7 @@ import (
 	"github.com/xraph/weave/api"
 	"github.com/xraph/weave/chunker"
 	"github.com/xraph/weave/collection"
+	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/id"
 	"github.com/xraph/weave/internal/embedtest"
@@ -82,6 +83,7 @@ func TestRoutesAnswerForbiddenWithoutTenant(t *testing.T) {
 		{http.MethodGet, "/v1/collections/" + col.String() + "/documents", ""},
 		{http.MethodGet, "/v1/documents/" + doc.String(), ""},
 		{http.MethodDelete, "/v1/documents/" + doc.String(), ""},
+		{http.MethodDelete, "/v1/collections/" + col.String() + "/documents?source_key=a", ""},
 		{http.MethodPost, "/v1/collections/" + col.String() + "/retrieve", `{"query":"refunds"}`},
 		{http.MethodPost, "/v1/search", `{"query":"refunds"}`},
 		// Malformed requests are refused for the missing tenant first.
@@ -149,6 +151,7 @@ func TestRoutesUseTheRequestTenant(t *testing.T) {
 		{http.MethodPost, "/v1/collections/" + theirCol.String() + "/documents", `{"content":"more words"}`},
 		{http.MethodPost, "/v1/collections/" + theirCol.String() + "/documents/batch", `{"documents":[{"content":"more words"}]}`},
 		{http.MethodGet, "/v1/collections/" + theirCol.String() + "/documents", ""},
+		{http.MethodDelete, "/v1/collections/" + theirCol.String() + "/documents?source_key=a", ""},
 		{http.MethodPost, "/v1/collections/" + theirCol.String() + "/retrieve", `{"query":"refunds","top_k":5}`},
 		{http.MethodPost, "/v1/search", `{"query":"refunds","collections":["` + theirCol.String() + `"]}`},
 	} {
@@ -204,5 +207,76 @@ func TestEmptyResultsAreArrays(t *testing.T) {
 		if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
 			t.Errorf("%s %s: status %d, body %q; want 200 []", rt.method, rt.path, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestDeleteBySourceRoute(t *testing.T) {
+	e := newEngine(t)
+	ctx := weave.WithTenant(context.Background(), "t1")
+	col := &collection.Collection{Name: "docs", ChunkSize: 512}
+	if err := e.CreateCollection(ctx, col); err != nil {
+		t.Fatalf("create collection: %v", err)
+	}
+	router := forge.NewRouter()
+	router.Use(func(next forge.Handler) forge.Handler {
+		return func(c forge.Context) error {
+			c.WithContext(weave.WithTenant(c.Context(), "t1"))
+			return next(c)
+		}
+	})
+	h := api.New(e, router).Handler()
+
+	rec := do(t, h, http.MethodPost, "/v1/collections/"+col.ID.String()+"/documents", `{"content":"refunds are issued within thirty days","source_key":"a"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("ingest under source a: status %d (%s)", rec.Code, rec.Body.String())
+	}
+	var first engine.IngestResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &first); err != nil {
+		t.Fatalf("decode ingest result: %v", err)
+	}
+	rec = do(t, h, http.MethodPost, "/v1/collections/"+col.ID.String()+"/documents/batch",
+		`{"documents":[{"content":"refunds are issued within thirty days","source_key":"a"},{"content":"shipping takes five days","source_key":"b"}]}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("batch ingest: status %d (%s)", rec.Code, rec.Body.String())
+	}
+	var batch []engine.IngestResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &batch); err != nil || len(batch) != 2 {
+		t.Fatalf("decode batch result: %v (%s)", err, rec.Body.String())
+	}
+	if !batch[0].Unchanged || batch[0].DocumentID.String() != first.DocumentID.String() {
+		t.Errorf("batch item under source a: %+v, want %s unchanged", batch[0], first.DocumentID)
+	}
+
+	sourceDocs := func(key string) int {
+		t.Helper()
+		docs, err := e.ListDocuments(ctx, &document.ListFilter{CollectionID: col.ID, SourceKey: key})
+		if err != nil {
+			t.Fatalf("list source %s: %v", key, err)
+		}
+		return len(docs)
+	}
+
+	for _, path := range []string{
+		"/v1/collections/" + col.ID.String() + "/documents",
+		"/v1/collections/" + col.ID.String() + "/documents?source_key=",
+		"/v1/collections/" + col.ID.String() + "/documents?source_key=%20%20",
+	} {
+		if got := do(t, h, http.MethodDelete, path, ""); got.Code != http.StatusBadRequest {
+			t.Errorf("DELETE %s: status %d (%s), want 400", path, got.Code, got.Body.String())
+		}
+	}
+	if sourceDocs("a") != 1 || sourceDocs("b") != 1 {
+		t.Fatalf("after the refused deletes: sources a and b hold %d and %d documents, want 1 each", sourceDocs("a"), sourceDocs("b"))
+	}
+
+	rec = do(t, h, http.MethodDelete, "/v1/collections/"+col.ID.String()+"/documents?source_key=a", "")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete source a: status %d (%s), want 204", rec.Code, rec.Body.String())
+	}
+	if sourceDocs("a") != 0 || sourceDocs("b") != 1 {
+		t.Errorf("after deleting a: sources a and b hold %d and %d documents, want 0 and 1", sourceDocs("a"), sourceDocs("b"))
+	}
+	if got := do(t, h, http.MethodDelete, "/v1/collections/"+col.ID.String()+"/documents?source_key=a", ""); got.Code != http.StatusNoContent {
+		t.Errorf("delete source a again: status %d (%s), want 204", got.Code, got.Body.String())
 	}
 }
