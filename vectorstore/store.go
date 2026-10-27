@@ -5,7 +5,7 @@ package vectorstore
 import "context"
 
 // VectorStore is the pluggable interface for vector storage and retrieval.
-// Separate from the metadata store — this handles embeddings.
+// It is separate from the metadata store and holds the embeddings.
 type VectorStore interface {
 	// Upsert inserts or updates vector entries.
 	Upsert(ctx context.Context, entries []Entry) error

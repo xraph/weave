@@ -369,14 +369,14 @@ export function DeliveryFlowSection() {
             <SectionHeader
               badge="RAG Ingestion Pipeline"
               title="From document to searchable context."
-              description="Weave orchestrates the entire ingestion lifecycle — tenant scoping, text chunking, embedding generation, and vector storage."
+              description="Weave orchestrates the entire ingestion lifecycle: tenant scoping, text chunking, embedding generation, and vector storage."
               align="left"
             />
 
             <div className="mt-8 space-y-5">
               <FeatureBullet
                 title="Automatic Tenant Scoping"
-                description="Every ingestion and retrieval is stamped with TenantID and AppID from context. Collection and chunk isolation is enforced at the store layer — no tenant can access another's data."
+                description="Every ingestion and retrieval is stamped with TenantID and AppID from context. Collection and chunk isolation is enforced at the store layer, so no tenant can access another's data."
                 delay={0.2}
               />
               <FeatureBullet

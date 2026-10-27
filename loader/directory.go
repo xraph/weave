@@ -20,7 +20,7 @@ func NewDirectoryLoader(loaders ...Loader) *DirectoryLoader {
 	return &DirectoryLoader{loaders: loaders}
 }
 
-// Load is not supported for DirectoryLoader — use LoadDir instead.
+// Load is not supported for DirectoryLoader. Use LoadDir.
 func (l *DirectoryLoader) Load(_ context.Context, _ io.Reader) (*LoadResult, error) {
 	return nil, fmt.Errorf("weave: DirectoryLoader.Load not supported; use LoadDir")
 }
@@ -75,7 +75,7 @@ func (l *DirectoryLoader) LoadDir(ctx context.Context, dirPath string) ([]*LoadR
 	return results, err
 }
 
-// Supports always returns false — use LoadDir directly.
+// Supports always returns false. Use LoadDir directly.
 func (l *DirectoryLoader) Supports(_ string) bool { return false }
 
 func (l *DirectoryLoader) findLoader(mimeType string) Loader {
