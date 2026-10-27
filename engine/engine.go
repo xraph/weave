@@ -574,14 +574,30 @@ func (e *Engine) IngestBatch(ctx context.Context, inputs []*IngestInput) ([]*Ing
 	return results, nil
 }
 
-// failIngest marks a document as failed and emits the failure event. It
-// writes a copy of doc, so a store that keeps the pointer it was handed
-// (the memory store does) never sees the caller's value change under it.
+// cleanupTimeout bounds the writes a failed ingest makes once its own
+// context may already be cancelled.
+const cleanupTimeout = 30 * time.Second
+
+// cleanupContext returns a context for a failed ingest's cleanup: it keeps
+// ctx's values (the tenant among them) but not its cancellation, so a
+// request that gave up still gets its document marked failed, and it ends
+// after cleanupTimeout.
+func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+}
+
+// failIngest marks a document as failed and emits the failure event. The
+// write runs on a cleanup context (see cleanupContext), so a cancelled
+// request can't leave the document processing. It writes a copy of doc, so
+// a store that keeps the pointer it was handed (the memory store does)
+// never sees the caller's value change under it.
 func (e *Engine) failIngest(ctx context.Context, doc *document.Document, colID id.CollectionID, ingestErr error) (*IngestResult, error) {
 	failed := *doc
 	failed.State = document.StateFailed
 	failed.Error = ingestErr.Error()
-	_ = e.store.UpdateDocument(ctx, &failed) //nolint:errcheck // best-effort status update
+	cleanup, cancel := cleanupContext(ctx)
+	defer cancel()
+	_ = e.store.UpdateDocument(cleanup, &failed) //nolint:errcheck // best-effort status update
 
 	e.extensions.EmitIngestFailed(ctx, colID, ingestErr)
 
@@ -669,7 +685,8 @@ type ScoredChunk struct {
 // before the query is embedded. Each hit is read back from the
 // metadata store by chunk ID; a hit whose row is missing is kept and marked
 // Orphaned, as long as its vector is labelled with the tenant and carries no
-// source_key. A source-keyed hit without a row is dropped.
+// source_key. A source-keyed hit without a row is dropped, and the hits of
+// one source all come from one version of it (see oneVersionPerSource).
 func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOption) ([]ScoredChunk, error) {
 	if e.retriever == nil && (e.embedder == nil || e.vectorStore == nil) {
 		return nil, fmt.Errorf("weave: no retriever or embedder+vectorstore configured")
@@ -707,6 +724,9 @@ func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOpt
 	hits, err := e.retrieveRaw(ctx, query, params, tenant)
 	if err == nil {
 		hits, err = e.hydrate(ctx, tenant, hits)
+	}
+	if err == nil {
+		hits, err = e.oneVersionPerSource(ctx, tenant, hits)
 	}
 	if err != nil {
 		telemetry.Fail(span, err)
@@ -830,11 +850,12 @@ func (e *Engine) hydrate(ctx context.Context, tenant string, hits []ScoredChunk)
 // hydrateHit reads h's chunk back within tenant and reports whether to keep
 // the hit. A hit whose vector is labelled with another tenant is dropped,
 // and so is a missing row whose vector isn't labelled with tenant, so an
-// Orphaned hit never carries another tenant's text. A missing row whose
-// vector carries a source_key is dropped as well (see the case below). The built-in stores
+// Orphaned hit never carries another tenant's text. The built-in stores
 // never return either; a custom vector store or retriever that ignores the
-// tenant filter can. A hit with no chunk, or no chunk ID (a custom
-// retriever that sets none), is otherwise left as it is, unhydrated.
+// tenant filter can. A missing row whose vector carries a source_key is
+// dropped as well (see the case below). A hit with no chunk, or no chunk
+// ID (a custom retriever that sets none), is otherwise left as it is,
+// unhydrated.
 func (e *Engine) hydrateHit(ctx context.Context, tenant string, h *ScoredChunk) (bool, error) {
 	if h.Chunk == nil {
 		return true, nil
@@ -853,8 +874,7 @@ func (e *Engine) hydrateHit(ctx context.Context, tenant string, h *ScoredChunk) 
 	switch {
 	case errors.Is(err, weave.ErrChunkNotFound):
 		// A source-keyed vector with no row is a version that isn't swapped
-		// in yet, or one already replaced, so it is never shown: Retrieve
-		// never returns two versions of one source.
+		// in yet, or one already replaced, so it is never shown.
 		if label != tenant || h.Chunk.Metadata["source_key"] != "" {
 			return false, nil
 		}

@@ -3,9 +3,11 @@ package engine
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/xraph/weave"
+	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/id"
 	"github.com/xraph/weave/internal/telemetry"
 	"github.com/xraph/weave/retriever"
@@ -208,6 +210,17 @@ func (e *Engine) RetrieveCompare(ctx context.Context, query string, p ComparePar
 	if res.LeftOut, err = e.hydrateCompare(ctx, tenant, res.LeftOut); err != nil {
 		return nil, err
 	}
+	// One version per source across both lists, as Retrieve keeps.
+	chunks := make([]*chunk.Chunk, 0, len(res.Hits)+len(res.LeftOut))
+	for _, h := range slices.Concat(res.Hits, res.LeftOut) {
+		chunks = append(chunks, h.Chunk)
+	}
+	keep, err := e.currentVersions(ctx, tenant, chunks)
+	if err != nil {
+		return nil, err
+	}
+	res.Hits = slices.DeleteFunc(res.Hits, func(h CompareHit) bool { return !keep(h.Chunk) })
+	res.LeftOut = slices.DeleteFunc(res.LeftOut, func(h CompareHit) bool { return !keep(h.Chunk) })
 	return res, nil
 }
 

@@ -146,7 +146,7 @@ Ingest one document. Runs the whole load, chunk, embed and store pipeline before
 }
 ```
 
-`replaced` lists the previous versions a keyed ingest replaced, and is left out when there were none. When the source already holds this content you get `"unchanged": true` with the existing document's ID, and nothing was embedded. Its `state` can be `pending` or `processing` if another request is still ingesting that content.
+`replaced` lists the previous versions a keyed ingest replaced, and is left out when there were none. When the source already holds this content you get `"unchanged": true` with the existing document's ID, and nothing was embedded. `unchanged` always comes with `"state": "ready"`.
 
 Empty `content` and a blank or over-long `source_key` are 400s. A collection the tenant doesn't have is a 404, and nothing is embedded. Content already in the collection under another source key (or none) and embedder or store failures are 500s.
 

@@ -246,6 +246,10 @@ func TestDeleteBySourceRoute(t *testing.T) {
 	if !batch[0].Unchanged || batch[0].DocumentID.String() != first.DocumentID.String() {
 		t.Errorf("batch item under source a: %+v, want %s unchanged", batch[0], first.DocumentID)
 	}
+	if got := do(t, h, http.MethodPost, "/v1/collections/"+col.ID.String()+"/documents",
+		`{"content":"a new page","source_key":"`+strings.Repeat("k", 1025)+`"}`); got.Code != http.StatusBadRequest {
+		t.Errorf("ingest with a 1025-byte source_key: status %d (%s), want 400", got.Code, got.Body.String())
+	}
 
 	sourceDocs := func(key string) int {
 		t.Helper()
@@ -260,6 +264,7 @@ func TestDeleteBySourceRoute(t *testing.T) {
 		"/v1/collections/" + col.ID.String() + "/documents",
 		"/v1/collections/" + col.ID.String() + "/documents?source_key=",
 		"/v1/collections/" + col.ID.String() + "/documents?source_key=%20%20",
+		"/v1/collections/" + col.ID.String() + "/documents?source_key=" + strings.Repeat("k", 1025),
 	} {
 		if got := do(t, h, http.MethodDelete, path, ""); got.Code != http.StatusBadRequest {
 			t.Errorf("DELETE %s: status %d (%s), want 400", path, got.Code, got.Body.String())

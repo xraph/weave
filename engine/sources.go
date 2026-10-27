@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,9 +13,11 @@ import (
 	log "github.com/xraph/go-utils/log"
 
 	"github.com/xraph/weave"
+	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/id"
 	"github.com/xraph/weave/internal/telemetry"
+	"github.com/xraph/weave/vectorstore"
 )
 
 // maxSourceKeyBytes is the longest source key Ingest and DeleteBySource
@@ -35,10 +38,17 @@ func checkSourceKey(key string) error {
 
 // ingestSource is Ingest's body for an input with a SourceKey, run under
 // span for tenant. The collection is checked first, so nothing is embedded
-// for a collection the tenant doesn't have, and content the source already
-// holds is answered Unchanged without embedding it again. New content is
+// for a collection the tenant doesn't have, and content the source holds
+// ready is answered Unchanged without embedding it again. New content is
 // written beside the current version, whose vectors and chunks stay
 // searchable until ReplaceSourceDocument swaps the two in one step.
+//
+// A document of this content that is still pending or processing is
+// claimed: its ingest may have died with its request or its process, so
+// this one chunks and embeds again with chunk IDs of its own and races it
+// to ReplaceSourceDocument, which moves a document from processing to ready
+// once. The attempt that loses sees ErrInvalidState, finds the document
+// ready and answers Unchanged, and deletes only the vectors it wrote.
 func (e *Engine) ingestSource(ctx context.Context, span trace.Span, tenant string, input *IngestInput) (*IngestResult, error) {
 	start := time.Now()
 	col, err := e.getCollection(ctx, tenant, input.CollectionID)
@@ -63,64 +73,81 @@ func (e *Engine) ingestSource(ctx context.Context, span trace.Span, tenant strin
 		}
 	}
 
-	// The same content again is answered from what is there. A failed copy
-	// of it is purged so this ingest can try again.
-	if res := unchangedResult(current, hash); res != nil {
-		return res, nil
-	}
-	for _, d := range current {
-		if d.ContentHash != hash || d.State != document.StateFailed {
-			continue
-		}
-		if err = e.purgeDocument(ctx, tenant, d.ID); err != nil {
+	// A ready copy of the content is the answer, and a failed one is purged
+	// so this ingest can try again. A pending or processing one is claimed.
+	doc, owner := sameContent(current, hash), false
+	switch {
+	case doc == nil:
+	case doc.State == document.StateReady:
+		return unchanged(doc), nil
+	case doc.State == document.StateFailed:
+		if err = e.purgeDocument(ctx, tenant, doc.ID); err != nil {
 			return nil, fmt.Errorf("weave: purge failed document: %w", err)
 		}
+		doc = nil
 	}
 
-	doc := newDocument(tenant, input, hash)
-	if createErr := e.store.CreateDocument(ctx, doc); createErr != nil {
-		if errors.Is(createErr, weave.ErrDuplicateDocument) {
+	if doc == nil {
+		// The document starts processing, not pending. Nothing writes its
+		// state again before ReplaceSourceDocument, whose guarded move from
+		// processing to ready is the only step two attempts can race on, so
+		// a late write can never knock a version another attempt has just
+		// made ready back to processing.
+		doc = newDocument(tenant, input, hash)
+		doc.State = document.StateProcessing
+		if createErr := e.store.CreateDocument(ctx, doc); createErr != nil {
+			if !errors.Is(createErr, weave.ErrDuplicateDocument) {
+				return nil, fmt.Errorf("weave: create document: %w", createErr)
+			}
 			// A concurrent ingest of this source and content won the insert,
 			// or the content lives under another source or none.
 			again, listErr := e.sourceDocuments(ctx, tenant, col.ID, input.SourceKey)
 			if listErr != nil {
 				return nil, listErr
 			}
-			if res := unchangedResult(again, hash); res != nil {
-				return res, nil
+			doc = sameContent(again, hash)
+			switch {
+			case doc == nil || (doc.State != document.StatePending && doc.State != document.StateProcessing &&
+				doc.State != document.StateReady):
+				return nil, fmt.Errorf("weave: create document: %w", createErr)
+			case doc.State == document.StateReady:
+				return unchanged(doc), nil
 			}
+		} else {
+			owner = true
 		}
-		return nil, fmt.Errorf("weave: create document: %w", createErr)
 	}
 
 	e.extensions.EmitIngestStarted(ctx, input.CollectionID, []*document.Document{doc})
 
-	// Every write below hands the store a fresh copy: the memory store keeps
-	// the pointer it is given, and other ingests of the source read it.
-	processing := *doc
-	processing.State = document.StateProcessing
-	if err = e.store.UpdateDocument(ctx, &processing); err != nil {
-		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("mark processing: %w", err))
+	// A claimed document still pending (left by an ingest that isn't this
+	// engine's keyed path) is moved to processing first. Every write below
+	// hands the store a fresh copy: the memory store keeps the pointer it is
+	// given, and other ingests of the source read it.
+	if doc.State != document.StateProcessing {
+		processing := *doc
+		processing.State = document.StateProcessing
+		if err = e.store.UpdateDocument(ctx, &processing); err != nil {
+			return e.failSource(ctx, tenant, doc, owner, nil, fmt.Errorf("mark processing: %w", err))
+		}
+		doc = &processing
 	}
-	doc = &processing
 
 	chunks, entries, err := e.embedChunks(ctx, span, col, doc, input)
 	if err != nil {
-		return e.failIngest(ctx, doc, input.CollectionID, err)
+		return e.failSource(ctx, tenant, doc, owner, nil, err)
 	}
 
 	// The vectors go in before the chunk rows. Until the swap below they
 	// have no rows, so retrieval drops them (see hydrateHit).
 	if err = e.upsertVectors(ctx, entries); err != nil {
-		e.dropDocumentVectors(ctx, tenant, doc.ID)
-		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("upsert vectors: %w", err))
+		return e.failSource(ctx, tenant, doc, owner, entries, fmt.Errorf("upsert vectors: %w", err))
 	}
 
 	swap := *doc
 	superseded, err := e.store.ReplaceSourceDocument(ctx, &swap, chunks)
 	if err != nil {
-		e.dropDocumentVectors(ctx, tenant, doc.ID)
-		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("replace source document: %w", err))
+		return e.failSource(ctx, tenant, doc, owner, entries, fmt.Errorf("replace source document: %w", err))
 	}
 
 	// The superseded versions have no chunk rows left, so their vectors are
@@ -144,22 +171,46 @@ func (e *Engine) ingestSource(ctx context.Context, span trace.Span, tenant strin
 	}, nil
 }
 
-// unchangedResult is the answer for content the source already holds: a
-// ready document with hash, or one still pending or processing (the same
-// content is already in flight). It is nil when docs has neither.
-func unchangedResult(docs []*document.Document, hash string) *IngestResult {
+// failSource ends a keyed ingest attempt that failed with cause. It runs on
+// a context the request's cancellation can't stop, so a client that gives
+// up mid-embed still leaves the document failed and its vectors gone, and a
+// retry of the same content embeds again. It deletes the vectors this
+// attempt wrote, by their own IDs, since another attempt at the same
+// document may have written some too. When another attempt has made the
+// document ready meanwhile, the content is indexed and the answer is
+// Unchanged. Otherwise the owner (the attempt that created the document)
+// marks it failed through failIngest; a claimer leaves its state alone, so
+// it never writes failed over a version another attempt is finishing.
+func (e *Engine) failSource(ctx context.Context, tenant string, doc *document.Document, owner bool, entries []vectorstore.Entry, cause error) (*IngestResult, error) {
+	cleanup, cancel := cleanupContext(ctx)
+	defer cancel()
+	e.dropAttemptVectors(cleanup, entries)
+
+	if now, err := e.getDocument(cleanup, tenant, doc.ID); err == nil && now.State == document.StateReady {
+		return unchanged(now), nil
+	}
+	if owner {
+		return e.failIngest(ctx, doc, doc.CollectionID, cause)
+	}
+	e.extensions.EmitIngestFailed(ctx, doc.CollectionID, cause)
+	return &IngestResult{DocumentID: doc.ID, State: doc.State}, fmt.Errorf("weave: ingest failed: %w", cause)
+}
+
+// sameContent returns the document in docs with hash, or nil. A collection
+// holds one document per content hash, so there is at most one.
+func sameContent(docs []*document.Document, hash string) *document.Document {
 	for _, d := range docs {
-		if d.ContentHash != hash {
-			continue
-		}
-		switch d.State {
-		case document.StateReady:
-			return &IngestResult{DocumentID: d.ID, ChunkCount: d.ChunkCount, State: d.State, Unchanged: true}
-		case document.StatePending, document.StateProcessing:
-			return &IngestResult{DocumentID: d.ID, State: d.State, Unchanged: true}
+		if d.ContentHash == hash {
+			return d
 		}
 	}
 	return nil
+}
+
+// unchanged is the answer for content the source already holds in doc,
+// which is ready.
+func unchanged(doc *document.Document) *IngestResult {
+	return &IngestResult{DocumentID: doc.ID, ChunkCount: doc.ChunkCount, State: doc.State, Unchanged: true}
 }
 
 // sourceDocuments lists every document of sourceKey in colID within tenant,
@@ -193,16 +244,21 @@ func (e *Engine) purgeDocument(ctx context.Context, tenant string, docID id.Docu
 	return nil
 }
 
-// dropDocumentVectors deletes the vectors a failed keyed ingest wrote, so
-// they don't wait for the failed document to be purged. A failure is only
-// logged: retrieval already drops them, and the purge removes them later.
-func (e *Engine) dropDocumentVectors(ctx context.Context, tenant string, docID id.DocumentID) {
-	if err := e.vectorStore.DeleteByMetadata(ctx, map[string]string{
-		"document_id": docID.String(),
-		"tenant_id":   tenant,
-	}); err != nil {
+// dropAttemptVectors deletes the vectors in entries, which one ingest
+// attempt wrote, so they don't wait for a purge. A failure is only logged:
+// retrieval drops vectors without chunk rows, and the document's purge
+// removes them later.
+func (e *Engine) dropAttemptVectors(ctx context.Context, entries []vectorstore.Entry) {
+	if len(entries) == 0 {
+		return
+	}
+	ids := make([]string, len(entries))
+	for i, en := range entries {
+		ids[i] = en.ID
+	}
+	if err := e.vectorStore.Delete(ctx, ids); err != nil {
 		e.logger.Warn("failed to delete vector entries for a failed ingest",
-			log.String("document_id", docID.String()),
+			log.Int("vectors", len(ids)),
 			log.String("error_type", telemetry.ErrorType(err)),
 		)
 	}
@@ -255,4 +311,113 @@ func (e *Engine) DeleteBySource(ctx context.Context, colID id.CollectionID, sour
 		e.extensions.EmitDocumentDeleted(ctx, doc.ID)
 	}
 	return nil
+}
+
+// oneVersionPerSource keeps hits to one version of each source. Hydrate
+// reads rows one at a time, so when a replace commits between two reads,
+// an old version's hit can be read before the swap and the new version's
+// after it, and both rows are found. For each source with hits from more
+// than one document, only the hits of the version that is current now are
+// kept (see currentVersion). Hits without a source_key pass through. The
+// hits slice is reused.
+func (e *Engine) oneVersionPerSource(ctx context.Context, tenant string, hits []ScoredChunk) ([]ScoredChunk, error) {
+	chunks := make([]*chunk.Chunk, len(hits))
+	for i := range hits {
+		chunks[i] = hits[i].Chunk
+	}
+	keep, err := e.currentVersions(ctx, tenant, chunks)
+	if err != nil {
+		return nil, err
+	}
+	kept := hits[:0]
+	for _, h := range hits {
+		if keep(h.Chunk) {
+			kept = append(kept, h)
+		}
+	}
+	return kept, nil
+}
+
+// sourceRef names one source within one collection.
+type sourceRef struct{ collection, key string }
+
+// chunkSource reports the source and document a hit's chunk belongs to,
+// from its row fields or its vector metadata. ok is false for a chunk
+// without a source_key or a document ID.
+func chunkSource(ch *chunk.Chunk) (ref sourceRef, docID string, ok bool) {
+	if ch == nil || ch.Metadata["source_key"] == "" {
+		return sourceRef{}, "", false
+	}
+	ref = sourceRef{collection: ch.CollectionID.String(), key: ch.Metadata["source_key"]}
+	if ref.collection == "" {
+		ref.collection = ch.Metadata["collection_id"]
+	}
+	docID = ch.DocumentID.String()
+	if docID == "" {
+		docID = ch.Metadata["document_id"]
+	}
+	return ref, docID, docID != ""
+}
+
+// currentVersions returns a filter over chunks that, for each source whose
+// chunks come from more than one document, keeps only the chunks of the
+// current version. The store is read only for such contested sources.
+func (e *Engine) currentVersions(ctx context.Context, tenant string, chunks []*chunk.Chunk) (func(*chunk.Chunk) bool, error) {
+	versions := map[sourceRef][]string{}
+	for _, ch := range chunks {
+		ref, docID, ok := chunkSource(ch)
+		if ok && !slices.Contains(versions[ref], docID) {
+			versions[ref] = append(versions[ref], docID)
+		}
+	}
+	winners := map[sourceRef]string{}
+	for ref, docIDs := range versions {
+		if len(docIDs) < 2 {
+			continue
+		}
+		winner, err := e.currentVersion(ctx, tenant, docIDs)
+		if err != nil {
+			return nil, err
+		}
+		winners[ref] = winner
+	}
+	return func(ch *chunk.Chunk) bool {
+		ref, docID, ok := chunkSource(ch)
+		if !ok {
+			return true
+		}
+		winner, contested := winners[ref]
+		return !contested || docID == winner
+	}, nil
+}
+
+// currentVersion picks one of docIDs, versions of one source: the one that
+// is ready now (a source has at most one), else the newest by CreatedAt,
+// else the highest ID, since TypeIDs sort by creation time. A version
+// already purged is never ready.
+func (e *Engine) currentVersion(ctx context.Context, tenant string, docIDs []string) (string, error) {
+	var newest *document.Document
+	for _, raw := range docIDs {
+		docID, parseErr := id.ParseDocumentID(raw)
+		if parseErr != nil {
+			continue
+		}
+		doc, err := e.getDocument(ctx, tenant, docID)
+		switch {
+		case errors.Is(err, weave.ErrDocumentNotFound):
+			continue
+		case err != nil:
+			return "", fmt.Errorf("weave: read version %s of a source: %w", raw, err)
+		case doc.State == document.StateReady:
+			return raw, nil
+		}
+		if newest == nil || doc.CreatedAt.After(newest.CreatedAt) ||
+			doc.CreatedAt.Equal(newest.CreatedAt) && doc.ID.String() > newest.ID.String() {
+			newest = doc
+		}
+	}
+	if newest != nil {
+		return newest.ID.String(), nil
+	}
+	return slices.Max(docIDs), nil
 }
