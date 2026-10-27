@@ -179,7 +179,9 @@ func testTenantScoping(t *testing.T, s store.Store) {
 // that shows it works with no tenant. ListStalledDocuments is the recovery
 // sweep's read across tenants; testListStalledSpansTenants is its case, and
 // recovery then works on each row under that row's own tenant.
-var notScoped = []string{"Migrate", "Ping", "Close", "ListStalledDocuments"}
+// CountStalledUntenanted only counts rows that belong to no tenant;
+// testStalledSkipsUntenanted (RunLegacy) is its case.
+var notScoped = []string{"Migrate", "Ping", "Close", "ListStalledDocuments", "CountStalledUntenanted"}
 
 // testTenantRequired calls every tenant-scoped store.Store method with no
 // tenant on the context and expects ErrTenantRequired, aimed at rows that
@@ -288,6 +290,9 @@ func testTenantRequired(t *testing.T, s store.Store) {
 	// The one exemption works with no tenant at all (see notScoped).
 	if _, err := s.ListStalledDocuments(context.Background(), time.Now().UTC(), 0); err != nil {
 		t.Errorf("ListStalledDocuments with no tenant: %v", err)
+	}
+	if _, err := s.CountStalledUntenanted(context.Background(), time.Now().UTC()); err != nil {
+		t.Errorf("CountStalledUntenanted with no tenant: %v", err)
 	}
 
 	for _, tc := range cases {

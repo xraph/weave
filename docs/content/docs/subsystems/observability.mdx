@@ -34,12 +34,12 @@ Every span below comes from the tracer `github.com/xraph/weave` and is `Internal
 | `retrieve chunks` | the caller's span | `weave.retriever.kind`, `weave.retrieve.top_k`, `weave.collection.id` (when set), `weave.retrieve.results`, `weave.retrieve.hydrated`, `weave.retrieve.orphaned`, `weave.result` |
 | `search vectors` | `retrieve chunks` or the caller's span | `weave.vectorstore.kind`, `weave.search.top_k`, `weave.search.results` |
 | `reindex collection` | the caller's span | `weave.collection.id`, `weave.vectorstore.kind`, `weave.reindex.documents`, `weave.reindex.chunks` |
-| `recover stalled documents` | the caller's span, or none when the recovery loop runs it | `weave.recover.listed` (stalled documents the sweep read), `weave.recover.failed`, `weave.recover.purged`, `weave.recover.skipped_no_tenant` |
+| `recover stalled documents` | the caller's span, or none when the recovery loop runs it | `weave.recover.listed` (stalled documents the sweep read), `weave.recover.failed`, `weave.recover.purged`, `weave.recover.skipped_no_tenant` (stalled rows with an empty tenant, counted, never listed) |
 | `POST` (Client) | `embed texts` | `http.request.method`, `server.address`, `server.port`, `http.response.status_code` |
 
 `embed texts` and `search vectors` sit straight under the caller's span when `RetrieveCompare` makes them (the dashboard's retrieval page). `gen_ai.request.model` is the `model` param an embedder reports through `weave.Describer`, so an embedder that doesn't describe itself has no model on its span. `gen_ai.usage.input_tokens` doesn't depend on that: it's the sum of the `TokenCount` values the embedder returns, set whenever that sum is above zero. The OpenAI embedder sets both.
 
-`recover stalled documents` is one [recovery](/docs/subsystems/ingestion#recovery) sweep. It reads across tenants but never names one: you get counts, and the deletes and writes it makes for each document show up as grove spans under it. A document another sweep or a live ingest got to first counts in `listed` and nowhere else.
+`recover stalled documents` is one [recovery](/docs/subsystems/ingestion#recovery) sweep. It reads across tenants but never names one: you get counts, and the deletes and writes it makes for each document show up as grove spans under it. A document another sweep or a live ingest got to first counts in `listed` and nowhere else, and keeps its data.
 
 `retrieve chunks` reads each hit back with one `GetChunk`. You'll see those as grove spans, and the totals as `weave.retrieve.hydrated` and `weave.retrieve.orphaned`. An orphan is a hit whose chunk row is gone from the metadata store. A source-keyed hit without a chunk row isn't an orphan: it belongs to a version mid-swap, retrieval drops it, and it counts toward neither total.
 

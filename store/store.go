@@ -17,11 +17,12 @@ import (
 // It embeds the subsystem store interfaces for collections, documents,
 // and chunks, plus lifecycle management methods.
 //
-// Every method except Migrate, Ping, Close and ListStalledDocuments works
-// within the context tenant (weave.WithTenant) and returns
-// weave.ErrTenantRequired, before any I/O, when there is none.
+// Every method except Migrate, Ping, Close, ListStalledDocuments and
+// CountStalledUntenanted works within the context tenant (weave.WithTenant)
+// and returns weave.ErrTenantRequired, before any I/O, when there is none.
 // ListStalledDocuments is the one read across tenants, for recovery, which
-// then works on each document under that document's own tenant. A get, update or delete by ID of another tenant's
+// then works on each document under that document's own tenant;
+// CountStalledUntenanted only counts rows that belong to no tenant. A get, update or delete by ID of another tenant's
 // row returns the same not-found sentinel as an unknown ID, bulk deletes and
 // every list and count see only the context tenant's rows, and a create
 // whose TenantID differs from the context tenant is weave.ErrInvalidArgument.
@@ -73,7 +74,15 @@ type Store interface {
 	// ListStalledDocuments is the one read that spans tenants, for recovery:
 	// documents in pending or processing, or superseded, last updated before
 	// before, oldest first. limit <= 0 means 100. It needs no context tenant.
+	// Rows with an empty tenant (written before v1.9) are left out, so they
+	// can never fill a batch; CountStalledUntenanted counts them.
 	ListStalledDocuments(ctx context.Context, before time.Time, limit int) ([]*document.Document, error)
+
+	// CountStalledUntenanted counts the rows ListStalledDocuments leaves out
+	// for having an empty tenant: pending, processing or superseded, last
+	// updated before before. Recovery reports the number and touches none of
+	// them. It needs no context tenant and reads no tenant's rows.
+	CountStalledUntenanted(ctx context.Context, before time.Time) (int64, error)
 
 	// Migrate runs any pending database migrations.
 	Migrate(ctx context.Context) error

@@ -513,12 +513,7 @@ func (s *Store) ListStalledDocuments(_ context.Context, before time.Time, limit 
 
 	var result []*document.Document
 	for _, doc := range s.documents {
-		switch doc.State {
-		case document.StatePending, document.StateProcessing, document.StateSuperseded:
-		default:
-			continue
-		}
-		if doc.UpdatedAt.Before(before) {
+		if doc.TenantID != "" && isStalled(doc, before) {
 			result = append(result, doc)
 		}
 	}
@@ -533,6 +528,29 @@ func (s *Store) ListStalledDocuments(_ context.Context, before time.Time, limit 
 		result = result[:limit]
 	}
 	return result, nil
+}
+
+// CountStalledUntenanted counts the stalled rows with an empty tenant.
+func (s *Store) CountStalledUntenanted(_ context.Context, before time.Time) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var n int64
+	for _, doc := range s.documents {
+		if doc.TenantID == "" && isStalled(doc, before) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// isStalled reports whether doc is pending, processing or superseded and
+// last updated before before.
+func isStalled(doc *document.Document, before time.Time) bool {
+	switch doc.State {
+	case document.StatePending, document.StateProcessing, document.StateSuperseded:
+		return doc.UpdatedAt.Before(before)
+	}
+	return false
 }
 
 // ReplaceSourceDocument supersedes the source's ready and failed documents,

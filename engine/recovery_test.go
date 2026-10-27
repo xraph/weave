@@ -312,7 +312,8 @@ func TestRecoveredIngestDoesNotTurnReady(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			gate := newGateEmbedder()
-			r := newRig(t, withOpt(engine.WithEmbedder(gate)))
+			hooks := &failureHooks{}
+			r := newRig(t, withOpt(engine.WithEmbedder(gate)), withOpt(engine.WithExtension(hooks)))
 			col := mustTestCollection(t, r.Engine, "docs")
 			input := &engine.IngestInput{CollectionID: col.ID, Content: versionOne}
 			if keyed {
@@ -332,6 +333,10 @@ func TestRecoveredIngestDoesNotTurnReady(t *testing.T) {
 			}
 			close(gate.release)
 			checkInterrupted(t, r, doc.ID, <-done)
+			// Recovery fired it; the interrupted ingest adds none of its own.
+			if got := hooks.got(); len(got) != 1 || !errors.Is(got[0], weave.ErrIngestInterrupted) {
+				t.Errorf("IngestFailed hooks: %v, want recovery's one", got)
+			}
 		})
 	}
 }
@@ -358,6 +363,55 @@ func TestRecoveryBeforeTheFinalTransitionWins(t *testing.T) {
 	}
 	close(vectors.release)
 	checkInterrupted(t, r, doc.ID, <-done)
+}
+
+// revivingStore is a memory store where every document the stalled listing
+// returns sends a heartbeat right after the listing, as an ingest that comes
+// back to life mid-sweep would.
+type revivingStore struct{ *memory.Store }
+
+func (s revivingStore) ListStalledDocuments(ctx context.Context, before time.Time, limit int) ([]*document.Document, error) {
+	docs, err := s.Store.ListStalledDocuments(ctx, before, limit)
+	settle()
+	for _, d := range docs {
+		if touchErr := s.TouchDocument(tenantCtx(d.TenantID), d.ID, time.Time{}); touchErr != nil {
+			return nil, touchErr
+		}
+	}
+	return docs, err
+}
+
+// The guarded fail runs before anything is deleted, so an ingest that sends
+// a heartbeat between the listing and that write keeps its document and
+// every chunk and vector it wrote.
+func TestRecoveryLeavesAnIngestThatCameBackAlone(t *testing.T) {
+	hooks := &failureHooks{}
+	r := newRig(t, withOpt(engine.WithExtension(hooks)),
+		func(r *testRig) engine.Option { return engine.WithStore(revivingStore{r.Store}) })
+	col := mustTestCollection(t, r.Engine, "docs")
+	alive := plantCrashed(t, r, col, document.StateProcessing, 2)
+	settle()
+
+	res, err := r.Engine.RecoverStalled(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("RecoverStalled: %v", err)
+	}
+	if res != (engine.RecoveryResult{}) {
+		t.Errorf("RecoverStalled: %+v, want nothing done", res)
+	}
+	doc, err := r.Engine.GetDocument(tenantCtx("t1"), alive.ID)
+	if err != nil || doc.State != document.StateProcessing {
+		t.Fatalf("document after the sweep: %+v, %v; want still processing", doc, err)
+	}
+	if n, err := r.Store.CountChunks(tenantCtx("t1"), &chunk.CountFilter{DocumentID: alive.ID}); err != nil || n != 2 {
+		t.Errorf("chunk rows after the sweep: %d (%v), want 2", n, err)
+	}
+	if v := vectorsOf(t, r.Vectors, map[string]string{"document_id": alive.ID.String()}); len(v) != 2 {
+		t.Errorf("vectors after the sweep: %d, want 2", len(v))
+	}
+	if got := hooks.got(); len(got) != 0 {
+		t.Errorf("IngestFailed hooks: %v, want none", got)
+	}
 }
 
 func TestTwoSweepsRecoverADocumentOnce(t *testing.T) {

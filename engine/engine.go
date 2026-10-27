@@ -651,7 +651,9 @@ func (e *Engine) endIngest(ctx context.Context, doc *document.Document, entries 
 
 // abandonIngest clears what an interrupted ingest wrote and returns
 // weave.ErrIngestInterrupted. The document's state is left as it is: it was
-// failed, finished or deleted by someone else. The vectors go by their own
+// failed, finished or deleted by someone else, and that one fires the end
+// hook (recovery's IngestFailed), so this fires none and a document never
+// gets two. The vectors go by their own
 // IDs; chunk rows, when written, by document, since an unkeyed document has
 // one attempt. The deletes run on a cleanup context, and a failure is only
 // logged, as recovery clears a failed document's leftovers too.
@@ -667,7 +669,6 @@ func (e *Engine) abandonIngest(ctx context.Context, doc *document.Document, entr
 			)
 		}
 	}
-	e.extensions.EmitIngestFailed(ctx, doc.CollectionID, weave.ErrIngestInterrupted)
 	return &IngestResult{DocumentID: doc.ID, State: document.StateFailed}, weave.ErrIngestInterrupted
 }
 

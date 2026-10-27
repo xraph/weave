@@ -25,7 +25,7 @@ case errors.Is(err, weave.ErrDuplicateDocument):
 
 | Error | Returned when |
 |-------|---------------|
-| `weave.ErrTenantRequired` | The context has no tenant (see [multi-tenancy](/docs/concepts/multi-tenancy)). Every engine call that touches data, every store call but `Migrate`, `Ping`, `Close` and `ListStalledDocuments`, every vector store `Search` without a `TenantKey` and `Upsert` of an entry without `tenant_id`, and the pipeline's embed step return it before touching anything. The HTTP routes answer it with a 403 |
+| `weave.ErrTenantRequired` | The context has no tenant (see [multi-tenancy](/docs/concepts/multi-tenancy)). Every engine call that touches data, every store call but `Migrate`, `Ping`, `Close`, `ListStalledDocuments` and `CountStalledUntenanted`, every vector store `Search` without a `TenantKey` and `Upsert` of an entry without `tenant_id`, and the pipeline's embed step return it before touching anything. The HTTP routes answer it with a 403 |
 | `weave.ErrNoStore` | An operation needs the metadata store and none is configured |
 | `weave.ErrNoVectorStore` | `Ingest` or `ReindexCollection` without a vector store |
 | `weave.ErrNoEmbedder` | `Ingest` or `ReindexCollection` without an embedder |

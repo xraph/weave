@@ -9,11 +9,24 @@ package storetest
 import (
 	"testing"
 
+	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/store"
 )
 
 // Opener returns a fresh, migrated, empty store. It is called once per case.
 type Opener func(t *testing.T) store.Store
+
+// Planter writes doc straight into s's storage, with none of the store's
+// checks, the way a v1.8 install wrote rows with an empty tenant. It only
+// exists for the cases RunLegacy runs; the store API can't write such a row.
+type Planter func(t *testing.T, s store.Store, doc *document.Document)
+
+// RunLegacy runs the cases that need rows only an older install could
+// write, planted with plant. A custom store that never held v1.8 data can
+// skip it.
+func RunLegacy(t *testing.T, open Opener, plant Planter) {
+	t.Run("StalledSkipsUntenanted", func(t *testing.T) { testStalledSkipsUntenanted(t, open(t), plant) })
+}
 
 // Run runs every conformance case against the backend open returns.
 func Run(t *testing.T, open Opener) {

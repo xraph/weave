@@ -156,17 +156,15 @@ res, err := eng.RecoverStalled(ctx, 15*time.Minute)
 // res.Failed, res.Purged, res.SkippedNoTenant
 ```
 
-The context needs no tenant. A sweep lists up to `BatchSize` stalled documents (100 by default) across every tenant, oldest first, and then handles each one under that document's own tenant, so every read and delete after the listing is tenant scoped like any other call:
+The context needs no tenant. A sweep lists up to `BatchSize` stalled documents (100 by default) across every tenant, oldest first, and then handles each one under that document's own tenant, so every write after the listing is tenant scoped like any other call.
 
-- its vectors and chunk rows are deleted, so a search never returns half a document;
-- a `superseded` row is then deleted;
-- a `pending` or `processing` row is marked `failed`, with `weave.ErrIngestInterrupted`'s message in `Error`, and `OnIngestFailed` fires with `weave.ErrIngestInterrupted`.
+A `pending` or `processing` document is marked `failed` first, with `weave.ErrIngestInterrupted`'s message in `Error`. That's the guarded `FailDocument` with the sweep's cutoff. Only once it has gone through are the document's vectors and chunk rows deleted, so a search never returns half a document, and then `OnIngestFailed` fires with `weave.ErrIngestInterrupted`. If the guarded write loses, because the ingest turned out to be alive and sent a heartbeat (or finished) after the listing, the sweep leaves the document and every chunk and vector it has alone, and that ingest carries on. A `superseded` row has nothing to race with, so it loses its vectors and chunks and then the row itself.
 
-Marking it failed is the guarded `FailDocument` with the sweep's cutoff, so it's safe on every replica. When two sweeps list the same document, only one of them counts it and fires the hook. When the ingest turns out to be alive and sends a heartbeat before the sweep gets to it, the document stays `processing`, and that ingest carries on. A document that fails to recover (a vector store that's down) stays as it was, and the next sweep tries again.
+It's safe on every replica. When two sweeps list the same document, only one of them gets the guarded write, counts it and fires the hook. An ingest that was still running when its document was failed finds out at its next heartbeat, deletes what it wrote and returns `weave.ErrIngestInterrupted` without a hook of its own, so you see one `OnIngestFailed` per document. If the delete after a successful fail goes wrong (a vector store that's down), the sweep returns the error and the document stays `failed` with that data still in place. A keyed re-ingest purges it, and so does `DeleteDocument`.
 
 After recovery, ingesting the same source again just works: step 2 of the keyed order purges the failed copy and starts over. A plain ingest of the same content still needs a `DeleteDocument` of the failed row first, as with any failed ingest.
 
-Rows written before v1.9 can have an empty tenant. Recovery can't scope those, so it leaves them alone, counts them in `SkippedNoTenant` and logs one warning per sweep. Give them a tenant and the next sweep picks them up.
+Rows written before v1.9 can have an empty tenant. Recovery can't scope those, so the listing leaves them out (however many there are, they never take a slot in the batch) and the sweep only counts them, with the store's `CountStalledUntenanted`, into `SkippedNoTenant`, plus one warning per sweep. Give them a tenant and the next sweep picks them up.
 
 Pick `stalled_after` well above the longest single chunk or embed call you expect. Heartbeats only go out between steps, so an embed call that takes longer than `stalled_after` gets its document failed under it, and that ingest ends with `weave.ErrIngestInterrupted`.
 

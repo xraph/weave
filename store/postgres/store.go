@@ -547,6 +547,7 @@ func (s *Store) ListStalledDocuments(ctx context.Context, before time.Time, limi
 		Where("state IN (?, ?, ?)",
 			string(document.StatePending), string(document.StateProcessing), string(document.StateSuperseded)).
 		Where("updated_at < ?", before.UTC()).
+		Where("tenant_id <> ''").
 		OrderExpr("updated_at ASC, id ASC").
 		Limit(limit).
 		Scan(ctx)
@@ -558,6 +559,20 @@ func (s *Store) ListStalledDocuments(ctx context.Context, before time.Time, limi
 		result[i] = documentFromModel(&models[i])
 	}
 	return result, nil
+}
+
+// CountStalledUntenanted counts on the same index as ListStalledDocuments.
+func (s *Store) CountStalledUntenanted(ctx context.Context, before time.Time) (int64, error) {
+	n, err := s.pg.NewSelect((*documentModel)(nil)).
+		Where("state IN (?, ?, ?)",
+			string(document.StatePending), string(document.StateProcessing), string(document.StateSuperseded)).
+		Where("updated_at < ?", before.UTC()).
+		Where("tenant_id = ''").
+		Count(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("weave: count stalled documents without a tenant: %w", err)
+	}
+	return n, nil
 }
 
 // ReplaceSourceDocument runs in one transaction. It first takes a

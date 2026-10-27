@@ -484,6 +484,7 @@ func (s *Store) ListStalledDocuments(ctx context.Context, before time.Time, limi
 				string(document.StatePending), string(document.StateProcessing), string(document.StateSuperseded),
 			}},
 			"updated_at": bson.M{"$lt": before.UTC()},
+			"tenant_id":  bson.M{"$nin": bson.A{"", nil}},
 		}).
 		Sort(bson.D{{Key: "updated_at", Value: 1}, {Key: "_id", Value: 1}}).
 		Limit(int64(limit)).
@@ -500,6 +501,24 @@ func (s *Store) ListStalledDocuments(ctx context.Context, before time.Time, limi
 		result[i] = d
 	}
 	return result, nil
+}
+
+// CountStalledUntenanted counts on the same index as ListStalledDocuments.
+// A document with no tenant_id field at all counts too.
+func (s *Store) CountStalledUntenanted(ctx context.Context, before time.Time) (int64, error) {
+	n, err := s.mdb.NewFind((*documentModel)(nil)).
+		Filter(bson.M{
+			"state": bson.M{"$in": bson.A{
+				string(document.StatePending), string(document.StateProcessing), string(document.StateSuperseded),
+			}},
+			"updated_at": bson.M{"$lt": before.UTC()},
+			"tenant_id":  bson.M{"$in": bson.A{"", nil}},
+		}).
+		Count(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("weave: count stalled documents without a tenant: %w", err)
+	}
+	return n, nil
 }
 
 // ReplaceSourceDocument runs in a multi-document transaction, so it needs a

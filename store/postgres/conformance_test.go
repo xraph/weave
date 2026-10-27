@@ -9,6 +9,7 @@ import (
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/drivers/pgdriver"
 
+	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/internal/pgtest"
 	"github.com/xraph/weave/store"
 	"github.com/xraph/weave/store/postgres"
@@ -23,7 +24,26 @@ func TestConformance(t *testing.T) {
 	if dsn == "" {
 		t.Skip("WEAVE_TEST_POSTGRES_DSN not set, skipping postgres")
 	}
-	storetest.Run(t, func(t *testing.T) store.Store {
+	storetest.Run(t, opener(dsn))
+}
+
+// TestConformanceLegacy runs the cases that need rows a v1.8 install wrote.
+func TestConformanceLegacy(t *testing.T) {
+	dsn := os.Getenv("WEAVE_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("WEAVE_TEST_POSTGRES_DSN not set, skipping postgres")
+	}
+	storetest.RunLegacy(t, opener(dsn), func(t *testing.T, s store.Store, doc *document.Document) {
+		t.Helper()
+		if err := postgres.PlantDocument(context.Background(), s.(*postgres.Store), doc); err != nil {
+			t.Fatalf("plant document: %v", err)
+		}
+	})
+}
+
+// opener opens a fresh, migrated store for each case.
+func opener(dsn string) storetest.Opener {
+	return func(t *testing.T) store.Store {
 		scoped := pgtest.Schema(t, dsn)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -41,5 +61,5 @@ func TestConformance(t *testing.T) {
 			t.Fatalf("migrate postgres: %v", err)
 		}
 		return s
-	})
+	}
 }

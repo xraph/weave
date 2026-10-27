@@ -3,6 +3,7 @@ package storetest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -305,5 +306,50 @@ func testClaimOnce(t *testing.T, s store.Store) {
 		if won != 1 {
 			t.Errorf("%s: %d of %d concurrent claims succeeded, want 1", name, won, n)
 		}
+	}
+}
+
+// testStalledSkipsUntenanted pins that rows with an empty tenant never reach
+// recovery's listing, so however many a v1.8 install left stalled, they
+// can't fill a batch: the oldest stalled rows are tenantless, and a limit of
+// one still returns the tenant's row. CountStalledUntenanted counts exactly
+// the tenantless rows the listing leaves out, by the same state and age
+// rules.
+func testStalledSkipsUntenanted(t *testing.T, s store.Store, plant Planter) {
+	col := mustCollection(t, s, "legacy", "t1")
+	legacy := func(state document.State) {
+		now := time.Now().UTC()
+		doc := &document.Document{
+			Entity: weave.Entity{CreatedAt: now, UpdatedAt: now},
+			ID:     id.NewDocumentID(), CollectionID: col.ID, Title: "legacy " + string(state),
+			ContentHash: "sha-" + id.NewDocumentID().String(), Metadata: map[string]string{}, State: state,
+		}
+		plant(t, s, doc)
+	}
+	for _, state := range []document.State{document.StateProcessing, document.StatePending, document.StateSuperseded, document.StateProcessing} {
+		legacy(state)
+	}
+	legacy(document.StateReady)
+	legacy(document.StateFailed)
+	time.Sleep(tick)
+	tenanted := mustDocument(t, s, col, "t1 processing", document.StateProcessing)
+	time.Sleep(tick)
+	cutoff := time.Now().UTC()
+	time.Sleep(tick)
+	legacy(document.StateProcessing) // newer than the cutoff
+
+	for _, limit := range []int{1, 0} {
+		got, err := s.ListStalledDocuments(context.Background(), cutoff, limit)
+		if err != nil {
+			t.Fatalf("list stalled, limit %d: %v", limit, err)
+		}
+		sameOrder(t, fmt.Sprintf("stalled documents, limit %d", limit), documentIDs(got), documentIDs([]*document.Document{tenanted}))
+	}
+	n, err := s.CountStalledUntenanted(context.Background(), cutoff)
+	if err != nil {
+		t.Fatalf("count stalled without a tenant: %v", err)
+	}
+	if n != 4 {
+		t.Errorf("stalled without a tenant: %d, want 4 (two processing, one pending, one superseded)", n)
 	}
 }

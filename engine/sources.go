@@ -203,8 +203,9 @@ func (e *Engine) sourceAttempt(ctx context.Context, tenant string, colID id.Coll
 //
 // A document that isn't ready loses this attempt's vectors. If it moved on
 // under the attempt (a heartbeat or the swap found it no longer processing,
-// or it is failed or gone now), the answer is weave.ErrIngestInterrupted and
-// its state is left alone. Otherwise failIngest marks it failed, with the
+// or it is failed or gone now), the answer is weave.ErrIngestInterrupted,
+// its state is left alone and no hook fires: recovery, or the attempt that
+// failed it, already fired IngestFailed for it. Otherwise failIngest marks it failed, with the
 // store's guarded FailDocument, so a version another attempt has just made
 // ready is never overwritten.
 func (e *Engine) failSource(ctx context.Context, start time.Time, tenant string, doc *document.Document, entries []vectorstore.Entry, cause error) (*IngestResult, error) {
@@ -222,7 +223,7 @@ func (e *Engine) failSource(ctx context.Context, start time.Time, tenant string,
 	e.dropAttemptVectors(cleanup, entries)
 	if errors.Is(cause, weave.ErrIngestInterrupted) || errors.Is(cause, weave.ErrInvalidState) ||
 		errors.Is(readErr, weave.ErrDocumentNotFound) || readErr == nil && now.State == document.StateFailed {
-		e.extensions.EmitIngestFailed(ctx, doc.CollectionID, weave.ErrIngestInterrupted)
+		// Whoever moved the document on fired its end hook.
 		return &IngestResult{DocumentID: doc.ID, State: document.StateFailed}, weave.ErrIngestInterrupted
 	}
 	return e.failIngest(ctx, doc, doc.CollectionID, cause)

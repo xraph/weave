@@ -48,18 +48,26 @@ type RecoveryResult struct {
 func (e *Engine) RecoveryConfig() RecoveryConfig { return e.recovery }
 
 // RecoverStalled runs one sweep over every tenant. Each stalled document is
-// handled under its own tenant: its vectors and chunks are deleted, then a
-// superseded row is deleted and a pending or processing row is marked failed
-// with weave.ErrIngestInterrupted's message. Safe to run on every replica.
+// handled under its own tenant. A pending or processing row is marked failed
+// with weave.ErrIngestInterrupted's message, and only then are its vectors
+// and chunks deleted. A superseded row loses its vectors and chunks, then
+// the row. Safe to run on every replica.
 //
 // A document is stalled when it was last updated more than stalledAfter
 // ago. The sweep lists at most BatchSize of them, oldest first, and needs no
-// tenant on ctx. Marking failed is a guarded write: it only succeeds while
-// the document is still pending or processing and has sent no heartbeat
-// since the cutoff, so of two sweeps that list one document only one counts
-// it and fires the IngestFailed hook, and an ingest that came back to life
-// keeps its document. A document that fails to recover is left for the next
-// sweep, and the first such error is returned after the rest are done.
+// tenant on ctx. Marking failed comes first and is a guarded write: it only
+// succeeds while the document is still pending or processing and has sent no
+// heartbeat since the cutoff. When it loses (an ingest that came back to
+// life sent a heartbeat, or made the document ready), the sweep leaves the
+// document and all its data alone. Of two sweeps that list one document,
+// only one counts it and fires the IngestFailed hook. Rows without a tenant
+// are never listed; SkippedNoTenant is their count. A document whose data
+// can't be deleted, or a superseded row that fails to go, returns the first
+// such error after the rest of the batch is done.
+//
+// This is the reverse of the order in the plan, which deleted first: that
+// order could delete the data of an ingest that sent a heartbeat between the
+// listing and the guarded write, and let it turn ready with chunks missing.
 func (e *Engine) RecoverStalled(ctx context.Context, stalledAfter time.Duration) (RecoveryResult, error) {
 	var res RecoveryResult
 	if e.store == nil {
@@ -76,6 +84,11 @@ func (e *Engine) RecoverStalled(ctx context.Context, stalledAfter time.Duration)
 	}
 
 	var firstErr error
+	untenanted, err := e.store.CountStalledUntenanted(ctx, before)
+	if err != nil {
+		firstErr = err
+	}
+	res.SkippedNoTenant = int(untenanted)
 	for _, doc := range docs {
 		if doc.TenantID == "" {
 			res.SkippedNoTenant++
@@ -83,14 +96,13 @@ func (e *Engine) RecoverStalled(ctx context.Context, stalledAfter time.Duration)
 		}
 		// Every call from here on is scoped to the document's own tenant.
 		outcome, recErr := e.recoverDocument(weave.WithTenant(ctx, doc.TenantID), doc, before)
-		switch {
-		case recErr != nil:
-			if firstErr == nil {
-				firstErr = fmt.Errorf("weave: recover document %s: %w", doc.ID, recErr)
-			}
-		case outcome == recoveredFailed:
+		if recErr != nil && firstErr == nil {
+			firstErr = fmt.Errorf("weave: recover document %s: %w", doc.ID, recErr)
+		}
+		switch outcome {
+		case recoveredFailed:
 			res.Failed++
-		case outcome == recoveredPurged:
+		case recoveredPurged:
 			res.Purged++
 		}
 	}
@@ -123,14 +135,17 @@ const (
 	recoveredPurged
 )
 
-// recoverDocument clears one stalled document's vectors and chunks, then
-// deletes it when it is superseded or marks it failed when it is pending or
-// processing, last updated before before. ctx carries the document's tenant.
+// recoverDocument recovers one stalled document. ctx carries its tenant. A
+// pending or processing one is marked failed if it was still last updated
+// before before, and only then loses its vectors and chunks; the outcome is
+// recoveredFailed even when that delete fails, since the document is failed
+// either way. A superseded one, which nothing moves on from, loses its
+// vectors and chunks and then its row.
 func (e *Engine) recoverDocument(ctx context.Context, doc *document.Document, before time.Time) (recovered, error) {
-	if err := e.dropDocumentData(ctx, doc.TenantID, doc.ID); err != nil {
-		return recoveredNothing, err
-	}
 	if doc.State == document.StateSuperseded {
+		if err := e.dropDocumentData(ctx, doc.TenantID, doc.ID); err != nil {
+			return recoveredNothing, err
+		}
 		err := e.store.DeleteDocument(ctx, doc.ID)
 		switch {
 		case errors.Is(err, weave.ErrDocumentNotFound):
@@ -148,8 +163,12 @@ func (e *Engine) recoverDocument(ctx context.Context, doc *document.Document, be
 	case err != nil:
 		return recoveredNothing, fmt.Errorf("mark failed: %w", err)
 	}
+	// The document is failed now, so no ingest can make it ready. One that is
+	// still running finds it failed at its next heartbeat or at the swap, and
+	// deletes whatever it writes after this.
+	dropErr := e.dropDocumentData(ctx, doc.TenantID, doc.ID)
 	e.extensions.EmitIngestFailed(ctx, doc.CollectionID, weave.ErrIngestInterrupted)
-	return recoveredFailed, nil
+	return recoveredFailed, dropErr
 }
 
 // dropDocumentData deletes a document's vectors and chunks within tenant,
