@@ -5,7 +5,7 @@ description: Complete reference for all 13 Weave REST endpoints for collections,
 
 The Forge extension mounts these routes under its base path, `/weave` by default, so every path below starts with `/weave/v1`. Change the prefix with `base_path` or `extension.WithBasePath`. All bodies are JSON.
 
-The routes take the tenant from the request context, where your middleware has to put it with `weave.WithTenant`. Only the create, ingest, retrieve and search routes use it. The list route returns every tenant's collections, and the get, delete, stats and reindex routes don't check who owns the ID. See [HTTP API](/docs/subsystems/http-api#tenants).
+The routes take the tenant from the request context, where your middleware has to put it with `weave.WithTenant`. Without one, every route answers 403. With one, every route works inside that tenant: lists show only its rows, and another tenant's ID is a 404. See [HTTP API](/docs/subsystems/http-api#tenants).
 
 ## Collections
 
@@ -67,7 +67,7 @@ List collections, oldest first.
 | `limit` | int | Maximum results. Default 50, capped at 1000. |
 | `offset` | int | Results to skip |
 
-**Response** `200 OK`: an array of collection objects, across all tenants.
+**Response** `200 OK`: an array of the request tenant's collection objects.
 
 ---
 
@@ -108,7 +108,7 @@ The counts are live: documents in any state, and every chunk.
 
 Re-embeds the chunks of every `ready` document with the engine's current embedder. The request is synchronous, so a large collection can take a while.
 
-**Response** `204 No Content`, also for a collection ID that doesn't exist.
+**Response** `204 No Content`, or `404` when the tenant has no such collection.
 
 ---
 
@@ -142,7 +142,7 @@ Ingest one document. Runs the whole load, chunk, embed and store pipeline before
 }
 ```
 
-Empty `content` is a 400. A collection that doesn't exist, content already in the collection and embedder or store failures are all 500s.
+Empty `content` is a 400. A collection the tenant doesn't have is a 404, and nothing is embedded. Content already in the collection and embedder or store failures are 500s.
 
 ---
 
@@ -277,7 +277,7 @@ Search across collections.
 }
 ```
 
-With `collections`, each one is searched separately and the hits are merged, sorted by score and cut to `top_k`. Without it, one search runs over every collection, filtered to the request's tenant when there is one. `top_k` defaults to `default_top_k` here. `strategy` is accepted and ignored.
+With `collections`, each one is searched separately and the hits are merged, sorted by score and cut to `top_k`. Without it, one search runs over every collection of the request's tenant. `top_k` defaults to `default_top_k` here. `strategy` is accepted and ignored.
 
 **Response** `200 OK`: an array of scored chunks, as for retrieve.
 
@@ -285,7 +285,7 @@ With `collections`, each one is searched separately and the hits are merged, sor
 
 ## Errors
 
-400 and 404 responses carry Forge's HTTP error body:
+400, 403 and 404 responses carry Forge's HTTP error body:
 
 ```json
 { "error": "content is required", "code": 400 }
@@ -293,8 +293,9 @@ With `collections`, each one is searched separately and the hits are merged, sor
 
 | Status | When |
 |--------|------|
-| `400` | A malformed ID, or a missing `name`, `content` or `query` |
-| `404` | The collection or document doesn't exist, on the get, delete and stats routes |
-| `500` | Anything else, including ingesting into a missing collection, duplicate names or content, and embedder or store failures |
+| `400` | A malformed ID, a missing `name`, `content` or `query`, or an argument the engine refuses |
+| `403` | The request has no tenant. The body says `weave: this request has no tenant` |
+| `404` | The collection or document isn't there in the request's tenant, on the get, delete, stats, reindex and ingest routes |
+| `500` | Anything else, including duplicate names or content, and embedder or store failures |
 
 A 500 goes through Forge's error handling, which by default doesn't put the error text in the response.

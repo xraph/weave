@@ -168,9 +168,12 @@ eng, _ := engine.New(engine.WithVectorStore(&WeaviateStore{client: weaviateClien
 
 The engine relies on a few things from a vector store:
 
-- `Search` applies every key in `opts.Filter` as an exact metadata match (the engine sends `collection_id` and `tenant_id` there) and treats an empty `TenantKey` as no tenant filter.
+- `Search` applies every key in `opts.Filter` as an exact metadata match (the engine sends `tenant_id`, and `collection_id` when the caller names one) and refuses an empty `TenantKey` with `weave.ErrTenantRequired`. There's no search across tenants.
+- `Upsert` refuses a batch with any entry lacking `metadata["tenant_id"]` with `weave.ErrTenantRequired`, before it writes any of it.
 - `SearchResult.ID` is the entry ID you were given, which is the chunk ID. The engine reads the chunk back by it.
-- `DeleteByMetadata` deletes every entry matching all the pairs. Document and collection deletes call it with `document_id` or `collection_id`.
+- `DeleteByMetadata` deletes every entry matching all the pairs, and refuses an empty filter with `weave.ErrInvalidArgument`. Document and collection deletes call it with `tenant_id` next to `document_id` or `collection_id`.
+
+The engine also drops any hit labelled with another tenant, but a store that skips the filter then hands back short pages, so apply it.
 - Return `SearchResult.Vector` if you can. The MMR retriever needs it.
 
 ## Custom MetadataStore

@@ -79,10 +79,11 @@ If step 5 or anything after it fails, the document is set to `failed` with the e
 
 `engine.Retrieve` runs:
 
-1. Fire `OnRetrievalStarted`.
-2. Build a filter: `collection_id` from `WithCollection`, and `tenant_id` from `WithTenantFilter`, `WithTenantID` or the context tenant, in that order.
-3. If a retriever is configured, call it with that filter. Otherwise embed the query and call `VectorStore.Search` directly.
-4. Read each hit's chunk back from the metadata store by ID. A hit whose chunk row is gone stays in the results with `Orphaned` set.
+1. Check the context tenant. Without one the call fails with `ErrTenantRequired` before anything is embedded.
+2. Fire `OnRetrievalStarted`.
+3. Build a filter: `tenant_id` from the context tenant, and `collection_id` from `WithCollection`.
+4. If a retriever is configured, call it with that filter. Otherwise embed the query and call `VectorStore.Search` directly.
+5. Read each hit's chunk back from the metadata store by ID, within the tenant. A hit whose chunk row is gone stays in the results with `Orphaned` set, and a hit from another tenant is dropped.
 5. Fire `OnRetrievalCompleted`, or `OnRetrievalFailed` on an error.
 
 ## Extension system

@@ -55,28 +55,38 @@ The routes are tagged `collections`, `documents` and `retrieval` in the OpenAPI 
 
 ## Tenants
 
-The routes don't read a tenant from anywhere. They pass the request context to the engine, so the tenant is whatever your middleware put there with `weave.WithTenant`. Add a global Forge middleware that sets it from your auth:
+The routes don't read a tenant from the request themselves. They pass the request context to the engine, so the tenant is whatever your middleware put there with `weave.WithTenant`. Add a global Forge middleware that sets it from the authenticated principal:
 
 ```go
 app.Router().UseGlobal(func(next forge.Handler) forge.Handler {
     return func(ctx forge.Context) error {
-        tenantID := ctx.Request().Header.Get("X-Tenant-ID") // or from your auth claims
-        ctx.WithContext(weave.WithTenant(ctx.Context(), tenantID))
+        if tenantID, ok := tenantFromPrincipal(ctx); ok { // from your verified auth claims
+            ctx.WithContext(weave.WithTenant(ctx.Context(), tenantID))
+        }
         return next(ctx)
     }
 })
 ```
 
-Even with a tenant set, only creates, ingests and the two search routes use it. `GET /collections` lists every tenant's collections, and the get, delete, stats and reindex routes act on any ID they're given. Put your own authorization in front of them if tenants mustn't see each other's data. See [multi-tenancy](/docs/concepts/multi-tenancy).
+Don't take it from a header the caller sets, like `X-Tenant-ID`: anyone could name any tenant.
+
+A request whose context has no tenant gets a 403 on every route, before anything is read or embedded. With a tenant, every route works inside it. `GET /collections` lists only that tenant's collections, and the get, delete, stats, reindex and ingest routes answer 404 for another tenant's ID, exactly as for one that doesn't exist. See [multi-tenancy](/docs/concepts/multi-tenancy).
 
 ## Errors
 
-Validation failures (a malformed ID, a missing `name`, `content` or `query`) return 400, and a collection or document that isn't there returns 404 on the get, delete and stats routes. Both have this body:
+| Status | When |
+|--------|------|
+| 400 | A malformed ID, a missing `name`, `content` or `query`, or an engine `ErrInvalidArgument` |
+| 403 | The request context has no tenant |
+| 404 | The collection or document isn't there in the request's tenant: get, delete, stats, reindex, ingest and batch ingest |
+| 500 | Anything else |
+
+400, 403 and 404 have this body:
 
 ```json
 { "error": "weave: collection not found", "code": 404 }
 ```
 
-Reindexing a collection that doesn't exist returns 204, since there's nothing to re-embed.
+The 403 always says `weave: this request has no tenant`.
 
-Everything else comes back as a 500 through Forge's error handling, which by default leaves the error text out of the response. That includes ingesting into a collection that doesn't exist, a duplicate collection name, duplicate document content and embedder or vector store failures.
+Everything else comes back as a 500 through Forge's error handling, which by default leaves the error text out of the response. That covers a duplicate collection name, duplicate document content and embedder or vector store failures.

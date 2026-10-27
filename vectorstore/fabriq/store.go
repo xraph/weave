@@ -12,6 +12,7 @@ import (
 	"github.com/xraph/fabriq/core/query"
 	"github.com/xraph/fabriq/core/tenant"
 
+	"github.com/xraph/weave/internal/tenancy"
 	"github.com/xraph/weave/vectorstore"
 )
 
@@ -53,7 +54,12 @@ func New(vq query.VectorQuerier, opts ...Option) *Store {
 
 // Upsert inserts or updates vector entries. Each Entry's Content is stored
 // under the "content" meta key; remaining Metadata keys are stored alongside.
+// An entry without metadata["tenant_id"] is ErrTenantRequired, and nothing
+// in the batch is written.
 func (s *Store) Upsert(ctx context.Context, entries []vectorstore.Entry) error {
+	if err := tenancy.VectorEntries(entries); err != nil {
+		return err
+	}
 	for _, e := range entries {
 		meta := make(map[string]any, len(e.Metadata)+1)
 		for k, v := range e.Metadata {
@@ -68,10 +74,14 @@ func (s *Store) Upsert(ctx context.Context, entries []vectorstore.Entry) error {
 }
 
 // Search returns the most similar entries to the given vector. TenantKey is
-// used to scope the search via tenant.WithTenant; MinScore post-filters
-// results below the threshold; SearchResult.Vector is always nil (fabriq
-// VectorQuerier does not return stored embeddings from Similar).
+// required (ErrTenantRequired without it) and scopes the search via
+// tenant.WithTenant; MinScore post-filters results below the threshold;
+// SearchResult.Vector is always nil (fabriq VectorQuerier does not return
+// stored embeddings from Similar).
 func (s *Store) Search(ctx context.Context, vector []float32, opts *vectorstore.SearchOptions) ([]vectorstore.SearchResult, error) {
+	if err := tenancy.VectorSearch(opts); err != nil {
+		return nil, err
+	}
 	topK := 10
 	var filter map[string]string
 	var minScore float64
@@ -149,8 +159,12 @@ func (s *Store) Delete(ctx context.Context, ids []string) error {
 }
 
 // DeleteByMetadata removes entries whose meta matches all key/value pairs in
-// filter. Delegates to fabriq's DeleteByMeta (AND-of-equals semantics).
+// filter. Delegates to fabriq's DeleteByMeta (AND-of-equals semantics). An
+// empty filter is ErrInvalidArgument.
 func (s *Store) DeleteByMetadata(ctx context.Context, filter map[string]string) error {
+	if err := tenancy.VectorDeleteFilter(filter); err != nil {
+		return err
+	}
 	if err := s.vq.DeleteByMeta(ctx, s.entity, filter); err != nil {
 		return fmt.Errorf("fabriqvec: delete by meta: %w", err)
 	}

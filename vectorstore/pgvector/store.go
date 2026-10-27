@@ -10,6 +10,7 @@ import (
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/drivers/pgdriver"
 
+	"github.com/xraph/weave/internal/tenancy"
 	"github.com/xraph/weave/vectorstore"
 )
 
@@ -67,8 +68,13 @@ func New(db *grove.DB, opts ...Option) *Store {
 	return s
 }
 
-// Upsert inserts or updates vector entries.
+// Upsert inserts or updates vector entries. An entry without
+// metadata["tenant_id"] is ErrTenantRequired, and nothing in the batch is
+// written.
 func (s *Store) Upsert(ctx context.Context, entries []vectorstore.Entry) error {
+	if err := tenancy.VectorEntries(entries); err != nil {
+		return err
+	}
 	models := make([]VectorEntry, len(entries))
 	for i, e := range entries {
 		models[i] = VectorEntry{
@@ -88,8 +94,12 @@ func (s *Store) Upsert(ctx context.Context, entries []vectorstore.Entry) error {
 	return err
 }
 
-// Search returns the most similar entries to the given vector.
+// Search returns the most similar entries of one tenant to the given
+// vector. An empty TenantKey is ErrTenantRequired.
 func (s *Store) Search(ctx context.Context, vector []float32, opts *vectorstore.SearchOptions) ([]vectorstore.SearchResult, error) {
+	if err := tenancy.VectorSearch(opts); err != nil {
+		return nil, err
+	}
 	topK := 10
 	if opts != nil && opts.TopK > 0 {
 		topK = opts.TopK
@@ -158,8 +168,12 @@ func (s *Store) Delete(ctx context.Context, ids []string) error {
 	return err
 }
 
-// DeleteByMetadata removes entries matching the given metadata filter.
+// DeleteByMetadata removes entries matching the given metadata filter. An
+// empty filter would match every row and is ErrInvalidArgument.
 func (s *Store) DeleteByMetadata(ctx context.Context, filter map[string]string) error {
+	if err := tenancy.VectorDeleteFilter(filter); err != nil {
+		return err
+	}
 	q := s.pg.NewDelete((*VectorEntry)(nil))
 	for k, v := range filter {
 		q = q.Where("metadata->>? = ?", k, v)

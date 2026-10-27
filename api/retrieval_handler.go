@@ -10,7 +10,7 @@ import (
 	"github.com/xraph/weave/id"
 )
 
-func (a *API) retrieve(ctx forge.Context, req *RetrieveRequest) ([]engine.ScoredChunk, error) {
+func (a *API) retrieve(ctx forge.Context, req *RetrieveRequest) (*struct{}, error) {
 	colID, err := id.ParseCollectionID(ctx.Param("collectionId"))
 	if err != nil {
 		return nil, forge.BadRequest(fmt.Sprintf("invalid collection ID: %v", err))
@@ -27,13 +27,13 @@ func (a *API) retrieve(ctx forge.Context, req *RetrieveRequest) ([]engine.Scored
 		engine.WithStrategy(req.Strategy),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("retrieve: %w", err)
+		return nil, mapStoreError(err)
 	}
 
-	return results, ctx.JSON(http.StatusOK, results)
+	return nil, ctx.JSON(http.StatusOK, results)
 }
 
-func (a *API) hybridSearch(ctx forge.Context, req *HybridSearchRequest) ([]engine.ScoredChunk, error) {
+func (a *API) hybridSearch(ctx forge.Context, req *HybridSearchRequest) (*struct{}, error) {
 	if req.Query == "" {
 		return nil, forge.BadRequest("query is required")
 	}
@@ -45,8 +45,8 @@ func (a *API) hybridSearch(ctx forge.Context, req *HybridSearchRequest) ([]engin
 		MinScore:    req.MinScore,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("hybrid search: %w", err)
+		return nil, mapStoreError(err)
 	}
 
-	return results, ctx.JSON(http.StatusOK, results)
+	return nil, ctx.JSON(http.StatusOK, results)
 }

@@ -120,12 +120,20 @@ func (e *Engine) CreateCollection(ctx context.Context, col *collection.Collectio
 	if e.store == nil {
 		return weave.ErrNoStore
 	}
+	ctx, tenant, err := e.tenant(ctx)
+	if err != nil {
+		return err
+	}
+	switch col.TenantID {
+	case "":
+		col.TenantID = tenant
+	case tenant:
+	default:
+		return fmt.Errorf("%w: tenant on the collection does not match the context tenant", weave.ErrInvalidArgument)
+	}
 
 	if col.ID.String() == "" {
 		col.ID = id.NewCollectionID()
-	}
-	if col.TenantID == "" {
-		col.TenantID = weave.TenantFromContext(ctx)
 	}
 	if col.AppID == "" {
 		col.AppID = weave.AppFromContext(ctx)
@@ -151,35 +159,74 @@ func (e *Engine) CreateCollection(ctx context.Context, col *collection.Collectio
 	return nil
 }
 
-// GetCollection retrieves a collection by ID.
+// GetCollection retrieves a collection by ID within the context tenant.
 func (e *Engine) GetCollection(ctx context.Context, colID id.CollectionID) (*collection.Collection, error) {
 	if e.store == nil {
 		return nil, weave.ErrNoStore
 	}
-	return e.store.GetCollection(ctx, colID)
+	ctx, tenant, err := e.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return e.getCollection(ctx, tenant, colID)
 }
 
-// GetCollectionByName retrieves a collection by tenant and name.
+// getCollection reads a collection and checks it belongs to tenant.
+func (e *Engine) getCollection(ctx context.Context, tenant string, colID id.CollectionID) (*collection.Collection, error) {
+	col, err := e.store.GetCollection(ctx, colID)
+	if err != nil {
+		return nil, err
+	}
+	return ownCollection(col, tenant)
+}
+
+// GetCollectionByName retrieves a collection by name within the context
+// tenant.
 func (e *Engine) GetCollectionByName(ctx context.Context, name string) (*collection.Collection, error) {
 	if e.store == nil {
 		return nil, weave.ErrNoStore
 	}
-	tenantID := weave.TenantFromContext(ctx)
-	return e.store.GetCollectionByName(ctx, tenantID, name)
+	ctx, tenant, err := e.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	col, err := e.store.GetCollectionByName(ctx, tenant, name)
+	if err != nil {
+		return nil, err
+	}
+	return ownCollection(col, tenant)
 }
 
-// ListCollections returns collections matching the given filter.
+// ListCollections returns the context tenant's collections matching the
+// given filter.
 func (e *Engine) ListCollections(ctx context.Context, filter *collection.ListFilter) ([]*collection.Collection, error) {
 	if e.store == nil {
 		return nil, weave.ErrNoStore
 	}
-	return e.store.ListCollections(ctx, filter)
+	ctx, tenant, err := e.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cols, err := e.store.ListCollections(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	return owned(cols, tenant, collectionTenant), nil
 }
 
-// DeleteCollection removes a collection and all its documents and chunks.
+// DeleteCollection removes a collection and all its documents, chunks and
+// vectors. Another tenant's collection is ErrCollectionNotFound, and nothing
+// is deleted.
 func (e *Engine) DeleteCollection(ctx context.Context, colID id.CollectionID) error {
 	if e.store == nil {
 		return weave.ErrNoStore
+	}
+	ctx, tenant, err := e.tenant(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err = e.getCollection(ctx, tenant, colID); err != nil {
+		return err
 	}
 
 	// Delete chunks and documents first.
@@ -194,6 +241,7 @@ func (e *Engine) DeleteCollection(ctx context.Context, colID id.CollectionID) er
 	if e.vectorStore != nil {
 		if err := e.vectorStore.DeleteByMetadata(ctx, map[string]string{
 			"collection_id": colID.String(),
+			"tenant_id":     tenant,
 		}); err != nil {
 			// The error's text can quote a DSN, a host or a tenant key, so
 			// only its type is logged.
@@ -227,8 +275,12 @@ func (e *Engine) CollectionStats(ctx context.Context, colID id.CollectionID) (*C
 	if e.store == nil {
 		return nil, weave.ErrNoStore
 	}
+	ctx, tenant, err := e.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 
-	col, err := e.store.GetCollection(ctx, colID)
+	col, err := e.getCollection(ctx, tenant, colID)
 	if err != nil {
 		return nil, err
 	}
@@ -294,6 +346,10 @@ func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult,
 	if e.chunker == nil {
 		return nil, weave.ErrNoChunker
 	}
+	ctx, tenant, err := e.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if input.Content == "" {
 		return nil, weave.ErrEmptyContent
 	}
@@ -307,7 +363,7 @@ func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult,
 	defer span.End()
 
 	start := time.Now()
-	res, err := e.ingest(ctx, span, input)
+	res, err := e.ingest(ctx, span, tenant, input)
 
 	result := telemetry.ResultOK
 	switch {
@@ -327,15 +383,15 @@ func (e *Engine) Ingest(ctx context.Context, input *IngestInput) (*IngestResult,
 	return res, err
 }
 
-// ingest is Ingest's body, run under span. It sets weave.chunk.count on the
-// span once the content is chunked, so a document that fails later still
-// says how many chunks it had.
-func (e *Engine) ingest(ctx context.Context, span trace.Span, input *IngestInput) (*IngestResult, error) {
+// ingest is Ingest's body, run under span for tenantID. It sets
+// weave.chunk.count on the span once the content is chunked, so a document
+// that fails later still says how many chunks it had.
+func (e *Engine) ingest(ctx context.Context, span trace.Span, tenantID string, input *IngestInput) (*IngestResult, error) {
 	start := time.Now()
-	tenantID := weave.TenantFromContext(ctx)
 
-	// Verify collection exists.
-	col, err := e.store.GetCollection(ctx, input.CollectionID)
+	// The collection must exist within the tenant before anything is
+	// created or embedded.
+	col, err := e.getCollection(ctx, tenantID, input.CollectionID)
 	if err != nil {
 		return nil, err
 	}
@@ -426,21 +482,11 @@ func (e *Engine) ingest(ctx context.Context, span trace.Span, input *IngestInput
 	// Build vector entries.
 	entries := make([]vectorstore.Entry, len(chunks))
 	for i, ch := range chunks {
-		meta := map[string]string{
-			"collection_id": input.CollectionID.String(),
-			"document_id":   doc.ID.String(),
-			"tenant_id":     tenantID,
-			"chunk_index":   fmt.Sprintf("%d", ch.Index),
-		}
-		for k, v := range ch.Metadata {
-			meta[k] = v
-		}
-
 		entries[i] = vectorstore.Entry{
 			ID:       ch.ID.String(),
 			Vector:   embedResults[i].Vector,
 			Content:  ch.Content,
-			Metadata: meta,
+			Metadata: vectorMetadata(ch),
 		}
 	}
 
@@ -471,6 +517,10 @@ func (e *Engine) ingest(ctx context.Context, span trace.Span, input *IngestInput
 
 // IngestBatch ingests multiple documents into a collection.
 func (e *Engine) IngestBatch(ctx context.Context, inputs []*IngestInput) ([]*IngestResult, error) {
+	ctx, _, err := e.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	results := make([]*IngestResult, 0, len(inputs))
 	for _, input := range inputs {
 		result, err := e.Ingest(ctx, input)
@@ -505,14 +555,14 @@ type RetrieveOption func(*RetrieveParams)
 
 // RetrieveParams holds parsed retrieval parameters.
 type RetrieveParams struct {
-	CollectionID string  `json:"collection_id,omitempty"`
-	TenantID     string  `json:"tenant_id,omitempty"`
-	TopK         int     `json:"top_k"`
-	MinScore     float64 `json:"min_score"`
-	Strategy     string  `json:"strategy,omitempty"`
-	// TenantFilter, when set, restricts retrieval to exactly this tenant,
-	// "" included, and wins over the context tenant. It is sent as a
-	// metadata filter because every vector store ignores an empty TenantKey.
+	CollectionID string `json:"collection_id,omitempty"`
+	// TenantID is set by the deprecated WithTenantID. Retrieval always runs
+	// within the context tenant; see WithTenantID.
+	TenantID string  `json:"tenant_id,omitempty"`
+	TopK     int     `json:"top_k"`
+	MinScore float64 `json:"min_score"`
+	Strategy string  `json:"strategy,omitempty"`
+	// TenantFilter is set by the deprecated WithTenantFilter; see there.
 	TenantFilter *string `json:"-"`
 }
 
@@ -536,13 +586,20 @@ func WithStrategy(strategy string) RetrieveOption {
 	return func(p *RetrieveParams) { p.Strategy = strategy }
 }
 
-// WithTenantID explicitly sets the tenant for retrieval.
+// WithTenantID names the tenant to retrieve for. With no tenant on the
+// context it becomes the tenant; with one, it must equal it, or Retrieve
+// returns ErrInvalidArgument. "" names nothing.
+//
+// Deprecated: put the tenant on the context with weave.WithTenant.
 func WithTenantID(tenantID string) RetrieveOption {
 	return func(p *RetrieveParams) { p.TenantID = tenantID }
 }
 
-// WithTenantFilter restricts retrieval to exactly one tenant. Unlike
-// WithTenantID, an empty string means "rows with no tenant", not "everyone".
+// WithTenantFilter names the tenant to retrieve for, as WithTenantID does,
+// except that "" is a value: with a tenant on the context it is
+// ErrInvalidArgument, and without one it is ErrTenantRequired.
+//
+// Deprecated: put the tenant on the context with weave.WithTenant.
 func WithTenantFilter(tenant string) RetrieveOption {
 	return func(p *RetrieveParams) { p.TenantFilter = &tenant }
 }
@@ -559,9 +616,10 @@ type ScoredChunk struct {
 	Orphaned bool `json:"orphaned,omitempty"`
 }
 
-// Retrieve performs a semantic retrieval query. Each hit is read back from
-// the metadata store by chunk ID; a hit whose row is missing is kept and
-// marked Orphaned.
+// Retrieve performs a semantic retrieval query within the context tenant,
+// and never returns another tenant's chunks. Each hit is read back from the
+// metadata store by chunk ID; a hit whose row is missing is kept and marked
+// Orphaned, as long as its vector is labelled with the tenant.
 func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOption) ([]ScoredChunk, error) {
 	if e.retriever == nil && (e.embedder == nil || e.vectorStore == nil) {
 		return nil, fmt.Errorf("weave: no retriever or embedder+vectorstore configured")
@@ -569,6 +627,10 @@ func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOpt
 	params := &RetrieveParams{TopK: e.config.DefaultTopK}
 	for _, opt := range opts {
 		opt(params)
+	}
+	ctx, tenant, err := e.tenantNamed(ctx, nonEmpty(params.TenantID), params.TenantFilter)
+	if err != nil {
+		return nil, err
 	}
 
 	colID, _ := id.ParseCollectionID(params.CollectionID) //nolint:errcheck // empty for cross-collection search
@@ -587,9 +649,9 @@ func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOpt
 	start := time.Now()
 	e.extensions.EmitRetrievalStarted(ctx, colID, query)
 
-	hits, err := e.retrieveRaw(ctx, query, params)
+	hits, err := e.retrieveRaw(ctx, query, params, tenant)
 	if err == nil {
-		hits, err = e.hydrate(ctx, hits)
+		hits, err = e.hydrate(ctx, tenant, hits)
 	}
 	if err != nil {
 		telemetry.Fail(span, err)
@@ -622,34 +684,35 @@ func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOpt
 	return hits, nil
 }
 
+// nonEmpty returns &s, or nil for "".
+func nonEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 // searchScope builds the metadata filter and tenant key both search paths
-// send to the vector side. An explicit TenantFilter wins over the context
-// tenant and is always applied as an exact metadata match, because every
-// vector store treats an empty TenantKey as "no filter".
-func searchScope(params *RetrieveParams) (filter map[string]string, tenantKey string) {
-	filter = map[string]string{}
-	if params.CollectionID != "" {
-		filter["collection_id"] = params.CollectionID
+// send to the vector side. Both always carry tenant, the resolved tenant:
+// the tenant_id filter for stores that only match metadata, and the key for
+// stores with their own tenant scope.
+func searchScope(collectionID, tenant string) (filter map[string]string, tenantKey string) {
+	filter = map[string]string{"tenant_id": tenant}
+	if collectionID != "" {
+		filter["collection_id"] = collectionID
 	}
-	tenantKey = params.TenantID
-	switch {
-	case params.TenantFilter != nil:
-		filter["tenant_id"] = *params.TenantFilter
-		tenantKey = *params.TenantFilter
-	case params.TenantID != "":
-		filter["tenant_id"] = params.TenantID
-	}
-	return filter, tenantKey
+	return filter, tenant
 }
 
 // retrieveRaw runs the configured retriever, or a plain vector search when
-// none is configured, and returns hits as the vector side reported them. It
-// emits no hooks: Retrieve does, once, around the whole call.
-func (e *Engine) retrieveRaw(ctx context.Context, query string, params *RetrieveParams) ([]ScoredChunk, error) {
-	if params.TenantID == "" {
-		params.TenantID = weave.TenantFromContext(ctx)
-	}
-	filter, tenantKey := searchScope(params)
+// none is configured, within tenant, and returns hits as the vector side
+// reported them. It emits no hooks: Retrieve does, once, around the whole
+// call.
+func (e *Engine) retrieveRaw(ctx context.Context, query string, params *RetrieveParams, tenant string) ([]ScoredChunk, error) {
+	// A retriever that reads the store (the similarity retriever does) reads
+	// within the tenant too.
+	ctx = weave.WithTenant(ctx, tenant)
+	filter, tenantKey := searchScope(params.CollectionID, tenant)
 
 	if e.retriever != nil {
 		results, err := e.retriever.Retrieve(ctx, query, &retriever.Options{
@@ -692,40 +755,73 @@ func (e *Engine) retrieveRaw(ctx context.Context, query string, params *Retrieve
 	return scored, nil
 }
 
-// hydrate replaces each hit's chunk with the stored row. A hit with no chunk
-// ID (a custom retriever that sets none) is left as it is, unhydrated.
-func (e *Engine) hydrate(ctx context.Context, hits []ScoredChunk) ([]ScoredChunk, error) {
-	if e.store == nil {
-		return hits, nil
-	}
-	for i := range hits {
-		h := &hits[i]
-		if h.Chunk == nil || h.Chunk.ID.String() == "" {
-			continue
+// hydrate replaces each hit's chunk with the stored row, read within
+// tenant, and drops every hit that belongs to another tenant (see
+// hydrateHit). The hits slice is reused.
+func (e *Engine) hydrate(ctx context.Context, tenant string, hits []ScoredChunk) ([]ScoredChunk, error) {
+	kept := hits[:0]
+	for _, h := range hits {
+		keep, err := e.hydrateHit(ctx, tenant, &h)
+		if err != nil {
+			return nil, err
 		}
-		row, err := e.store.GetChunk(ctx, h.Chunk.ID)
-		switch {
-		case errors.Is(err, weave.ErrChunkNotFound):
-			h.Orphaned = true
-		case err != nil:
-			return nil, fmt.Errorf("weave: hydrate chunk %s: %w", h.Chunk.ID, err)
-		default:
-			h.Chunk = hydratedCopy(row, h.Chunk.Metadata)
-			h.Hydrated = true
+		if keep {
+			kept = append(kept, h)
 		}
 	}
-	return hits, nil
+	return kept, nil
+}
+
+// hydrateHit reads h's chunk back within tenant and reports whether to keep
+// the hit. A hit whose vector is labelled with another tenant is dropped,
+// and so is a missing row whose vector isn't labelled with tenant, so an
+// Orphaned hit never carries another tenant's text. The built-in stores
+// never return either; a custom vector store or retriever that ignores the
+// tenant filter can. A hit with no chunk, or no chunk ID (a custom
+// retriever that sets none), is otherwise left as it is, unhydrated.
+func (e *Engine) hydrateHit(ctx context.Context, tenant string, h *ScoredChunk) (bool, error) {
+	if h.Chunk == nil {
+		return true, nil
+	}
+	label, labelled := h.Chunk.Metadata["tenant_id"]
+	if labelled && label != tenant {
+		return false, nil
+	}
+	if e.store == nil || h.Chunk.ID.String() == "" {
+		return true, nil
+	}
+	row, err := e.store.GetChunk(ctx, h.Chunk.ID)
+	if err == nil {
+		row, err = ownChunk(row, tenant)
+	}
+	switch {
+	case errors.Is(err, weave.ErrChunkNotFound):
+		if label != tenant {
+			return false, nil
+		}
+		h.Orphaned = true
+	case err != nil:
+		return false, fmt.Errorf("weave: hydrate chunk %s: %w", h.Chunk.ID, err)
+	default:
+		h.Chunk = hydratedCopy(row, h.Chunk.Metadata)
+		h.Hydrated = true
+	}
+	return true, nil
 }
 
 // hydratedCopy returns a copy of the stored row, so a caller that edits a
 // hit never edits the store's own chunk. Its metadata keeps the vector-side
-// keys (collection_id, document_id, tenant_id, chunk_index) that clients of
-// the retrieve route already read, with the row's own keys winning a clash.
+// keys that clients of the retrieve route already read, with the row's own
+// keys winning a clash, except that collection_id, document_id, tenant_id
+// and chunk_index always come from the row's own fields.
 func hydratedCopy(row *chunk.Chunk, vectorMeta map[string]string) *chunk.Chunk {
 	out := *row
 	out.Metadata = make(map[string]string, len(vectorMeta)+len(row.Metadata))
 	maps.Copy(out.Metadata, vectorMeta)
 	maps.Copy(out.Metadata, row.Metadata)
+	maps.Copy(out.Metadata, vectorMetadata(&chunk.Chunk{
+		CollectionID: row.CollectionID, DocumentID: row.DocumentID, TenantID: row.TenantID, Index: row.Index,
+	}))
 	return &out
 }
 
@@ -733,32 +829,63 @@ func hydratedCopy(row *chunk.Chunk, vectorMeta map[string]string) *chunk.Chunk {
 // Document operations
 // ──────────────────────────────────────────────────
 
-// GetDocument retrieves a document by ID.
+// GetDocument retrieves a document by ID within the context tenant.
 func (e *Engine) GetDocument(ctx context.Context, docID id.DocumentID) (*document.Document, error) {
 	if e.store == nil {
 		return nil, weave.ErrNoStore
 	}
-	return e.store.GetDocument(ctx, docID)
+	ctx, tenant, err := e.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return e.getDocument(ctx, tenant, docID)
 }
 
-// ListDocuments returns documents matching the given filter.
+// getDocument reads a document and checks it belongs to tenant.
+func (e *Engine) getDocument(ctx context.Context, tenant string, docID id.DocumentID) (*document.Document, error) {
+	doc, err := e.store.GetDocument(ctx, docID)
+	if err != nil {
+		return nil, err
+	}
+	return ownDocument(doc, tenant)
+}
+
+// ListDocuments returns the context tenant's documents matching the given
+// filter.
 func (e *Engine) ListDocuments(ctx context.Context, filter *document.ListFilter) ([]*document.Document, error) {
 	if e.store == nil {
 		return nil, weave.ErrNoStore
 	}
-	return e.store.ListDocuments(ctx, filter)
+	ctx, tenant, err := e.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	docs, err := e.store.ListDocuments(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	return owned(docs, tenant, documentTenant), nil
 }
 
 // DeleteDocument removes a document and its chunks from both stores.
+// Another tenant's document is ErrDocumentNotFound, and nothing is deleted.
 func (e *Engine) DeleteDocument(ctx context.Context, docID id.DocumentID) error {
 	if e.store == nil {
 		return weave.ErrNoStore
+	}
+	ctx, tenant, err := e.tenant(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err = e.getDocument(ctx, tenant, docID); err != nil {
+		return err
 	}
 
 	// Delete vector entries for the document.
 	if e.vectorStore != nil {
 		if err := e.vectorStore.DeleteByMetadata(ctx, map[string]string{
 			"document_id": docID.String(),
+			"tenant_id":   tenant,
 		}); err != nil {
 			// The error's text can quote a DSN, a host or a tenant key, so
 			// only its type is logged.
@@ -798,6 +925,10 @@ func (e *Engine) ReindexCollection(ctx context.Context, colID id.CollectionID) e
 	if e.vectorStore == nil {
 		return weave.ErrNoVectorStore
 	}
+	ctx, tenant, err := e.tenant(ctx)
+	if err != nil {
+		return err
+	}
 
 	ctx, span := telemetry.Tracer().Start(ctx, "reindex collection", trace.WithAttributes(
 		telemetry.CollectionID.String(colID.String()),
@@ -805,7 +936,7 @@ func (e *Engine) ReindexCollection(ctx context.Context, colID id.CollectionID) e
 	))
 	defer span.End()
 
-	docs, chunks, err := e.reindex(ctx, colID)
+	docs, chunks, err := e.reindex(ctx, tenant, colID)
 	span.SetAttributes(
 		telemetry.ReindexDocuments.Int(docs),
 		telemetry.ReindexChunks.Int(chunks),
@@ -816,9 +947,14 @@ func (e *Engine) ReindexCollection(ctx context.Context, colID id.CollectionID) e
 	return err
 }
 
-// reindex is ReindexCollection's body, run under its span. It returns how
-// many documents and chunks it re-embedded, so far when it fails.
-func (e *Engine) reindex(ctx context.Context, colID id.CollectionID) (docCount, chunkCount int, err error) {
+// reindex is ReindexCollection's body, run under its span for tenant. It
+// returns how many documents and chunks it re-embedded, so far when it
+// fails. Another tenant's collection is ErrCollectionNotFound before
+// anything is deleted or embedded.
+func (e *Engine) reindex(ctx context.Context, tenant string, colID id.CollectionID) (docCount, chunkCount int, err error) {
+	if _, err = e.getCollection(ctx, tenant, colID); err != nil {
+		return 0, 0, err
+	}
 	start := time.Now()
 	e.extensions.EmitReindexStarted(ctx, colID)
 
@@ -830,10 +966,12 @@ func (e *Engine) reindex(ctx context.Context, colID id.CollectionID) (docCount, 
 	if err != nil {
 		return 0, 0, fmt.Errorf("weave: list documents for reindex: %w", err)
 	}
+	docs = owned(docs, tenant, documentTenant)
 
 	// Delete existing vector entries for the collection.
 	if err := e.vectorStore.DeleteByMetadata(ctx, map[string]string{
 		"collection_id": colID.String(),
+		"tenant_id":     tenant,
 	}); err != nil {
 		return 0, 0, fmt.Errorf("weave: delete vectors for reindex: %w", err)
 	}
@@ -844,6 +982,7 @@ func (e *Engine) reindex(ctx context.Context, colID id.CollectionID) (docCount, 
 		if err != nil {
 			return docCount, chunkCount, fmt.Errorf("weave: list chunks for reindex: %w", err)
 		}
+		chunks = owned(chunks, tenant, chunkTenant)
 
 		if len(chunks) == 0 {
 			continue
@@ -861,20 +1000,11 @@ func (e *Engine) reindex(ctx context.Context, colID id.CollectionID) (docCount, 
 
 		entries := make([]vectorstore.Entry, len(chunks))
 		for i, ch := range chunks {
-			meta := map[string]string{
-				"collection_id": colID.String(),
-				"document_id":   doc.ID.String(),
-				"tenant_id":     ch.TenantID,
-				"chunk_index":   fmt.Sprintf("%d", ch.Index),
-			}
-			for k, v := range ch.Metadata {
-				meta[k] = v
-			}
 			entries[i] = vectorstore.Entry{
 				ID:       ch.ID.String(),
 				Vector:   embedResults[i].Vector,
 				Content:  ch.Content,
-				Metadata: meta,
+				Metadata: vectorMetadata(ch),
 			}
 		}
 
@@ -906,8 +1036,13 @@ type HybridSearchParams struct {
 	MinScore float64 `json:"min_score"`
 }
 
-// HybridSearch performs retrieval across one or more collections.
+// HybridSearch performs retrieval across one or more of the context
+// tenant's collections, or all of them when none is named.
 func (e *Engine) HybridSearch(ctx context.Context, query string, params *HybridSearchParams) ([]ScoredChunk, error) {
+	ctx, _, err := e.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if params == nil {
 		params = &HybridSearchParams{}
 	}
@@ -939,7 +1074,7 @@ func (e *Engine) HybridSearch(ctx context.Context, query string, params *HybridS
 		return all, nil
 	}
 
-	// No collection filter — search across all.
+	// No collection filter: search every collection of the tenant.
 	return e.Retrieve(ctx, query,
 		WithTopK(params.TopK),
 		WithMinScore(params.MinScore),

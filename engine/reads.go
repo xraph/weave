@@ -11,44 +11,70 @@ import (
 	"github.com/xraph/weave/id"
 )
 
-// CountCollections counts collections matching the filter.
+// CountCollections counts the context tenant's collections matching the
+// filter.
 func (e *Engine) CountCollections(ctx context.Context, filter *collection.CountFilter) (int64, error) {
 	if e.store == nil {
 		return 0, weave.ErrNoStore
 	}
+	ctx, _, err := e.tenant(ctx)
+	if err != nil {
+		return 0, err
+	}
 	return e.store.CountCollections(ctx, filter)
 }
 
-// CountDocuments counts documents matching the filter.
+// CountDocuments counts the context tenant's documents matching the filter.
 func (e *Engine) CountDocuments(ctx context.Context, filter *document.CountFilter) (int64, error) {
 	if e.store == nil {
 		return 0, weave.ErrNoStore
 	}
+	ctx, _, err := e.tenant(ctx)
+	if err != nil {
+		return 0, err
+	}
 	return e.store.CountDocuments(ctx, filter)
 }
 
-// CountChunks counts chunks matching the filter.
+// CountChunks counts the context tenant's chunks matching the filter.
 func (e *Engine) CountChunks(ctx context.Context, filter *chunk.CountFilter) (int64, error) {
 	if e.store == nil {
 		return 0, weave.ErrNoStore
 	}
+	ctx, _, err := e.tenant(ctx)
+	if err != nil {
+		return 0, err
+	}
 	return e.store.CountChunks(ctx, filter)
 }
 
-// GetChunk reads one chunk.
+// GetChunk reads one chunk within the context tenant.
 func (e *Engine) GetChunk(ctx context.Context, chunkID id.ChunkID) (*chunk.Chunk, error) {
 	if e.store == nil {
 		return nil, weave.ErrNoStore
 	}
-	return e.store.GetChunk(ctx, chunkID)
+	ctx, tenant, err := e.tenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ch, err := e.store.GetChunk(ctx, chunkID)
+	if err != nil {
+		return nil, err
+	}
+	return ownChunk(ch, tenant)
 }
 
-// ListChunks pages chunks by document or by collection. A filter naming
+// ListChunks pages the context tenant's chunks by document or by
+// collection. A filter naming
 // neither is refused: an unscoped chunk listing is a full table scan nobody
 // asked for.
 func (e *Engine) ListChunks(ctx context.Context, filter *chunk.ListFilter) ([]*chunk.Chunk, error) {
 	if e.store == nil {
 		return nil, weave.ErrNoStore
+	}
+	ctx, tenant, err := e.tenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 	if filter == nil || (filter.DocumentID.String() == "" && filter.CollectionID.String() == "") {
 		return nil, fmt.Errorf("%w: list chunks needs a document or a collection", weave.ErrInvalidArgument)
@@ -57,6 +83,7 @@ func (e *Engine) ListChunks(ctx context.Context, filter *chunk.ListFilter) ([]*c
 	if err != nil {
 		return nil, err
 	}
+	chunks = owned(chunks, tenant, chunkTenant)
 	if chunks == nil {
 		// An empty page is [] on the wire, never null.
 		chunks = []*chunk.Chunk{}

@@ -51,10 +51,10 @@ With the Weave Forge extension, pass it as `weaveext.WithEngineOption(fabriqvec.
 
 | `VectorStore` call | Fabriq |
 |--------------------|--------|
-| `Upsert(entries)` | One Fabriq `Upsert` per entry. `Content` goes into the meta map under `content`, and `Metadata` sits alongside it. |
-| `Search(vec, opts)` | Fabriq `Similar` with `opts.Filter` as the metadata filter. `opts.TenantKey` sets Fabriq's tenant scope on the context. `MinScore` filters afterwards. `Content` and `Metadata` are rebuilt from the meta map. |
+| `Upsert(entries)` | One Fabriq `Upsert` per entry. `Content` goes into the meta map under `content`, and `Metadata` sits alongside it. A batch with an entry lacking `metadata["tenant_id"]` is `ErrTenantRequired` and nothing is written. |
+| `Search(vec, opts)` | Fabriq `Similar` with `opts.Filter` as the metadata filter. `opts.TenantKey` is required (`ErrTenantRequired` without it) and sets Fabriq's tenant scope on the context. `MinScore` filters afterwards. `Content` and `Metadata` are rebuilt from the meta map. |
 | `Delete(ids)` | One Fabriq `Delete` per ID |
-| `DeleteByMetadata(filter)` | Fabriq `DeleteByMeta`, all key/value pairs must match |
+| `DeleteByMetadata(filter)` | Fabriq `DeleteByMeta`, all key/value pairs must match. An empty filter is `ErrInvalidArgument` |
 
 Differences from the pgvector store:
 

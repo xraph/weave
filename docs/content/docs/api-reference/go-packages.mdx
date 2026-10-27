@@ -37,7 +37,7 @@ Everything lives in the one module, `github.com/xraph/weave`. The full API is on
 | `Engine.ReindexCollection` | Re-embed a collection |
 | `Engine.Components`, `DescribeExtensions`, `Config`, `Store`, `Logger`, `Extensions` | Introspection |
 | `Engine.Start`, `Stop`, `Health` | Lifecycle. `Start` does nothing yet; `Stop` fires `OnShutdown` and closes the store. |
-| `WithCollection`, `WithTopK`, `WithMinScore`, `WithTenantID`, `WithTenantFilter`, `WithStrategy` | Retrieve options (`WithStrategy` is ignored) |
+| `WithCollection`, `WithTopK`, `WithMinScore`, `WithTenantID`, `WithTenantFilter`, `WithStrategy` | Retrieve options (`WithStrategy` is ignored; `WithTenantID` and `WithTenantFilter` are deprecated and must match the context tenant) |
 | `IngestInput`, `IngestResult`, `ScoredChunk`, `HybridSearchParams`, `AssembleParams`, `AssembledContext`, `CollectionUpdate`, `CompareParams`, `CompareResult` | Parameter and result types |
 
 ## Interface packages

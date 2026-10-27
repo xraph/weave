@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/xraph/weave"
 	"github.com/xraph/weave/assembler"
 	"github.com/xraph/weave/chunker"
 	"github.com/xraph/weave/embedder"
@@ -16,11 +17,11 @@ import (
 
 // Context keys for passing data between steps.
 const (
-	KeyContent      = "content"       // string — loaded text content
+	KeyContent      = "content"       // string: loaded text content
 	KeyChunks       = "chunks"        // []chunker.ChunkResult
 	KeyEmbeddings   = "embeddings"    // []embedder.EmbedResult
 	KeyEntries      = "entries"       // []vectorstore.Entry
-	KeyQuery        = "query"         // string — retrieval query
+	KeyQuery        = "query"         // string: retrieval query
 	KeyResults      = "results"       // []retriever.Result
 	KeyAssembled    = "assembled"     // *assembler.AssembleResult
 	KeyCollectionID = "collection_id" // string
@@ -109,7 +110,7 @@ func (s *ChunkStep) Run(ctx context.Context, sc *StepContext) error {
 // ──────────────────────────────────────────────────
 
 // EmbedStep generates embeddings for chunks.
-// Input: KeyChunks ([]chunker.ChunkResult)
+// Input: KeyChunks ([]chunker.ChunkResult), KeyTenantID (string, required)
 // Output: KeyEmbeddings ([]embedder.EmbedResult), KeyEntries ([]vectorstore.Entry)
 type EmbedStep struct {
 	embedder embedder.Embedder
@@ -123,8 +124,15 @@ func NewEmbedStep(e embedder.Embedder) *EmbedStep {
 // Name returns "embed".
 func (s *EmbedStep) Name() string { return "embed" }
 
-// Run generates embeddings.
+// Run generates embeddings. A step context without a non-empty string
+// under KeyTenantID is ErrTenantRequired, before the embedder is called:
+// every entry it builds is labelled with that tenant.
 func (s *EmbedStep) Run(ctx context.Context, sc *StepContext) error {
+	tenantID, _ := sc.Get(KeyTenantID)
+	tid, _ := tenantID.(string) //nolint:errcheck // a value of another type is no tenant
+	if tid == "" {
+		return fmt.Errorf("embed: %w", weave.ErrTenantRequired)
+	}
 	chunks, ok := sc.MustGet(KeyChunks).([]chunker.ChunkResult)
 	if !ok {
 		return fmt.Errorf("embed: chunks is not []chunker.ChunkResult")
@@ -145,22 +153,19 @@ func (s *EmbedStep) Run(ctx context.Context, sc *StepContext) error {
 	// Build vector store entries.
 	collectionID, _ := sc.Get(KeyCollectionID)
 	documentID, _ := sc.Get(KeyDocumentID)
-	tenantID, _ := sc.Get(KeyTenantID)
 
 	entries := make([]vectorstore.Entry, len(chunks))
 	for i, ch := range chunks {
 		chunkID := id.NewChunkID()
 		meta := map[string]string{
 			"chunk_index": fmt.Sprintf("%d", ch.Index),
+			"tenant_id":   tid,
 		}
 		if cid, ok := collectionID.(string); ok && cid != "" {
 			meta["collection_id"] = cid
 		}
 		if did, ok := documentID.(string); ok && did != "" {
 			meta["document_id"] = did
-		}
-		if tid, ok := tenantID.(string); ok && tid != "" {
-			meta["tenant_id"] = tid
 		}
 
 		entries[i] = vectorstore.Entry{

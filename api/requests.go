@@ -27,8 +27,8 @@ type GetCollectionRequest struct {
 
 // ListCollectionsRequest is the request for listing collections.
 type ListCollectionsRequest struct {
-	Limit  int `query:"limit" description:"Maximum number of results (default: 50)"`
-	Offset int `query:"offset" description:"Number of results to skip"`
+	Limit  int `query:"limit" optional:"true" description:"Maximum number of results (default: 50)"`
+	Offset int `query:"offset" optional:"true" description:"Number of results to skip"`
 }
 
 // DeleteCollectionRequest is the request for deleting a collection.
@@ -80,9 +80,9 @@ type GetDocumentRequest struct {
 // ListDocumentsRequest is the request for listing documents.
 type ListDocumentsRequest struct {
 	CollectionID string `path:"collectionId" description:"Collection ID"`
-	State        string `query:"state" description:"Filter by document state (pending, processing, ready, failed)"`
-	Limit        int    `query:"limit" description:"Maximum number of results (default: 50)"`
-	Offset       int    `query:"offset" description:"Number of results to skip"`
+	State        string `query:"state" optional:"true" description:"Filter by document state (pending, processing, ready, failed)"`
+	Limit        int    `query:"limit" optional:"true" description:"Maximum number of results (default: 50)"`
+	Offset       int    `query:"offset" optional:"true" description:"Number of results to skip"`
 }
 
 // DeleteDocumentRequest is the request for deleting a document.

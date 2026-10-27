@@ -23,6 +23,7 @@ import (
 	"github.com/xraph/weave/embedder"
 	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/id"
+	"github.com/xraph/weave/internal/embedtest"
 	"github.com/xraph/weave/retriever"
 	"github.com/xraph/weave/vectorstore"
 )
@@ -124,10 +125,10 @@ func (s *fakeSink) byName(name string) []*fakeSeries {
 	return out
 }
 
-// describedEmbedder is a hashEmbedder that describes itself and reports a
+// describedEmbedder is a hash embedder that describes itself and reports a
 // token count per input, the way the OpenAI embedder does.
 type describedEmbedder struct {
-	hashEmbedder
+	*embedtest.Hash
 	kind   string
 	model  string
 	tokens int
@@ -138,7 +139,7 @@ func (d describedEmbedder) Embed(ctx context.Context, texts []string) ([]embedde
 	if d.err != nil {
 		return nil, d.err
 	}
-	out, err := d.hashEmbedder.Embed(ctx, texts)
+	out, err := d.Hash.Embed(ctx, texts)
 	for i := range out {
 		out[i].TokenCount = d.tokens
 	}
@@ -224,7 +225,7 @@ func TestIngestSpansAndMetrics(t *testing.T) {
 	sink := newFakeSink()
 	r := newRig(t,
 		withOpt(engine.WithMetrics(sink)),
-		withOpt(engine.WithEmbedder(describedEmbedder{hashEmbedder: hashEmbedder{dims: 64}, kind: "openai", model: "text-embedding-3-small", tokens: 7})),
+		withOpt(engine.WithEmbedder(describedEmbedder{Hash: embedtest.New(64), kind: "openai", model: "text-embedding-3-small", tokens: 7})),
 	)
 	col := mustCollectionAs(t, weave.WithTenant(context.Background(), secret), r.Engine, "telemetry")
 
@@ -311,7 +312,7 @@ func TestCustomKindsAreBounded(t *testing.T) {
 	sink := newFakeSink()
 	r := newRig(t,
 		withOpt(engine.WithMetrics(sink)),
-		withOpt(engine.WithEmbedder(describedEmbedder{hashEmbedder: hashEmbedder{dims: 64}, kind: secret, model: secret})),
+		withOpt(engine.WithEmbedder(describedEmbedder{Hash: embedtest.New(64), kind: secret, model: secret})),
 	)
 	col := mustTestCollection(t, r.Engine, "kinds")
 	mustIngest(t, weave.WithTenant(context.Background(), "t1"), r.Engine, col.ID, "t", "some words to embed")
@@ -392,10 +393,10 @@ func TestCustomComponentsAreLabelledCustom(t *testing.T) {
 }
 
 // countingEmbedder reports a token count but doesn't describe itself.
-type countingEmbedder struct{ hashEmbedder }
+type countingEmbedder struct{ *embedtest.Hash }
 
 func (c countingEmbedder) Embed(ctx context.Context, texts []string) ([]embedder.EmbedResult, error) {
-	out, err := c.hashEmbedder.Embed(ctx, texts)
+	out, err := c.Hash.Embed(ctx, texts)
 	for i := range out {
 		out[i].TokenCount = 5
 	}
@@ -409,7 +410,7 @@ func TestUsageNeedsNoDescriber(t *testing.T) {
 	sink := newFakeSink()
 	r := newRig(t,
 		withOpt(engine.WithMetrics(sink)),
-		withOpt(engine.WithEmbedder(countingEmbedder{hashEmbedder{dims: 64}})),
+		withOpt(engine.WithEmbedder(countingEmbedder{embedtest.New(64)})),
 	)
 	col := mustTestCollection(t, r.Engine, "usage")
 	res, err := r.Engine.Ingest(weave.WithTenant(context.Background(), "t1"), &engine.IngestInput{CollectionID: col.ID, Content: "a few words"})
@@ -436,7 +437,7 @@ func TestIngestFailureNamesTheTypeOnly(t *testing.T) {
 	sink := newFakeSink()
 	r := newRig(t,
 		withOpt(engine.WithMetrics(sink)),
-		withOpt(engine.WithEmbedder(describedEmbedder{hashEmbedder: hashEmbedder{dims: 64}, kind: "openai", err: errors.New("provider said no to " + secret)})),
+		withOpt(engine.WithEmbedder(describedEmbedder{Hash: embedtest.New(64), kind: "openai", err: errors.New("provider said no to " + secret)})),
 	)
 	col := mustTestCollection(t, r.Engine, "fail")
 	if _, err := r.Engine.Ingest(weave.WithTenant(context.Background(), "t1"), &engine.IngestInput{CollectionID: col.ID, Content: "hello there"}); err == nil {
@@ -546,7 +547,7 @@ func TestRetrieveSpansAndMetrics(t *testing.T) {
 		t.Fatal("no query embed span")
 	}
 	childOf(t, queryEmbed, ret)
-	// hashEmbedder doesn't describe itself or report tokens.
+	// The hash embedder doesn't describe itself or report tokens.
 	wantAttr(t, queryEmbed, "gen_ai.provider.name", "custom")
 	if _, ok := attrsOf(queryEmbed)["gen_ai.usage.input_tokens"]; ok {
 		t.Error("an embedder that reports no tokens got a usage attribute")

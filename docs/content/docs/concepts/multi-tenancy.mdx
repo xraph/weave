@@ -29,15 +29,15 @@ The metadata store reads the tenant from the context on every call except `Migra
 | `ListCollections`, `ListDocuments`, `ListChunks`, `Count*` | Return only `t`'s rows |
 | `Ingest`, `IngestBatch` | Read the collection within `t` first, so another tenant's collection ID is `ErrCollectionNotFound`. The document, its chunks and the `tenant_id` key of each vector get `t` |
 | `CollectionStats` | Reads the collection and its counts within `t` |
-| `ReindexCollection` | Re-embeds only `t`'s documents |
-| `DeleteCollection`, `DeleteDocument` | Delete only `t`'s rows. Another tenant's ID is not-found |
-| `Retrieve`, `HybridSearch` | Filter the vector search to `tenant_id` and read each hit back within `t` |
+| `ReindexCollection` | Reads the collection within `t` first, then re-embeds `t`'s documents. Another tenant's collection is `ErrCollectionNotFound` and nothing is touched |
+| `DeleteCollection`, `DeleteDocument` | Read the collection or document within `t` first, then delete its rows and the vectors labelled with both its ID and `t`. Another tenant's ID is not-found and nothing is deleted |
+| `Retrieve`, `HybridSearch`, `RetrieveCompare` | Filter the vector search to `tenant_id` and read each hit back within `t` |
 
 Another tenant's ID is not-found on purpose: if it gave a different error, anyone holding a list of IDs could work out which of them exist.
 
 `AppID` is recorded on collections and nothing else. No call filters by it.
 
-The vector side of `DeleteDocument`, `DeleteCollection` and `ReindexCollection` still goes by `document_id` or `collection_id` alone. Called with another tenant's ID, they leave that tenant's rows alone but remove its vectors. So when an ID comes from outside your service, check it with `GetDocument` or `GetCollection` under the caller's tenant before you pass it to one of them.
+The engine also checks every row a store hands back. A collection, document or chunk whose `TenantID` isn't `t` is treated as not-found, so a custom store that forgets the tenant still can't leak a row through the engine.
 
 ## The Tenant filter field
 
@@ -58,17 +58,25 @@ Weave v1.8 let you write with no tenant, and its dashboard always did, so an exi
 
 ## Retrieval
 
-At ingest, each vector's metadata gets `tenant_id` and `collection_id`. `Retrieve` adds both to the search filter:
+At ingest, each vector's metadata gets `tenant_id`, `collection_id`, `document_id` and `chunk_index`. Weave writes those four after it copies the chunker's own metadata, so a chunker that emits a `tenant_id` key can't move a vector into another tenant's search.
 
-| You pass | Tenant filter |
-|----------|---------------|
-| nothing, with a tenant on the context | the context tenant |
-| `engine.WithTenantID("t")` | `t`, overriding the context |
-| `engine.WithTenantFilter("t")` | exactly `t`, overriding the context |
+`Retrieve` checks the tenant before it embeds anything. Without one it returns `ErrTenantRequired` and the embedder is never called. With one, it searches only that tenant's vectors and reads each hit back within it:
 
-Each hit is then read back from the metadata store within the context tenant. With no tenant on the context, that read is refused, so `Retrieve` fails with `ErrTenantRequired` as soon as the search finds anything. With an option naming a different tenant from the context's, the hits can't be read back and come back marked `Orphaned`.
+| You pass | What happens |
+|----------|--------------|
+| nothing, with tenant `t` on the context | searches `t` |
+| `engine.WithTenantID("t")` or `engine.WithTenantFilter("t")`, no tenant on the context | `t` becomes the tenant and is put on the context for the rest of the call |
+| either option naming `t`, with `t` on the context | searches `t` |
+| either option naming anything else, with `t` on the context | `ErrInvalidArgument`. `WithTenantFilter("")` counts as naming something else |
+| `WithTenantFilter("")` with no tenant on the context | `ErrTenantRequired` |
 
-The in-memory and pgvector stores apply the filter as an exact match on the `tenant_id` metadata key. The Fabriq store also sets Fabriq's own tenant scope from it.
+Both options, and `CompareParams.Tenant` on `RetrieveCompare`, are deprecated and only kept so old code compiles. Put the tenant on the context instead.
+
+A hit whose vector is labelled with another tenant is dropped, and so is an orphaned hit (its chunk row is gone) whose vector isn't labelled with `t`. So an `Orphaned` hit never carries another tenant's text. The built-in vector stores never return such a hit in the first place; the check is there for a custom store or retriever that ignores the filter.
+
+Every built-in vector store refuses a `Search` with an empty `TenantKey` and an `Upsert` of an entry without `metadata["tenant_id"]`, both with `ErrTenantRequired`, and a `DeleteByMetadata` with an empty filter with `ErrInvalidArgument`. The in-memory and pgvector stores match `tenant_id` exactly. The Fabriq store also sets Fabriq's own tenant scope from `TenantKey`.
+
+Nothing searches across tenants. To search a collection that several tenants share, keep it under a tenant of its own, call `Retrieve` a second time under that tenant's context and merge the two result lists.
 
 ## Tenant and app
 
@@ -90,4 +98,4 @@ func reindex(eng *engine.Engine, tenantID string, colID id.CollectionID) error {
 }
 ```
 
-Use the collection's own tenant. Under any other tenant, `ReindexCollection` finds none of the collection's documents, and it still clears the collection's vectors first (see above).
+Use the collection's own tenant. Under any other tenant, `ReindexCollection` returns `ErrCollectionNotFound` and leaves the collection alone.

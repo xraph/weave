@@ -93,15 +93,19 @@ type ChunkRef struct {
 	Score   float64    `json:"score"`
 }
 
-// AssembleRefs reads each chunk back by ID and assembles them in the given
-// order, without embedding anything. A missing chunk is an error: the ranking
+// AssembleRefs reads each chunk back by ID within the context tenant and
+// assembles them in the given order, without embedding anything. A missing chunk is an error: the ranking
 // it came from is stale.
 func (e *Engine) AssembleRefs(ctx context.Context, refs []ChunkRef, p AssembleParams) (*AssembledContext, []ScoredChunk, error) {
+	ctx, _, err := e.tenant(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	hits := make([]ScoredChunk, len(refs))
 	for i, ref := range refs {
-		ch, err := e.GetChunk(ctx, ref.ChunkID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("weave: assemble chunk %s: %w", ref.ChunkID, err)
+		ch, getErr := e.GetChunk(ctx, ref.ChunkID)
+		if getErr != nil {
+			return nil, nil, fmt.Errorf("weave: assemble chunk %s: %w", ref.ChunkID, getErr)
 		}
 		hits[i] = ScoredChunk{Chunk: ch, Score: ref.Score, Hydrated: true}
 	}

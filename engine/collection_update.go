@@ -22,16 +22,21 @@ type CollectionUpdate struct {
 	Metadata    *map[string]string
 }
 
-// UpdateCollection applies upd and returns the stored collection.
+// UpdateCollection applies upd to one of the context tenant's collections
+// and returns the stored collection.
 func (e *Engine) UpdateCollection(ctx context.Context, colID id.CollectionID, upd CollectionUpdate) (*collection.Collection, error) {
 	if e.store == nil {
 		return nil, weave.ErrNoStore
+	}
+	ctx, tenant, err := e.tenant(ctx)
+	if err != nil {
+		return nil, err
 	}
 	if upd.Name != nil && strings.TrimSpace(*upd.Name) == "" {
 		return nil, fmt.Errorf("%w: collection name cannot be blank", weave.ErrInvalidArgument)
 	}
 
-	current, err := e.store.GetCollection(ctx, colID)
+	current, err := e.getCollection(ctx, tenant, colID)
 	if err != nil {
 		return nil, err
 	}
@@ -53,5 +58,5 @@ func (e *Engine) UpdateCollection(ctx context.Context, colID id.CollectionID, up
 	if err := e.store.UpdateCollection(ctx, &next); err != nil {
 		return nil, err
 	}
-	return e.store.GetCollection(ctx, colID)
+	return e.getCollection(ctx, tenant, colID)
 }

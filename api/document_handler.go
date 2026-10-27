@@ -30,13 +30,13 @@ func (a *API) ingestDocument(ctx forge.Context, req *IngestDocumentRequest) (*en
 		Metadata:     req.Metadata,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("ingest document: %w", err)
+		return nil, mapStoreError(err)
 	}
 
-	return result, ctx.JSON(http.StatusCreated, result)
+	return nil, ctx.JSON(http.StatusCreated, result)
 }
 
-func (a *API) ingestBatch(ctx forge.Context, req *IngestBatchRequest) ([]*engine.IngestResult, error) {
+func (a *API) ingestBatch(ctx forge.Context, req *IngestBatchRequest) (*struct{}, error) {
 	colID, err := id.ParseCollectionID(ctx.Param("collectionId"))
 	if err != nil {
 		return nil, forge.BadRequest(fmt.Sprintf("invalid collection ID: %v", err))
@@ -59,10 +59,10 @@ func (a *API) ingestBatch(ctx forge.Context, req *IngestBatchRequest) ([]*engine
 
 	results, err := a.eng.IngestBatch(ctx.Context(), inputs)
 	if err != nil {
-		return results, fmt.Errorf("ingest batch: %w", err)
+		return nil, mapStoreError(err)
 	}
 
-	return results, ctx.JSON(http.StatusCreated, results)
+	return nil, ctx.JSON(http.StatusCreated, results)
 }
 
 func (a *API) getDocument(ctx forge.Context, _ *GetDocumentRequest) (*document.Document, error) {
@@ -76,10 +76,10 @@ func (a *API) getDocument(ctx forge.Context, _ *GetDocumentRequest) (*document.D
 		return nil, mapStoreError(err)
 	}
 
-	return doc, ctx.JSON(http.StatusOK, doc)
+	return nil, ctx.JSON(http.StatusOK, doc)
 }
 
-func (a *API) listDocuments(ctx forge.Context, req *ListDocumentsRequest) ([]*document.Document, error) {
+func (a *API) listDocuments(ctx forge.Context, req *ListDocumentsRequest) (*struct{}, error) {
 	colID, err := id.ParseCollectionID(ctx.Param("collectionId"))
 	if err != nil {
 		return nil, forge.BadRequest(fmt.Sprintf("invalid collection ID: %v", err))
@@ -92,10 +92,10 @@ func (a *API) listDocuments(ctx forge.Context, req *ListDocumentsRequest) ([]*do
 		Offset:       req.Offset,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list documents: %w", err)
+		return nil, mapStoreError(err)
 	}
 
-	return docs, ctx.JSON(http.StatusOK, docs)
+	return nil, ctx.JSON(http.StatusOK, docs)
 }
 
 func (a *API) deleteDocument(ctx forge.Context, _ *DeleteDocumentRequest) (*struct{}, error) {
