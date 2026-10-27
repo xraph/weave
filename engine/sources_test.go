@@ -466,6 +466,47 @@ func TestReindexDuringAKeyedSwapKeepsTheNewVersionsVectors(t *testing.T) {
 	}
 }
 
+// staleReadyListing is a memory store whose listing of ready documents
+// also returns extra, as a listing taken just before those documents
+// stopped being ready would.
+type staleReadyListing struct {
+	*memory.Store
+	extra *document.Document
+}
+
+func (s staleReadyListing) ListDocuments(ctx context.Context, filter *document.ListFilter) ([]*document.Document, error) {
+	docs, err := s.Store.ListDocuments(ctx, filter)
+	if err == nil && filter != nil && filter.State == document.StateReady {
+		docs = append(docs, s.extra)
+	}
+	return docs, err
+}
+
+// Reindex reads each document again before it touches it, and skips one
+// that is no longer ready: a failed document listed as ready a moment
+// earlier gets no vectors back.
+func TestReindexSkipsADocumentThatIsNoLongerReady(t *testing.T) {
+	listing := &staleReadyListing{}
+	r := newRig(t, func(r *testRig) engine.Option { listing.Store = r.Store; return engine.WithStore(listing) })
+	col := mustTestCollection(t, r.Engine, "docs")
+	ready := mustIngest(t, tenantCtx("t1"), r.Engine, col.ID, "ready", sharedText)
+	failed := plantCrashed(t, r, col, document.StateFailed, 2)
+	if err := r.Vectors.DeleteByMetadata(tenantCtx("t1"), map[string]string{"document_id": failed.ID.String(), "tenant_id": "t1"}); err != nil {
+		t.Fatalf("drop the failed document's vectors: %v", err)
+	}
+	listing.extra = failed
+
+	if err := r.Engine.ReindexCollection(tenantCtx("t1"), col.ID); err != nil {
+		t.Fatalf("reindex: %v", err)
+	}
+	if v := vectorsOf(t, r.Vectors, map[string]string{"document_id": failed.ID.String()}); len(v) != 0 {
+		t.Errorf("failed document: %d vectors after reindex, want 0", len(v))
+	}
+	if v := vectorsOf(t, r.Vectors, map[string]string{"document_id": ready.String()}); len(v) == 0 {
+		t.Error("ready document: no vectors after reindex")
+	}
+}
+
 func TestConcurrentSameSourceIngestKeepsOneReadyDocument(t *testing.T) {
 	r := newRig(t)
 	col := mustTestCollection(t, r.Engine, "docs")
