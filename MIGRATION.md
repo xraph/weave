@@ -24,12 +24,13 @@ dashboard contract answers `PERMISSION_DENIED`. The built-in vector stores
 refuse a `Search` with no `TenantKey` and an `Upsert` whose entry has no
 `metadata["tenant_id"]`, with the same error.
 
-Gets, updates and deletes by ID stay inside the tenant too. In v1.8 a get
-or delete with another tenant's ID found that row and acted on it. Now you
-get the same not-found error as an ID that doesn't exist (`weave.ErrCollectionNotFound`, `weave.ErrDocumentNotFound` or
-`weave.ErrChunkNotFound`), and nothing is touched. `CreateCollection` fills
-an empty `TenantID` from the context, but a `TenantID` that names another
-tenant is `weave.ErrInvalidArgument`.
+Gets, updates and deletes by ID stay inside the tenant too. In v1.8 a get or
+delete with another tenant's ID found that row and acted on it. Now you get
+the same not-found error as an ID that doesn't exist
+(`weave.ErrCollectionNotFound`, `weave.ErrDocumentNotFound` or
+`weave.ErrChunkNotFound`), and nothing is touched. `CreateCollection` fills an
+empty `TenantID` from the context, but a `TenantID` that names another tenant
+is `weave.ErrInvalidArgument`.
 
 A job that isn't serving a request has to build its own context with the
 tenant it means. Nothing searches or lists across tenants any more, so if you
