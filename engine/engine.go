@@ -1083,7 +1083,10 @@ func (e *Engine) DeleteDocument(ctx context.Context, docID id.DocumentID) error 
 // Reindex
 // ──────────────────────────────────────────────────
 
-// ReindexCollection re-embeds and re-stores all chunks in a collection.
+// ReindexCollection re-embeds the chunks of every ready document in a
+// collection and replaces each document's vectors in turn. Documents that
+// aren't ready (an ingest still in flight, a failed one) and their vectors
+// are left alone.
 func (e *Engine) ReindexCollection(ctx context.Context, colID id.CollectionID) error {
 	if e.store == nil {
 		return weave.ErrNoStore
@@ -1120,6 +1123,12 @@ func (e *Engine) ReindexCollection(ctx context.Context, colID id.CollectionID) e
 // returns how many documents and chunks it re-embedded, so far when it
 // fails. Another tenant's collection is ErrCollectionNotFound before
 // anything is deleted or embedded.
+//
+// It works one ready document at a time: embed its chunks, delete that
+// document's vectors, upsert the new ones. Nothing else in the collection
+// is touched, so a keyed version that has written its vectors and not yet
+// swapped in keeps them. A document that is no longer ready when its turn
+// comes is skipped; its own ingest, or recovery, finishes it.
 func (e *Engine) reindex(ctx context.Context, tenant string, colID id.CollectionID) (docCount, chunkCount int, err error) {
 	if _, err = e.getCollection(ctx, tenant, colID); err != nil {
 		return 0, 0, err
@@ -1127,7 +1136,6 @@ func (e *Engine) reindex(ctx context.Context, tenant string, colID id.Collection
 	start := time.Now()
 	e.extensions.EmitReindexStarted(ctx, colID)
 
-	// List all documents in the collection.
 	docs, err := e.store.ListDocuments(ctx, &document.ListFilter{
 		CollectionID: colID,
 		State:        document.StateReady,
@@ -1137,56 +1145,76 @@ func (e *Engine) reindex(ctx context.Context, tenant string, colID id.Collection
 	}
 	docs = owned(docs, tenant, documentTenant)
 
-	// Delete existing vector entries for the collection.
-	if err := e.vectorStore.DeleteByMetadata(ctx, map[string]string{
-		"collection_id": colID.String(),
-		"tenant_id":     tenant,
-	}); err != nil {
-		return 0, 0, fmt.Errorf("weave: delete vectors for reindex: %w", err)
-	}
-
-	// Re-embed each document's chunks.
 	for _, doc := range docs {
-		chunks, err := e.store.ListChunksByDocument(ctx, doc.ID)
-		if err != nil {
-			return docCount, chunkCount, fmt.Errorf("weave: list chunks for reindex: %w", err)
+		n, docErr := e.reindexDocument(ctx, tenant, doc.ID)
+		if docErr != nil {
+			return docCount, chunkCount, docErr
 		}
-		chunks = owned(chunks, tenant, chunkTenant)
-
-		if len(chunks) == 0 {
-			continue
+		if n > 0 {
+			docCount++
+			chunkCount += n
 		}
-
-		texts := make([]string, len(chunks))
-		for i, ch := range chunks {
-			texts[i] = ch.Content
-		}
-
-		embedResults, err := e.embed(ctx, telemetry.EmbedReindex, texts)
-		if err != nil {
-			return docCount, chunkCount, fmt.Errorf("weave: embed for reindex: %w", err)
-		}
-
-		entries := make([]vectorstore.Entry, len(chunks))
-		for i, ch := range chunks {
-			entries[i] = vectorstore.Entry{
-				ID:       ch.ID.String(),
-				Vector:   embedResults[i].Vector,
-				Content:  ch.Content,
-				Metadata: vectorMetadata(ch, doc.SourceKey),
-			}
-		}
-
-		if err := e.upsertVectors(ctx, entries); err != nil {
-			return docCount, chunkCount, fmt.Errorf("weave: upsert for reindex: %w", err)
-		}
-		docCount++
-		chunkCount += len(chunks)
 	}
 
 	elapsed := time.Since(start)
 	e.extensions.EmitReindexCompleted(ctx, colID, elapsed)
 	return docCount, chunkCount, nil
+}
+
+// reindexDocument re-embeds one document of tenant and replaces its
+// vectors, and returns how many chunks it re-embedded. A document that is
+// gone or no longer ready, or has no chunks, is skipped with 0. The
+// document's vectors are deleted only once its new ones are embedded, right
+// before they are upserted, so a failed embed leaves the old ones in place.
+func (e *Engine) reindexDocument(ctx context.Context, tenant string, docID id.DocumentID) (int, error) {
+	doc, err := e.getDocument(ctx, tenant, docID)
+	switch {
+	case errors.Is(err, weave.ErrDocumentNotFound):
+		return 0, nil
+	case err != nil:
+		return 0, fmt.Errorf("weave: read document for reindex: %w", err)
+	case doc.State != document.StateReady:
+		return 0, nil
+	}
+
+	chunks, err := e.store.ListChunksByDocument(ctx, doc.ID)
+	if err != nil {
+		return 0, fmt.Errorf("weave: list chunks for reindex: %w", err)
+	}
+	chunks = owned(chunks, tenant, chunkTenant)
+	if len(chunks) == 0 {
+		return 0, nil
+	}
+
+	texts := make([]string, len(chunks))
+	for i, ch := range chunks {
+		texts[i] = ch.Content
+	}
+	embedResults, err := e.embed(ctx, telemetry.EmbedReindex, texts)
+	if err != nil {
+		return 0, fmt.Errorf("weave: embed for reindex: %w", err)
+	}
+
+	entries := make([]vectorstore.Entry, len(chunks))
+	for i, ch := range chunks {
+		entries[i] = vectorstore.Entry{
+			ID:       ch.ID.String(),
+			Vector:   embedResults[i].Vector,
+			Content:  ch.Content,
+			Metadata: vectorMetadata(ch, doc.SourceKey),
+		}
+	}
+
+	if err := e.vectorStore.DeleteByMetadata(ctx, map[string]string{
+		"document_id": doc.ID.String(),
+		"tenant_id":   tenant,
+	}); err != nil {
+		return 0, fmt.Errorf("weave: delete vectors for reindex: %w", err)
+	}
+	if err := e.upsertVectors(ctx, entries); err != nil {
+		return 0, fmt.Errorf("weave: upsert for reindex: %w", err)
+	}
+	return len(chunks), nil
 }
 
 // ──────────────────────────────────────────────────

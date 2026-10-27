@@ -192,7 +192,7 @@ To re-embed a collection with the engine's current embedder:
 err := eng.ReindexCollection(ctx, colID)
 ```
 
-Reindex fires `OnReindexStarted`, lists the collection's `ready` documents, deletes every vector with that `collection_id`, then embeds each document's stored chunks again and upserts them, with the same metadata keys ingest writes (`source_key` included, for a keyed document). `OnReindexCompleted` fires at the end. The chunks themselves aren't rebuilt, so changing a collection's chunk size has no effect on documents already ingested.
+Reindex fires `OnReindexStarted` and lists the collection's `ready` documents. Then it takes them one at a time: it embeds the document's stored chunks again, deletes that document's vectors (by `document_id`) and upserts the new ones, with the same metadata keys ingest writes (`source_key` included, for a keyed document). `OnReindexCompleted` fires at the end. Nothing else in the collection is touched. A keyed version that has written its vectors but hasn't swapped in yet keeps them, and a document that stopped being `ready` before its turn is skipped, since its own ingest or recovery finishes it. If an embed fails, that document still has its old vectors and the call returns the error. The chunks themselves aren't rebuilt, so changing a collection's chunk size has no effect on documents already ingested.
 
 ## Deleting
 

@@ -268,7 +268,8 @@ func TestVectorDeletesCarryTheTenant(t *testing.T) {
 		t.Fatalf("deletes: got %v, want one per call", vs.deletes)
 	}
 	want := []map[string]string{
-		{"collection_id": col.ID.String(), "tenant_id": "t1"},
+		// Reindex replaces one document's vectors at a time.
+		{"document_id": doc.String(), "tenant_id": "t1"},
 		{"document_id": doc.String(), "tenant_id": "t1"},
 		{"collection_id": col.ID.String(), "tenant_id": "t1"},
 	}

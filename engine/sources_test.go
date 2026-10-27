@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -404,6 +405,64 @@ func TestReindexKeepsSourceKeyOnVectors(t *testing.T) {
 		if _, ok := v.Metadata["source_key"]; ok {
 			t.Errorf("unkeyed vector %s: carries source_key %q", v.ID, v.Metadata["source_key"])
 		}
+	}
+}
+
+// A reindex that lands while a keyed version sits between its vector
+// upsert and its swap must leave that version's vectors alone. Reindex used
+// to delete every vector of the collection, so the new version turned ready
+// with none, and re-ingesting the same content answered Unchanged and never
+// put them back.
+func TestReindexDuringAKeyedSwapKeepsTheNewVersionsVectors(t *testing.T) {
+	gate := &gatedVectors{written: make(chan struct{}), release: make(chan struct{})}
+	r := newRig(t, func(r *testRig) engine.Option {
+		gate.Store = r.Vectors
+		return engine.WithVectorStore(gate)
+	})
+	col := mustTestCollection(t, r.Engine, "docs")
+	first := ingestSource(t, r.Engine, col.ID, "a", versionOne)
+	plain := mustIngest(t, tenantCtx("t1"), r.Engine, col.ID, "plain", "shipping takes five working days")
+
+	gate.armed.Store(true)
+	done := make(chan *engine.IngestResult, 1)
+	go func() {
+		res, err := r.Engine.Ingest(tenantCtx("t1"), &engine.IngestInput{CollectionID: col.ID, SourceKey: "a", Content: versionTwo})
+		if err != nil {
+			t.Errorf("second version: %v", err)
+		}
+		done <- res
+	}()
+	<-gate.written
+
+	if err := r.Engine.ReindexCollection(tenantCtx("t1"), col.ID); err != nil {
+		t.Fatalf("reindex while the second version is in flight: %v", err)
+	}
+	close(gate.release)
+	second := <-done
+	if second == nil || second.State != document.StateReady {
+		t.Fatalf("second version: %+v, want ready", second)
+	}
+
+	if v := vectorsOf(t, r.Vectors, map[string]string{"document_id": second.DocumentID.String()}); len(v) != second.ChunkCount || len(v) == 0 {
+		t.Errorf("second version: %d vectors, want %d", len(v), second.ChunkCount)
+	}
+	if v := vectorsOf(t, r.Vectors, map[string]string{"document_id": first.DocumentID.String()}); len(v) != 0 {
+		t.Errorf("first version: %d vectors left after the swap, want 0", len(v))
+	}
+	if v := vectorsOf(t, r.Vectors, map[string]string{"document_id": plain.String()}); len(v) == 0 {
+		t.Error("unkeyed document: no vectors after reindex")
+	}
+	docs := retrieveDocs(t, r.Engine, col.ID)
+	if len(docs) == 0 {
+		t.Fatal("retrieve after the swap: no hits, want the second version")
+	}
+	for _, d := range docs {
+		if d != second.DocumentID.String() && d != plain.String() {
+			t.Errorf("retrieve after the swap: hit from %s, want the second version or the unkeyed document", d)
+		}
+	}
+	if !slices.Contains(docs, second.DocumentID.String()) {
+		t.Errorf("retrieve after the swap: hits %v, want the second version among them", docs)
 	}
 }
 
