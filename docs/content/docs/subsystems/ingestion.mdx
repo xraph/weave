@@ -149,6 +149,8 @@ eng, err := engine.New(
 )
 ```
 
+Leave a field at zero and you get its default: no loop for `Interval`, 15 minutes for `StalledAfter` and 100 for `BatchSize`. A zero or negative `StalledAfter` never means "everything is stalled", so `RecoveryConfig{Interval: 5 * time.Minute}` is safe.
+
 `Start` launches the loop and `Stop` cancels it and waits for a sweep in progress before it closes the store. If your host has its own scheduler, turn the loop off (a negative `recovery_interval`, or no `Interval`) and call one sweep yourself:
 
 ```go

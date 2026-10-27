@@ -204,6 +204,11 @@ func (s *recordingStore) ListStalledDocuments(ctx context.Context, before time.T
 	return append(docs, s.extra...), err
 }
 
+func (s *recordingStore) CountStalledUntenanted(ctx context.Context, before time.Time) (int64, error) {
+	s.listings.Add(1)
+	return s.Store.CountStalledUntenanted(ctx, before)
+}
+
 func (s *recordingStore) UpdateDocument(ctx context.Context, doc *document.Document) error {
 	s.writes.Add(1)
 	return s.Store.UpdateDocument(ctx, doc)
@@ -451,7 +456,8 @@ func TestRecoveryLoopRunsUntilStop(t *testing.T) {
 	recording := &recordingStore{}
 	r := newRig(t,
 		func(r *testRig) engine.Option { recording.Store = r.Store; return engine.WithStore(recording) },
-		withOpt(engine.WithRecovery(engine.RecoveryConfig{Interval: 10 * time.Millisecond, StalledAfter: 0})),
+		// A nanosecond: every planted document is stalled at the first tick.
+		withOpt(engine.WithRecovery(engine.RecoveryConfig{Interval: 10 * time.Millisecond, StalledAfter: time.Nanosecond})),
 	)
 	col := mustTestCollection(t, r.Engine, "docs")
 	stalled := plantCrashed(t, r, col, document.StateProcessing, 1)
@@ -488,6 +494,20 @@ func TestRecoveryConfigDefaults(t *testing.T) {
 	r := newRig(t)
 	if got := r.Engine.RecoveryConfig(); got != (engine.RecoveryConfig{StalledAfter: engine.DefaultStalledAfter}) {
 		t.Errorf("RecoveryConfig without WithRecovery: %+v, want no loop and the default StalledAfter", got)
+	}
+	// A zero or negative StalledAfter is the default, never "everything".
+	for _, after := range []time.Duration{0, -time.Minute} {
+		r = newRig(t, withOpt(engine.WithRecovery(engine.RecoveryConfig{Interval: 5 * time.Minute, StalledAfter: after})))
+		want := engine.RecoveryConfig{Interval: 5 * time.Minute, StalledAfter: engine.DefaultStalledAfter}
+		if got := r.Engine.RecoveryConfig(); got != want {
+			t.Errorf("WithRecovery StalledAfter %s: %+v, want %+v", after, got, want)
+		}
+	}
+	// A fresh in-flight document stays unclaimed under that config.
+	col := mustTestCollection(t, r.Engine, "docs")
+	inFlight := plantProcessing(t, r, col.ID)
+	if res := ingestSource(t, r.Engine, col.ID, "a", versionOne); res.DocumentID.String() != inFlight.ID.String() || res.State != document.StateProcessing {
+		t.Errorf("ingest over a fresh document with StalledAfter 0 configured: %+v, want it left in flight", res)
 	}
 	recording := &recordingStore{}
 	r = newRig(t, func(r *testRig) engine.Option { recording.Store = r.Store; return engine.WithStore(recording) })

@@ -656,7 +656,8 @@ func (e *Engine) endIngest(ctx context.Context, doc *document.Document, entries 
 // gets two. The vectors go by their own
 // IDs; chunk rows, when written, by document, since an unkeyed document has
 // one attempt. The deletes run on a cleanup context, and a failure is only
-// logged, as recovery clears a failed document's leftovers too.
+// logged. Recovery never lists a failed document again, so leftovers then
+// stay until DeleteDocument (or, for a keyed document, its next ingest).
 func (e *Engine) abandonIngest(ctx context.Context, doc *document.Document, entries []vectorstore.Entry, chunksWritten bool) (*IngestResult, error) {
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()

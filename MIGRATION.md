@@ -36,8 +36,10 @@ The cut happened in two steps. Commit `dfe48b8` (xraph/weave#39, merged as
 
 ## What you need to do
 
-You don't need to change anything in Weave's own API. Every route, request body
-and config key is where it was. One thing you might notice: the retrieve route
+If you use Weave through the extension and its routes, you don't need to change
+anything in Weave's own API. Every route, request body and config key is where
+it was. If you wrote your own `store.Store`, you do: it has five new methods to
+implement, see "If you wrote your own store" below. One thing you might notice: the retrieve route
 now returns hydrated hits (see "Fixed in Weave on the way"), so each hit carries
 its real chunk ID, document ID and collection ID. Existing clients keep
 working.
@@ -153,7 +155,46 @@ differently now:
 - The memory store and pgvector break score ties by ID, so two searches over the
   same data agree.
 
-There is no schema change.
+### If you wrote your own store
+
+`store.Store` grew five methods, and a custom store doesn't compile until it has
+all of them. The built-in stores (memory, SQLite, Postgres, Mongo) already do.
+
+- `ReplaceSourceDocument(ctx, doc, chunks)` swaps in a new version of a
+  source-keyed document in one atomic step.
+- `TouchDocument(ctx, docID, staleBefore)` is an ingest's heartbeat, and with a
+  cutoff it's a claim only one caller wins.
+- `FailDocument(ctx, docID, errText, staleBefore)` moves a pending or processing
+  document to failed, and never touches a ready one.
+- `ListStalledDocuments(ctx, before, limit)` is recovery's read across tenants.
+  It works with no tenant on the context and leaves out rows with an empty
+  tenant.
+- `CountStalledUntenanted(ctx, before)` counts the rows that listing leaves out.
+
+The last two are the only methods besides `Migrate`, `Ping` and `Close` that run
+without a tenant. The two moves have to be single guarded writes (a
+compare-and-set on the stored state), not a read and then an update, or two
+replicas can both win. [Writing a custom store](docs/content/docs/guides/custom-store.mdx)
+spells out each rule, and `storetest.Run` checks them. If your store ever held
+v1.8 rows, run `storetest.RunLegacy` too: you give it a function that writes a
+document as it is, empty tenant and all, and it checks those rows never reach
+recovery.
+
+### Schema
+
+Two new migrations run on `Migrate`, on SQLite, Postgres and Mongo:
+
+- `20261024000100` adds `source_key` to `weave_documents`, a unique index on
+  `(collection_id, source_key)` over ready keyed rows, and a lookup index on
+  `(tenant_id, collection_id, source_key)`.
+- `20261024000200` adds `idx_weave_documents_state_updated` on
+  `(state, updated_at)`, which recovery lists stalled documents by.
+
+Both are idempotent, so an install that already has the column or the indexes
+is adopted as it stands. On a large `weave_documents` table on Postgres, the
+`CREATE INDEX` takes a lock that blocks writes while it builds. Run it by hand
+with `CONCURRENTLY` first if that matters to you, and `Migrate` will find it
+there.
 
 ## Fixed in Weave on the way
 

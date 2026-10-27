@@ -106,7 +106,7 @@ func (e *Engine) ingestSource(ctx context.Context, span trace.Span, tenant strin
 
 // sourceAttempts bounds how often sourceAttempt looks at the source again
 // after another ingest changed it under this one.
-const sourceAttempts = 3
+const sourceAttempts = 4
 
 // sourceAttempt decides what a keyed ingest of content with hash does, and
 // returns either the processing document it should work on or the answer to
@@ -123,9 +123,18 @@ const sourceAttempts = 3
 //     guarded TouchDocument, so of several ingests that find it stalled only
 //     one works on it.
 //
-// When a create or a claim loses to a concurrent ingest, it looks again.
+// When a create or a claim loses to a concurrent ingest, it looks again. A
+// create that collides is weave.ErrDuplicateDocument only when it collides
+// twice in a row with no document of this content in the source to explain
+// it: the content then lives under another source key or none. A collision
+// the source does explain (a concurrent ingest's document, perhaps one that
+// has failed and been purged since) is just looked at again. When the
+// source keeps changing through every attempt, the answer is
+// weave.ErrIngestInterrupted: ingest again.
 func (e *Engine) sourceAttempt(ctx context.Context, tenant string, colID id.CollectionID, input *IngestInput, hash string) (*document.Document, *IngestResult, error) {
-	duplicate := false
+	// unexplained is true right after a create collided while the source held
+	// no document of this content.
+	unexplained := false
 	for range sourceAttempts {
 		docs, err := e.sourceDocuments(ctx, tenant, colID, input.SourceKey)
 		if err != nil {
@@ -143,11 +152,10 @@ func (e *Engine) sourceAttempt(ctx context.Context, tenant string, colID id.Coll
 		}
 
 		doc := sameContent(current, hash)
+		if doc != nil {
+			unexplained = false
+		}
 		switch {
-		case doc == nil && duplicate:
-			// The insert collided, but not with this source: the content
-			// lives under another source key or none.
-			return nil, nil, fmt.Errorf("weave: create document: %w", weave.ErrDuplicateDocument)
 		case doc == nil:
 			// The document starts processing, not pending, and nothing but a
 			// heartbeat writes it before ReplaceSourceDocument, whose guarded
@@ -159,10 +167,13 @@ func (e *Engine) sourceAttempt(ctx context.Context, tenant string, colID id.Coll
 			if createErr == nil {
 				return fresh, nil, nil
 			}
-			if !errors.Is(createErr, weave.ErrDuplicateDocument) {
+			if !errors.Is(createErr, weave.ErrDuplicateDocument) || unexplained {
+				// Any other error, or a second collision the source can't
+				// explain: then the content lives under another source key or
+				// none.
 				return nil, nil, fmt.Errorf("weave: create document: %w", createErr)
 			}
-			duplicate = true
+			unexplained = true
 		case doc.State == document.StateReady:
 			return nil, unchanged(doc), nil
 		case doc.State == document.StateFailed:
@@ -185,7 +196,7 @@ func (e *Engine) sourceAttempt(ctx context.Context, tenant string, colID id.Coll
 			}
 		}
 	}
-	return nil, nil, fmt.Errorf("%w: the source changed under %d attempts to ingest it", weave.ErrInvalidState, sourceAttempts)
+	return nil, nil, fmt.Errorf("%w: the source changed under %d attempts to ingest it", weave.ErrIngestInterrupted, sourceAttempts)
 }
 
 // failSource ends a keyed ingest attempt that started at start and failed

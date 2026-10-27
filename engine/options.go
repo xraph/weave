@@ -106,10 +106,14 @@ func WithConfig(cfg weave.Config) Option {
 // processing or superseded; see RecoveryConfig. With an Interval above zero,
 // Start runs RecoverStalled every Interval until Stop. StalledAfter is also
 // how old a keyed ingest's in-progress document of the same content must be
-// before another ingest claims it. Without this option there is no loop and
-// StalledAfter is DefaultStalledAfter.
+// before another ingest claims it. A zero or negative StalledAfter is
+// DefaultStalledAfter, as is leaving this option out, which also runs no
+// loop.
 func WithRecovery(cfg RecoveryConfig) Option {
 	return func(e *Engine) error {
+		if cfg.StalledAfter <= 0 {
+			cfg.StalledAfter = DefaultStalledAfter
+		}
 		e.recovery = cfg
 		return nil
 	}

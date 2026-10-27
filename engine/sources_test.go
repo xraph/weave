@@ -648,6 +648,47 @@ func TestRetryAfterCancelledIngestEmbedsAgain(t *testing.T) {
 	}
 }
 
+// staleFirstListing is a memory store whose first listing of a source comes
+// back empty, as if it ran just before a concurrent ingest created its
+// document.
+type staleFirstListing struct {
+	*memory.Store
+	listed atomic.Bool
+}
+
+func (s *staleFirstListing) ListDocuments(ctx context.Context, filter *document.ListFilter) ([]*document.Document, error) {
+	if filter != nil && filter.SourceKey != "" && s.listed.CompareAndSwap(false, true) {
+		return nil, nil
+	}
+	return s.Store.ListDocuments(ctx, filter)
+}
+
+// A concurrent ingest of the same content created its document, so this
+// one's create collides, and then that ingest failed before the re-list.
+// The collision is explained by the source's own (failed) copy, so this
+// ingest purges it and indexes the content; it never reports a duplicate
+// while the source holds no document.
+func TestCollisionWithAFailedConcurrentIngestIsNotADuplicate(t *testing.T) {
+	listing := &staleFirstListing{}
+	r := newRig(t, func(r *testRig) engine.Option { listing.Store = r.Store; return engine.WithStore(listing) })
+	col := mustTestCollection(t, r.Engine, "docs")
+	failed := plantProcessing(t, r, col.ID)
+	if err := r.Store.FailDocument(tenantCtx("t1"), failed.ID, "embed: 429", time.Time{}); err != nil {
+		t.Fatalf("fail the concurrent ingest's document: %v", err)
+	}
+
+	res, err := r.Engine.Ingest(tenantCtx("t1"), &engine.IngestInput{CollectionID: col.ID, SourceKey: "a", Content: versionOne})
+	if err != nil {
+		t.Fatalf("ingest after the collision: %v, want the content indexed", err)
+	}
+	if res.State != document.StateReady || res.Unchanged {
+		t.Errorf("ingest after the collision: %+v, want a new ready document", res)
+	}
+	if docs := sourceDocs(t, r.Engine, col.ID, "a"); len(docs) != 1 || docs[0].ID.String() != res.DocumentID.String() {
+		t.Errorf("source after the ingest: %+v, want only %s", docs, res.DocumentID)
+	}
+}
+
 // plantProcessing creates, through the store, the processing document of
 // versionOne under source "a" that a process killed mid-ingest leaves.
 func plantProcessing(t *testing.T, r *testRig, colID id.CollectionID) *document.Document {

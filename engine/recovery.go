@@ -27,9 +27,13 @@ const DefaultStalledAfter = 15 * time.Minute
 // starts, after chunking, after embedding and right before it marks the
 // document ready, so StalledAfter must stay well above the longest single
 // chunk or embed step. Recovery fails a document older than that, and a
-// keyed ingest of the same content claims it instead of waiting. Zero is
-// taken as given and makes every pending or processing document stalled,
-// which only tests want.
+// keyed ingest of the same content claims it instead of waiting.
+//
+// Every zero means "the default": Interval 0 or less runs no loop,
+// StalledAfter 0 or less is DefaultStalledAfter, and BatchSize 0 or less is
+// 100. So RecoveryConfig{Interval: 5 * time.Minute} sweeps every 5 minutes
+// with a 15 minute cutoff. A test that wants every document stalled at once
+// sets StalledAfter to a nanosecond.
 type RecoveryConfig struct {
 	Interval     time.Duration // 0 or less: no background loop
 	StalledAfter time.Duration
@@ -44,7 +48,8 @@ type RecoveryResult struct {
 }
 
 // RecoveryConfig returns the recovery settings the engine runs with: the
-// ones WithRecovery gave, or no background loop and DefaultStalledAfter.
+// ones WithRecovery gave, with a StalledAfter of zero or less replaced by
+// DefaultStalledAfter, or no background loop and DefaultStalledAfter.
 func (e *Engine) RecoveryConfig() RecoveryConfig { return e.recovery }
 
 // RecoverStalled runs one sweep over every tenant. Each stalled document is
@@ -54,7 +59,8 @@ func (e *Engine) RecoveryConfig() RecoveryConfig { return e.recovery }
 // the row. Safe to run on every replica.
 //
 // A document is stalled when it was last updated more than stalledAfter
-// ago. The sweep lists at most BatchSize of them, oldest first, and needs no
+// ago; zero means anything updated before now, and a negative value counts
+// as zero, so a sweep never reaches past the present. The sweep lists at most BatchSize of them, oldest first, and needs no
 // tenant on ctx. Marking failed comes first and is a guarded write: it only
 // succeeds while the document is still pending or processing and has sent no
 // heartbeat since the cutoff. When it loses (an ingest that came back to
@@ -76,7 +82,7 @@ func (e *Engine) RecoverStalled(ctx context.Context, stalledAfter time.Duration)
 	ctx, span := telemetry.Tracer().Start(ctx, "recover stalled documents")
 	defer span.End()
 
-	before := time.Now().UTC().Add(-stalledAfter)
+	before := time.Now().UTC().Add(-max(stalledAfter, 0))
 	docs, err := e.store.ListStalledDocuments(ctx, before, e.recovery.BatchSize)
 	if err != nil {
 		telemetry.Fail(span, err)
@@ -165,8 +171,12 @@ func (e *Engine) recoverDocument(ctx context.Context, doc *document.Document, be
 	}
 	// The document is failed now, so no ingest can make it ready. One that is
 	// still running finds it failed at its next heartbeat or at the swap, and
-	// deletes whatever it writes after this.
-	dropErr := e.dropDocumentData(ctx, doc.TenantID, doc.ID)
+	// deletes whatever it writes after this. The delete runs on a cleanup
+	// context: no sweep lists a failed document again, so a Stop landing
+	// here must not leave its chunks searchable.
+	cleanup, cancel := cleanupContext(ctx)
+	defer cancel()
+	dropErr := e.dropDocumentData(cleanup, doc.TenantID, doc.ID)
 	e.extensions.EmitIngestFailed(ctx, doc.CollectionID, weave.ErrIngestInterrupted)
 	return recoveredFailed, dropErr
 }

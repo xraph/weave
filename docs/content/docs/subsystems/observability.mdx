@@ -178,6 +178,6 @@ Without `WithLogger` the engine logs nothing. The Forge extension passes the app
 - deleting a collection's or document's vectors fails (the metadata delete still goes ahead). The line has the collection or document ID and `error_type`.
 - a lifecycle hook returns an error. The line has the hook, the plugin and `error_type`. One hook of one plugin logs at most once a minute, and `suppressed` says how many errors it stood for since its last line.
 - a recovery sweep fails (`recovery sweep failed`, with `error_type`), or finds stalled rows without a tenant (one line per sweep, with how many under `documents`).
-- an interrupted ingest can't delete the chunks it wrote, or a keyed ingest can't purge a superseded version. Recovery finishes both later.
+- an interrupted ingest can't delete the chunks it wrote, or a keyed ingest can't purge a superseded version. Recovery finishes the purge of a superseded version on a later sweep. An interrupted ingest's leftovers belong to a `failed` document, which no sweep lists again, so they stay until you call `DeleteDocument` (a keyed re-ingest of the source purges them too).
 
 None of these lines logs the error's text. A store error can quote a DSN or a host, and a hook's error can quote whatever the hook was handed.
