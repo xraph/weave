@@ -3,7 +3,7 @@ title: Go Packages
 description: Quick reference for all Weave Go packages and their public APIs.
 ---
 
-Everything lives in the one module, `github.com/xraph/weave`. The full API is on [pkg.go.dev](https://pkg.go.dev/github.com/xraph/weave).
+Almost everything lives in the root module, `github.com/xraph/weave`. The nexus embedder is a module of its own, `github.com/xraph/weave/embedder/nexus`, so you only pull in nexus when you use it. The full API is on [pkg.go.dev](https://pkg.go.dev/github.com/xraph/weave).
 
 ## Core packages
 
@@ -58,6 +58,18 @@ type Embedder interface {
     Dimensions() int
 }
 ```
+
+### `github.com/xraph/weave/embedder/nexus` (its own module)
+
+```go
+var ErrGatewayUnavailable error // gw() answers nil, or nexus isn't initialized yet
+func New(gw func() *nexus.Gateway, model string, dimensions int, opts ...Option) embedder.Embedder
+func WithProvider(name string) Option
+func WithTenantMapper(fn func(ctx context.Context, weaveTenant string) (string, error)) Option
+func WithBatchSize(n int) Option // default 256
+```
+
+See [the nexus embedder](/docs/subsystems/embedder#nexus-embedder).
 
 ### `github.com/xraph/weave/loader`
 
@@ -178,6 +190,7 @@ func DefaultTemplate() *Template
 | `chunker.NewCodeChunker()` | `chunker.Chunker` | Code block boundaries |
 | `embedder.NewOpenAIEmbedder(apiKey, opts...)` | `embedder.Embedder` | OpenAI or any compatible endpoint; a non-200 answer returns `*embedder.StatusError` |
 | `embedder.NewLocalEmbedder(dims)` | `embedder.Embedder` | Placeholder, returns `ErrNotImplemented` |
+| `embedder/nexus.New(gw, model, dims, opts...)` | `embedder.Embedder` | Calls a nexus gateway; its own module |
 | `retriever.NewSimilarityRetriever(vs, emb, store)` | `retriever.Retriever` | Plain vector search |
 | `retriever.NewMMRRetriever(vs, emb, lambda)` | `retriever.Retriever` | Maximal Marginal Relevance |
 | `retriever.NewHybridRetriever(retrievers...)` | `retriever.Retriever` | Reciprocal Rank Fusion of other retrievers |

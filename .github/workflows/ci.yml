@@ -54,6 +54,47 @@ jobs:
             exit 1
           fi
 
+  # ─── Sub-modules ────────────────────────────────────────────────────
+  # The shared workflow runs from the repo root, and Go skips every
+  # directory with its own go.mod, so embedder/nexus gets its own job.
+  submodules:
+    name: Sub-modules
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: embedder/nexus/go.mod
+          cache: true
+          cache-dependency-path: embedder/nexus/go.sum
+
+      - name: Tidy
+        run: |
+          make tidy-submodules
+          git diff --exit-code -- embedder/nexus/go.mod embedder/nexus/go.sum
+
+      - name: Vet
+        run: make vet-submodules
+
+      - name: Test
+        run: make test-submodules
+
+      - name: Install goimports
+        run: go install golang.org/x/tools/cmd/goimports@latest
+
+      - name: Check formatting (goimports)
+        run: |
+          OUTPUT=$(goimports -l -local github.com/xraph/weave embedder/nexus)
+          if [ -n "$OUTPUT" ]; then
+            echo "::error::The following files need goimports formatting:"
+            echo "$OUTPUT"
+            exit 1
+          fi
+
   # ─── Docs ───────────────────────────────────────────────────────────
   docs:
     name: Docs

@@ -2,7 +2,7 @@
 
 Weave is a RAG pipeline engine for Go. It ingests documents, chunks them, embeds the chunks, stores the vectors, and retrieves and assembles context for a prompt, with a Forge extension and a Forge dashboard contract on top.
 
-There is one module, `github.com/xraph/weave`, at the repo root. No nested `go.mod` exists. The release workflow tags the root as `vX.Y.Z` and nothing else.
+There are two modules. The root is `github.com/xraph/weave`. The nexus embedder, `github.com/xraph/weave/embedder/nexus`, has its own `go.mod` so the root never depends on nexus, and it builds against the working tree through `replace github.com/xraph/weave => ../..`. That replace is the only one allowed. The release workflow tags the root as `vX.Y.Z` and the sub-module as `embedder/nexus/vX.Y.Z`.
 
 ## Commands
 
@@ -18,6 +18,17 @@ make lint-fix      # golangci-lint run --fix ./...
 make fmt           # gofmt -s -w . then goimports -local github.com/xraph/weave
 make tidy          # go mod tidy and go mod verify
 ```
+
+The root targets skip `embedder/nexus`, because Go leaves out any directory with its own `go.mod`. Each has a sub-module twin that loops over `SUBMODULES` in the Makefile with `GOWORK=off`:
+
+```bash
+make test-submodules   # go test -v ./... in each sub-module
+make vet-submodules
+make lint-submodules
+make tidy-submodules   # go mod tidy and go mod verify
+```
+
+`make fmt` already reaches the sub-module, since gofmt and goimports walk the whole tree.
 
 Don't use `make build`, `make run`, `make install` or `make dev`. They point at `./cmd/weave`, which doesn't exist, so they fail. `go build ./...` is the build.
 
@@ -36,6 +47,7 @@ The docs site lives in `docs/` (Fumadocs, Next.js, pnpm). `make docs` serves it 
 | Security | standalone `gosec` (only G115 excluded) and `govulncheck`, both failing the build on findings |
 | Format | `goimports -l -local github.com/xraph/weave .` must print nothing |
 | Docs | in `docs/`: `pnpm install --frozen-lockfile`, `pnpm types:check`, `pnpm lint`, `pnpm build` |
+| Sub-modules | `make tidy-submodules` then `git diff --exit-code` on `embedder/nexus/go.mod` and `go.sum`, `make vet-submodules`, `make test-submodules`, and goimports on `embedder/nexus` |
 
 Two things catch people out. The tidiness check fails whenever `go mod tidy` would change `go.mod` or `go.sum`, so you commit them tidy, and the standalone gosec binary never reads `.golangci.yml`, which means the gosec excludes listed there (G104, G117, G304, G402, G704) do nothing for you in the Security job.
 
@@ -84,6 +96,8 @@ The pgvector tests use `pgtest.SchemaWithVector`, which creates the `vector` ext
 | `store/storetest/` | the conformance suite every backend runs |
 | `vectorstore/` | the `VectorStore` interface and the `memory`, `pgvector` and `fabriq` implementations (the last is package `fabriqvec`) |
 | `loader/`, `chunker/`, `embedder/`, `retriever/`, `assembler/` | pipeline components: text extraction, chunking strategies, embedders (OpenAI and local), retrievers (similarity, hybrid, MMR, rerank), context assembly with token budgets and citations |
+| `embedder/nexus/` | its own module: an embedder that calls a nexus gateway, so the root never imports nexus |
+| `scripts/pin-submodules.sh` | pins the sub-module's `require github.com/xraph/weave` to a release tag; only the release workflow runs it |
 | `pipeline/`, `middleware/` | step pipeline and the cache, tenant and tracing middleware around it |
 | `engine/` | the coordinator everything else plugs into |
 | `ext/`, `plugins/` | lifecycle hook interfaces and the registry (see below) |
@@ -157,6 +171,8 @@ Weave depends on these xraph modules (see `go.mod` for versions):
 - `github.com/xraph/forge`
 - `github.com/xraph/go-utils` and `github.com/xraph/vessel`
 
+`embedder/nexus` adds `github.com/xraph/nexus`, which brings its own forge and grove requirements. Keep those at or below what the root pins, or tidy in the sub-module lifts them past the root.
+
 Cortex consumes weave, from both its root and `extension` modules. Nothing else in forgery does.
 
 To bump an xraph dependency, `go get` each module at its release and tidy:
@@ -170,9 +186,9 @@ GOWORK=off go mod tidy
 GOWORK=off go build ./... && GOWORK=off go test -race ./...
 ```
 
-Grove's release tags its drivers at the same version as the root, so move all four together. Weave is a single module, so one `go mod tidy` covers it.
+Grove's release tags its drivers at the same version as the root, so move all four together. After a root bump, run `make tidy-submodules` too, since `embedder/nexus` reads the root's requirements through its replace. To bump nexus, `cd embedder/nexus && GOWORK=off go get github.com/xraph/nexus@vX.Y.Z && GOWORK=off go mod tidy`.
 
-Never commit a `go.work` or a `replace` pointing at a sibling checkout. `.gitignore` doesn't exclude `go.work`, so check `git status` before you commit.
+Never commit a `go.work` or a `replace` pointing at a sibling checkout. `.gitignore` doesn't exclude `go.work`, so check `git status` before you commit. The in-repo `replace github.com/xraph/weave => ../..` in `embedder/nexus/go.mod` stays: release pins the require, never the replace.
 
 ## Releasing
 
@@ -183,7 +199,11 @@ Releases are cut by dispatching the release workflow. Don't push a tag by hand.
 3. Dispatch: `gh workflow run release.yml --ref main -f tag=vX.Y.Z`.
 4. Then re-pin cortex to the new tag.
 
-`.github/workflows/release.yml` checks out `main` with full history, creates `vX.Y.Z` at that commit as `github-actions[bot]` and pushes it. Then it runs `go mod download`, `go build ./...` and `go test -race -count=1 ./...` on the root module. It writes release notes from `git log` since the previous tag and publishes a GitHub release with `softprops/action-gh-release`.
+`.github/workflows/release.yml` checks out `main` with full history, creates `vX.Y.Z` at that commit as `github-actions[bot]` and pushes it. Then it runs `go mod download`, `go build ./...` and `go test -race -count=1 ./...` on the root module, and the same plus a tidy check on `embedder/nexus`.
+
+Next it tags the sub-module. On `main` the sub-module's `require github.com/xraph/weave` names the previous release, which is fine for local work (the replace wins) and wrong for anyone who runs `go get`, because the replace doesn't apply to a dependency. So the workflow runs `scripts/pin-submodules.sh vX.Y.Z`, commits `chore: pin sub-modules to vX.Y.Z`, tags that commit `embedder/nexus/vX.Y.Z`, pushes the tag and resets the commit away. Only the tag reaches it; `main` never moves. Then it runs `go get github.com/xraph/weave/embedder/nexus@vX.Y.Z` against `proxy.golang.org` in an empty module to prove a consumer can resolve it.
+
+Last, it writes release notes from `git log` since the previous tag and publishes a GitHub release with `softprops/action-gh-release`, listing both `go get` lines.
 
 Mind the order. The tag is pushed before the build and tests run, so a red release run still leaves a published tag behind, and since the module proxy may already have fetched it you fix forward with the next patch version and leave the bad tag alone. The workflow also fires on a pushed `v*` tag. That's the path you shouldn't use.
 

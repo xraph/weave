@@ -104,7 +104,7 @@ const (
 // metric label never carries a string a caller chose.
 var (
 	ChunkerKinds     = kindSet("fixed", "recursive", "semantic", "sliding", "code")
-	EmbedderKinds    = kindSet("openai", "local")
+	EmbedderKinds    = kindSet("openai", "local", "nexus")
 	VectorStoreKinds = kindSet("memory", "pgvector", "fabriq")
 	RetrieverKinds   = kindSet("similarity", "mmr", "hybrid", "rerank")
 )

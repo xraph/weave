@@ -74,7 +74,7 @@ Every label value comes from a bounded set. All but `error_type` are fixed lists
 | `operation` | `search`, `upsert` |
 | `result` | `ok`, `error`, and `not_found` on ingest when the collection doesn't exist |
 | `gen_ai_operation_name` | `embeddings` |
-| `gen_ai_provider_name` | `openai`, `local`, `custom` |
+| `gen_ai_provider_name` | `openai`, `local`, `nexus`, `custom` |
 | `weave_embed_operation` | `ingest`, `query`, `reindex` |
 | `error_type` | empty on success, otherwise the error type described above. It isn't a fixed list, but it is bounded: the values are the Weave sentinels, the two context errors and the Go error types your process can return, never error text |
 | `gen_ai_token_type` | `input` |
@@ -83,7 +83,7 @@ A component's label is the `Kind` it reports through `weave.Describer`. A kind W
 
 The two `gen_ai` metrics are the OpenTelemetry GenAI client metrics, with the buckets the GenAI conventions advise. `gen_ai` isn't one of forge's semconv namespaces, so they keep the `forge_` prefix and don't get a `_seconds` suffix. Nexus records the same two names with different keys: nexus carries `gen_ai_request_model` where Weave carries `weave_embed_operation`. If one app runs both, the families share a name and forge fills a missing label with an empty value, so nexus's rows have `weave_embed_operation=""` and Weave's have `gen_ai_request_model=""`. `sum by (gen_ai_provider_name)` still works across both, and `weave_embed_operation!=""` picks out Weave's rows.
 
-Mind one double count. If you point Weave's OpenAI embedder at a nexus gateway in the same app (its base URL set to nexus), both sides record the call: Weave as `embeddings` with provider `openai`, and nexus as `embeddings` with whatever provider it routed to, often `openai` too. A sum over the whole family then counts that call twice, so filter on `weave_embed_operation` one way or the other.
+Mind one double count. If you point Weave's OpenAI embedder at a nexus gateway in the same app (its base URL set to nexus), both sides record the call: Weave as `embeddings` with provider `openai`, and nexus as `embeddings` with whatever provider it routed to, often `openai` too. A sum over the whole family then counts that call twice, so filter on `weave_embed_operation` one way or the other. The [nexus embedder](/docs/subsystems/embedder#nexus-embedder) counts the same way: Weave records the call with provider `nexus`, and nexus records it again under the provider it routed to.
 
 The vector histogram only times calls the engine makes itself. For pgvector, grove also records `db_client_operation_duration_seconds` for the same queries.
 
