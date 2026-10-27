@@ -24,6 +24,13 @@ dashboard contract answers `PERMISSION_DENIED`. The built-in vector stores
 refuse a `Search` with no `TenantKey` and an `Upsert` whose entry has no
 `metadata["tenant_id"]`, with the same error.
 
+Gets, updates and deletes by ID stay inside the tenant too. In v1.8 a get
+or delete with another tenant's ID found that row and acted on it. Now you get the same not-found error as an ID that doesn't
+exist (`weave.ErrCollectionNotFound`, `weave.ErrDocumentNotFound` or
+`weave.ErrChunkNotFound`), and nothing is touched. `CreateCollection` fills
+an empty `TenantID` from the context, but a `TenantID` that names another
+tenant is `weave.ErrInvalidArgument`.
+
 A job that isn't serving a request has to build its own context with the
 tenant it means. Nothing searches or lists across tenants any more, so if you
 relied on a missing tenant meaning "everyone", you'll have to call once per
@@ -149,6 +156,14 @@ Pick `stalled_after` well above your slowest embed call. Heartbeats only go
 out between steps, so a single call that runs longer gets its document
 failed underneath it.
 
+That's where a new error comes from. `Ingest` can now return
+`weave.ErrIngestInterrupted`: recovery failed the document while the ingest
+was still going, someone deleted it mid-ingest, or a keyed source kept
+changing under four attempts to start. By the time you see it, the ingest
+has already removed the chunks and vectors it wrote. Ingest the content
+again. If you treat every `Ingest` error as fatal today, give this one a
+retry.
+
 ## If you wrote your own store
 
 `store.Store` grew six methods, and a custom store doesn't compile until it has
@@ -224,6 +239,44 @@ numbers and records nothing. Drop the old docs' unnamed HNSW index
 (`weave_vectors_embedding_idx`) before the first run, or you end up with two
 of them.
 
+## Changes that can break your build
+
+Two more changes stop code from compiling, besides `RegisterRoutes` and the
+store methods above. Both are small.
+
+`engine.IngestResult` has a `Replaced []id.DocumentID` field now, so the
+struct is no longer comparable. Code that compares two results with `==`, or
+uses one as a map key, stops compiling. Compare the fields you care about
+(`DocumentID` and `State`, usually).
+
+`api.IngestBatchRequest.Documents` is a slice of an anonymous struct, and
+that struct gained `SourceKey`. If you build the request in Go with a
+composite literal that spells the struct type out, add the field to your
+copy of the type or the assignment won't compile. JSON clients aren't
+affected; `source_key` is optional on each item.
+
+If you build pipelines by hand, `pipeline.EmbedStep` now refuses a step
+context with no non-empty string under `pipeline.KeyTenantID`, with
+`weave.ErrTenantRequired`, before it calls the embedder. Every vector it
+builds is labelled with that tenant, and the vector stores would refuse an
+unlabelled one anyway. Set the key wherever you create the `StepContext`.
+
+## The HTTP routes
+
+Skip this if you don't mount Weave's routes (`WithDisableRoutes`).
+
+- Five routes never registered under forge v1.13.1: `listCollections`,
+  `listDocuments`, `ingestBatch`, `retrieve` and `hybridSearch`. Forge
+  refused them because they answered with a slice, and the error was
+  dropped, so `GET /v1/collections` gave you a 405 and `POST /v1/search` a
+  404. They register now, and every JSON route writes its body once.
+- `limit` and `offset` are optional on the list routes. Leave `limit` out
+  and you get 50; anything above 1000 is treated as 1000.
+- `top_k` on retrieve and search is capped at 1000. A bigger value isn't
+  refused, you just get at most 1000 hits.
+- Retrieve against another tenant's collection answers 404, the same as a
+  collection that doesn't exist. v1.8 gave you 200 and an empty list.
+
 ## Deprecated
 
 These still compile, and only work within the tenant on the context:
@@ -243,6 +296,15 @@ Put the tenant on the context and drop them when you next touch that code.
 
 - SQLite writers wait up to five seconds for the write lock instead of failing
   at once with `SQLITE_BUSY`, so concurrent ingests on one file queue up.
+- An unkeyed ingest finishes with the store's guarded `CompleteDocument`
+  and checks its answer. Before, a failed final write was ignored, and you
+  could get `ready` with a nil error for a document still `processing`,
+  which recovery would later fail and empty. Now that write failing gives
+  you the error and a `failed` document.
+- `ReindexCollection` replaces vectors one `ready` document at a time
+  (delete by `document_id`, then upsert). It used to delete the whole
+  collection's vectors first. Vectors of documents that aren't `ready`,
+  including a keyed version that hasn't swapped in yet, are left alone.
 - Weave needs forge v1.13.1, grove v1.10.0 (with its three drivers) and, for
   the Fabriq vector store, fabriq/core v1.10.0.
 - The nexus embedder is its own module,
