@@ -19,7 +19,7 @@ switch {
 case errors.Is(err, weave.ErrCollectionNotFound):
     // no collection with that ID
 case errors.Is(err, weave.ErrDuplicateDocument):
-    // this content is already in the collection
+    // a ready document, or one another ingest is working on, holds this content
 }
 ```
 
@@ -35,10 +35,10 @@ case errors.Is(err, weave.ErrDuplicateDocument):
 | `weave.ErrDocumentNotFound` | No document with that ID in the context tenant, including when you create chunks on it |
 | `weave.ErrChunkNotFound` | No chunk with that ID in the context tenant |
 | `weave.ErrCollectionAlreadyExists` | A collection with that name already exists for the tenant, on create or rename |
-| `weave.ErrDuplicateDocument` | A document with the same content hash is already in the collection |
+| `weave.ErrDuplicateDocument` | A live document with the same content hash is in the collection: a `ready` one, or a `pending` or `processing` one whose ingest sent a heartbeat within `stalled_after`. A failed, superseded or stalled copy doesn't count; `Ingest` deletes it and goes ahead |
 | `weave.ErrDocumentAlreadyExists` | A document with that ID already exists (in-memory store) |
 | `weave.ErrMigrationFailed` | A store's `Migrate` failed |
-| `weave.ErrIngestInterrupted` | `Ingest` found its document no longer `processing` partway through: [recovery](/docs/subsystems/ingestion#recovery) failed it after its heartbeat went quiet, or someone deleted it. A keyed ingest also returns it when the source kept changing under every attempt to start. The ingest has already removed what it wrote, so ingest the content again. Recovered documents carry its message in `Error`. The dashboard answers it with a retryable conflict |
+| `weave.ErrIngestInterrupted` | `Ingest` found its document no longer `processing` partway through: [recovery](/docs/subsystems/ingestion#recovery) failed it after its heartbeat went quiet, or someone deleted it. A keyed ingest also returns it when the source kept changing under every attempt to start. The ingest has already removed what it wrote, so ingest the content again, keyed or not: the retry deletes the failed row and starts over. Recovered documents carry its message in `Error`. The dashboard answers it with a retryable conflict |
 | `weave.ErrInvalidState` | A store's `ReplaceSourceDocument`, `TouchDocument`, `FailDocument` or `CompleteDocument` on a document in the wrong state, or one updated since the cutoff it was given. `Ingest` turns the ones it hits into `ErrIngestInterrupted` |
 | `weave.ErrInvalidArgument` | `UpdateCollection` with a blank name, `ListChunks` with neither a document nor a collection ID, a list or count filter whose deprecated `Tenant` differs from the context tenant, a create whose `TenantID` differs from it, a chunk whose collection isn't its document's, `GetCollectionByName` on a store naming another tenant, a deprecated retrieval tenant option (`WithTenantID`, `WithTenantFilter`, `CompareParams.Tenant`) naming another tenant than the context's, or a vector store `DeleteByMetadata` with an empty filter |
 

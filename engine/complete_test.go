@@ -9,13 +9,13 @@ import (
 	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/id"
-	"github.com/xraph/weave/store/memory"
+	"github.com/xraph/weave/store"
 )
 
 // readyStore is a memory store that runs before ahead of the move to ready
 // that ends an unkeyed ingest, and fails that move with before's error.
 type readyStore struct {
-	*memory.Store
+	store.Store
 	before func(ctx context.Context, docID id.DocumentID) error
 }
 

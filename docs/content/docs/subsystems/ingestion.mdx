@@ -62,7 +62,7 @@ That's the path for an input without a `SourceKey`. A keyed ingest runs a differ
 
 If step 6 or anything after it fails, the document is set to `State=failed`, the error text goes in `Document.Error`, `OnIngestFailed` fires, and `Ingest` returns an `IngestResult` with the document ID and `State=failed` alongside an error wrapped as `weave: ingest failed: ...`. That write ignores your context's cancellation (it gets 30 seconds of its own), so a request that gives up mid-embed still leaves the document `failed`, not stuck in `processing`. It's the store's guarded `FailDocument`, which only moves a `pending` or `processing` document, so it can't overwrite a version another attempt has just made `ready`.
 
-A failed ingest doesn't clean up after itself. The document row stays, and if the failure came after step 9 the chunks stay too. Delete it with `DeleteDocument` before you retry, because the leftover row holds the same content hash. A keyed ingest clears its own failed copy, see [Upsert by source](#upsert-by-source).
+A failed ingest deletes the chunks and vectors it wrote, so a failed document never shows up in a search (retrieval also drops any hit whose document is `failed`, in case that delete failed too). The row stays, with its error, and still holds the content hash. You don't need to delete it before you retry: when the create in step 4 collides with a document of the same content, `Ingest` looks at that document first. A `failed` or `superseded` one is deleted with its chunks and vectors, and so is a `pending` or `processing` one with no heartbeat for `stalled_after`, after recovery's guarded `FailDocument` marks it failed (that fires `OnIngestFailed` for it). Then the create is tried once more. Only a live document, `ready` or still being worked on, makes the answer `weave.ErrDuplicateDocument`. A keyed ingest clears its own failed copy the same way, see [Upsert by source](#upsert-by-source).
 
 A heartbeat that fails for any other reason (the database is down, say) fails the ingest like any other step. The `ready` update in step 11 is still best effort: if that store write fails, `Ingest` doesn't notice, and the document stays `processing` until recovery fails it.
 
@@ -104,7 +104,7 @@ Three outcomes:
 
 - Same content as before: `Ingest` returns the existing document's ID with `Unchanged: true` and a nil error. Nothing is chunked or embedded, so re-ingesting a whole docs set at boot costs no embedding calls when nothing changed. `Unchanged` always means a `ready` document.
 - New content: the new version is embedded beside the old one, then swapped in. `Replaced` lists the old version's ID, and that version is gone by the time `Ingest` returns: row, chunks and vectors.
-- Content that already lives under another key, or under no key: that's still `weave.ErrDuplicateDocument`, because the content hash rule doesn't care about keys. Treat it as "already indexed".
+- Content that already lives under another key, or under no key: that's still `weave.ErrDuplicateDocument`, because the content hash rule doesn't care about keys. It means a live document of another key, or of none, holds the content: `ready`, or still being ingested.
 
 The tenant and the collection are checked before anything else, so a keyed ingest into a collection your tenant doesn't have is `weave.ErrCollectionNotFound` with no embedding call.
 

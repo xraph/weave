@@ -218,6 +218,8 @@ Weave relies on the store to keep tenants apart, so your store has to do what th
 
 Treat `""` as no tenant everywhere. Rows a v1.8 install wrote with an empty tenant must stay unreachable.
 
+`document.ListFilter` has two exact-match filters besides the collection and state: `SourceKey` and `ContentHash`. An unkeyed ingest whose create collides on the content hash lists the collection by `ContentHash` to find the document in the way, so give that column an index (the built-in stores' unique `(collection_id, content_hash)` index serves). The engine checks the hash on what comes back, so a store that ignores the filter still works, only slower.
+
 ### Replacing a source's document
 
 `ReplaceSourceDocument(ctx, doc, chunks)` finishes the ingest of a new version of a source. It's the one store method that changes several rows at once, and it has to be atomic: a reader sees the old version or the new one, never both and never neither. Your store has to do all of this:

@@ -53,4 +53,5 @@ func Run(t *testing.T, open Opener) {
 	t.Run("SourceReplaceSharedChunkID", func(t *testing.T) { testSourceReplaceSharedChunkID(t, open(t)) })
 	t.Run("OneReadyPerSource", func(t *testing.T) { testOneReadyDocumentPerSource(t, open(t)) })
 	t.Run("SourceKeyFilter", func(t *testing.T) { testSourceKeyFilter(t, open(t)) })
+	t.Run("ContentHashFilter", func(t *testing.T) { testContentHashFilter(t, open(t)) })
 }

@@ -365,6 +365,9 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 			if filter.SourceKey != "" && doc.SourceKey != filter.SourceKey {
 				continue
 			}
+			if filter.ContentHash != "" && doc.ContentHash != filter.ContentHash {
+				continue
+			}
 			if filter.Search != "" && !strings.Contains(strings.ToLower(doc.Title), strings.ToLower(filter.Search)) {
 				continue
 			}

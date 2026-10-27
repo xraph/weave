@@ -25,8 +25,8 @@ refuse a `Search` with no `TenantKey` and an `Upsert` whose entry has no
 `metadata["tenant_id"]`, with the same error.
 
 Gets, updates and deletes by ID stay inside the tenant too. In v1.8 a get
-or delete with another tenant's ID found that row and acted on it. Now you get the same not-found error as an ID that doesn't
-exist (`weave.ErrCollectionNotFound`, `weave.ErrDocumentNotFound` or
+or delete with another tenant's ID found that row and acted on it. Now you
+get the same not-found error as an ID that doesn't exist (`weave.ErrCollectionNotFound`, `weave.ErrDocumentNotFound` or
 `weave.ErrChunkNotFound`), and nothing is touched. `CreateCollection` fills
 an empty `TenantID` from the context, but a `TenantID` that names another
 tenant is `weave.ErrInvalidArgument`.
@@ -161,8 +161,16 @@ That's where a new error comes from. `Ingest` can now return
 was still going, someone deleted it mid-ingest, or a keyed source kept
 changing under four attempts to start. By the time you see it, the ingest
 has already removed the chunks and vectors it wrote. Ingest the content
-again. If you treat every `Ingest` error as fatal today, give this one a
-retry.
+again, with or without a `SourceKey`: the failed row still holds the
+content hash, and the retry deletes it and starts over. If you treat every
+`Ingest` error as fatal today, give this one a retry.
+
+The same goes for any failed ingest. A failed document keeps its row (with
+the error in `Error`) but loses its chunks and vectors, so it never shows
+up in a search, and the next ingest of that content replaces it. In v1.8
+the retry hit `weave.ErrDuplicateDocument` until you called
+`DeleteDocument`. That error now means a live document holds the content:
+a `ready` one, or one another ingest is still working on.
 
 ## If you wrote your own store
 

@@ -17,6 +17,8 @@ type ListFilter struct {
 	Search string
 	// SourceKey filters by exact source key. Empty means any.
 	SourceKey string
+	// ContentHash filters by exact content hash. Empty means any.
+	ContentHash string
 	// Limit is the maximum number of documents to return. Zero means no limit.
 	Limit int
 	// Offset is the number of documents to skip.

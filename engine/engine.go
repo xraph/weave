@@ -440,7 +440,7 @@ func (e *Engine) ingest(ctx context.Context, span trace.Span, tenantID string, i
 	}
 
 	doc := newDocument(tenantID, input, contentHash(input.Content))
-	if createErr := e.store.CreateDocument(ctx, doc); createErr != nil {
+	if createErr := e.createUnkeyed(ctx, tenantID, doc); createErr != nil {
 		return nil, fmt.Errorf("weave: create document: %w", createErr)
 	}
 
@@ -459,12 +459,12 @@ func (e *Engine) ingest(ctx context.Context, span trace.Span, tenantID string, i
 
 	// Store chunks in metadata store.
 	if storeErr := e.store.CreateChunkBatch(ctx, chunks); storeErr != nil {
-		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("store chunks: %w", storeErr))
+		return e.endIngest(ctx, doc, nil, true, fmt.Errorf("store chunks: %w", storeErr))
 	}
 
 	// Upsert vector entries.
 	if upsertErr := e.upsertVectors(ctx, entries); upsertErr != nil {
-		return e.failIngest(ctx, doc, input.CollectionID, fmt.Errorf("upsert vectors: %w", upsertErr))
+		return e.endIngest(ctx, doc, entries, true, fmt.Errorf("upsert vectors: %w", upsertErr))
 	}
 
 	// The last heartbeat, right before the move to ready, keeps the document
@@ -486,6 +486,73 @@ func (e *Engine) ingest(ctx context.Context, span trace.Span, tenantID string, i
 		ChunkCount: len(chunks),
 		State:      document.StateReady,
 	}, nil
+}
+
+// createUnkeyed creates the pending document of an unkeyed ingest. A
+// collection holds one document per content hash, so the create collides
+// with any earlier document of the same content, and that one may be dead:
+// failed (an ingest that failed, or one recovery gave up on), superseded,
+// or pending or processing with no heartbeat for StalledAfter. A dead copy
+// is removed, row, chunks and vectors, and the create is tried once more.
+// weave.ErrDuplicateDocument is only the answer while a live document
+// holds the content: ready, or pending or processing with a recent
+// heartbeat (another ingest at work), or one that a concurrent ingest
+// created between the two tries.
+func (e *Engine) createUnkeyed(ctx context.Context, tenant string, doc *document.Document) error {
+	err := e.store.CreateDocument(ctx, doc)
+	if !errors.Is(err, weave.ErrDuplicateDocument) {
+		return err
+	}
+	cleared, clearErr := e.clearDeadCopy(ctx, tenant, doc.CollectionID, doc.ContentHash)
+	if clearErr != nil {
+		return clearErr
+	}
+	if !cleared {
+		return err
+	}
+	return e.store.CreateDocument(ctx, doc)
+}
+
+// clearDeadCopy removes the document of colID with hash when it is dead
+// (see createUnkeyed) and reports whether the content is free now. Failed
+// and superseded are final states, so nothing can bring such a document
+// back between the read and the delete. A stalled pending or processing one
+// is first marked failed with recovery's guarded write and cutoff, so an
+// ingest that comes back to life keeps it; when that write goes through,
+// IngestFailed fires once for it, as recovery would.
+func (e *Engine) clearDeadCopy(ctx context.Context, tenant string, colID id.CollectionID, hash string) (bool, error) {
+	docs, err := e.store.ListDocuments(ctx, &document.ListFilter{CollectionID: colID, ContentHash: hash})
+	if err != nil {
+		return false, fmt.Errorf("weave: find the document of this content: %w", err)
+	}
+	doc := sameContent(owned(docs, tenant, documentTenant), hash)
+	if doc == nil {
+		// Gone since the create collided: the content may be free.
+		return true, nil
+	}
+	switch doc.State {
+	case document.StateReady:
+		return false, nil
+	case document.StateFailed, document.StateSuperseded:
+	default:
+		cutoff := e.stalledBefore()
+		if !doc.UpdatedAt.Before(cutoff) {
+			return false, nil
+		}
+		failErr := e.store.FailDocument(ctx, doc.ID, weave.ErrIngestInterrupted.Error(), cutoff)
+		switch {
+		case errors.Is(failErr, weave.ErrInvalidState), errors.Is(failErr, weave.ErrDocumentNotFound):
+			// A heartbeat, a finish or recovery got there first.
+			return false, nil
+		case failErr != nil:
+			return false, fmt.Errorf("weave: fail a stalled document of this content: %w", failErr)
+		}
+		e.extensions.EmitIngestFailed(ctx, colID, weave.ErrIngestInterrupted)
+	}
+	if err := e.purgeDocument(ctx, tenant, doc.ID); err != nil {
+		return false, fmt.Errorf("weave: purge a dead document of this content: %w", err)
+	}
+	return true, nil
 }
 
 // completeDocument moves an unkeyed ingest's document from processing to
@@ -661,37 +728,49 @@ func (e *Engine) failIngest(ctx context.Context, doc *document.Document, colID i
 
 // endIngest ends an unkeyed ingest that stopped with err: a document that
 // moved on under it (weave.ErrIngestInterrupted) is abandoned, anything else
-// goes through failIngest. entries are the vectors it upserted, and
-// chunksWritten says whether its chunk rows are in the store.
+// goes through failIngest. Either way the chunks and vectors it wrote are
+// deleted afterwards (see clearAttempt), so a failed document is never
+// searchable. entries are the vectors it upserted, and chunksWritten says
+// whether its chunk rows may be in the store.
 func (e *Engine) endIngest(ctx context.Context, doc *document.Document, entries []vectorstore.Entry, chunksWritten bool, err error) (*IngestResult, error) {
 	if errors.Is(err, weave.ErrIngestInterrupted) {
 		return e.abandonIngest(ctx, doc, entries, chunksWritten)
 	}
-	return e.failIngest(ctx, doc, doc.CollectionID, err)
+	res, failErr := e.failIngest(ctx, doc, doc.CollectionID, err)
+	e.clearAttempt(ctx, doc, entries, chunksWritten)
+	return res, failErr
 }
 
 // abandonIngest clears what an interrupted ingest wrote and returns
 // weave.ErrIngestInterrupted. The document's state is left as it is: it was
 // failed, finished or deleted by someone else, and that one fires the end
 // hook (recovery's IngestFailed), so this fires none and a document never
-// gets two. The vectors go by their own
-// IDs; chunk rows, when written, by document, since an unkeyed document has
-// one attempt. The deletes run on a cleanup context, and a failure is only
-// logged. Recovery never lists a failed document again, so leftovers then
-// stay until DeleteDocument (or, for a keyed document, its next ingest).
+// gets two. What it wrote goes through clearAttempt. Recovery never lists a
+// failed document again, so anything a failed delete leaves stays until the
+// next ingest of the same content purges the row, or DeleteDocument;
+// retrieval drops the hits of a failed document meanwhile.
 func (e *Engine) abandonIngest(ctx context.Context, doc *document.Document, entries []vectorstore.Entry, chunksWritten bool) (*IngestResult, error) {
+	e.clearAttempt(ctx, doc, entries, chunksWritten)
+	return &IngestResult{DocumentID: doc.ID, State: document.StateFailed}, weave.ErrIngestInterrupted
+}
+
+// clearAttempt deletes what an unkeyed ingest of doc wrote: the vectors in
+// entries by their own IDs and, when chunksWritten, the document's chunk
+// rows (an unkeyed document has one attempt). It runs on a cleanup context,
+// and a failure is only logged; the document's row stays.
+func (e *Engine) clearAttempt(ctx context.Context, doc *document.Document, entries []vectorstore.Entry, chunksWritten bool) {
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
 	e.dropAttemptVectors(cleanup, entries)
-	if chunksWritten {
-		if err := e.store.DeleteChunksByDocument(cleanup, doc.ID); err != nil {
-			e.logger.Warn("failed to delete the chunks of an interrupted ingest",
-				log.String("document_id", doc.ID.String()),
-				log.String("error_type", telemetry.ErrorType(err)),
-			)
-		}
+	if !chunksWritten {
+		return
 	}
-	return &IngestResult{DocumentID: doc.ID, State: document.StateFailed}, weave.ErrIngestInterrupted
+	if err := e.store.DeleteChunksByDocument(cleanup, doc.ID); err != nil {
+		e.logger.Warn("failed to delete the chunks of an ingest that did not finish",
+			log.String("document_id", doc.ID.String()),
+			log.String("error_type", telemetry.ErrorType(err)),
+		)
+	}
 }
 
 // ──────────────────────────────────────────────────
@@ -922,8 +1001,9 @@ func (e *Engine) retrieveRaw(ctx context.Context, query string, params *Retrieve
 // hydrateHit). The hits slice is reused.
 func (e *Engine) hydrate(ctx context.Context, tenant string, hits []ScoredChunk) ([]ScoredChunk, error) {
 	kept := hits[:0]
+	shown := shownDocuments{}
 	for _, h := range hits {
-		keep, err := e.hydrateHit(ctx, tenant, &h)
+		keep, err := e.hydrateHit(ctx, tenant, &h, shown)
 		if err != nil {
 			return nil, err
 		}
@@ -934,8 +1014,34 @@ func (e *Engine) hydrate(ctx context.Context, tenant string, hits []ScoredChunk)
 	return kept, nil
 }
 
+// shownDocuments remembers, for one hydrate pass, whether the hits of each
+// document (by ID) may be shown, so a document is read once per pass.
+type shownDocuments map[string]bool
+
+// documentShown reports whether hits of docID may be shown: the document
+// is tenant's and is neither failed nor superseded. A failed document's
+// chunks are normally deleted with it, so this catches what a cleanup that
+// failed left behind.
+func (e *Engine) documentShown(ctx context.Context, tenant string, docID id.DocumentID, shown shownDocuments) (bool, error) {
+	if ok, seen := shown[docID.String()]; seen {
+		return ok, nil
+	}
+	doc, err := e.getDocument(ctx, tenant, docID)
+	switch {
+	case errors.Is(err, weave.ErrDocumentNotFound):
+		shown[docID.String()] = false
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("weave: hydrate document %s: %w", docID, err)
+	}
+	ok := doc.State != document.StateFailed && doc.State != document.StateSuperseded
+	shown[docID.String()] = ok
+	return ok, nil
+}
+
 // hydrateHit reads h's chunk back within tenant and reports whether to keep
-// the hit. A hit whose vector is labelled with another tenant is dropped,
+// the hit. A hit whose document is failed, superseded or gone is dropped
+// (see documentShown). A hit whose vector is labelled with another tenant is dropped,
 // and so is a missing row whose vector isn't labelled with tenant, so an
 // Orphaned hit never carries another tenant's text. The built-in stores
 // never return either; a custom vector store or retriever that ignores the
@@ -943,7 +1049,7 @@ func (e *Engine) hydrate(ctx context.Context, tenant string, hits []ScoredChunk)
 // dropped as well (see the case below). A hit with no chunk, or no chunk
 // ID (a custom retriever that sets none), is otherwise left as it is,
 // unhydrated.
-func (e *Engine) hydrateHit(ctx context.Context, tenant string, h *ScoredChunk) (bool, error) {
+func (e *Engine) hydrateHit(ctx context.Context, tenant string, h *ScoredChunk, shown shownDocuments) (bool, error) {
 	if h.Chunk == nil {
 		return true, nil
 	}
@@ -969,6 +1075,10 @@ func (e *Engine) hydrateHit(ctx context.Context, tenant string, h *ScoredChunk) 
 	case err != nil:
 		return false, fmt.Errorf("weave: hydrate chunk %s: %w", h.Chunk.ID, err)
 	default:
+		ok, docErr := e.documentShown(ctx, tenant, row.DocumentID, shown)
+		if docErr != nil || !ok {
+			return false, docErr
+		}
 		h.Chunk = hydratedCopy(row, h.Chunk.Metadata)
 		h.Hydrated = true
 	}

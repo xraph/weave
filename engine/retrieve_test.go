@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/xraph/weave"
+	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/retriever"
 )
@@ -173,5 +174,40 @@ func TestRetrieveOrphanKeepsItsPlace(t *testing.T) {
 	}
 	if !kept.Hydrated || kept.Orphaned {
 		t.Errorf("kept hit: hydrated=%v orphaned=%v, want hydrated only", kept.Hydrated, kept.Orphaned)
+	}
+}
+
+// A failed document's chunks are normally deleted with its failure, but a
+// cleanup that failed can leave them. Retrieval drops them either way, so
+// a failed document is never searchable.
+func TestRetrieveDropsAFailedDocumentsHits(t *testing.T) {
+	r := newRig(t)
+	t1 := tenantCtx("t1")
+	col := mustTestCollection(t, r.Engine, "docs")
+	kept := mustIngest(t, t1, r.Engine, col.ID, "kept", sharedText)
+	broken := mustIngest(t, t1, r.Engine, col.ID, "broken", sharedText+", unless the item was used")
+
+	doc, err := r.Store.GetDocument(t1, broken)
+	if err != nil {
+		t.Fatalf("get the document to break: %v", err)
+	}
+	failed := *doc
+	failed.State = document.StateFailed
+	failed.Error = "weave: ingest failed: cleanup failed too"
+	if err = r.Store.UpdateDocument(t1, &failed); err != nil {
+		t.Fatalf("mark the document failed: %v", err)
+	}
+
+	hits, err := r.Engine.Retrieve(t1, sharedText, engine.WithCollection(col.ID), engine.WithTopK(10))
+	if err != nil {
+		t.Fatalf("retrieve: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("retrieve: no hits, want the ready document's")
+	}
+	for _, h := range hits {
+		if h.Chunk.DocumentID.String() != kept.String() {
+			t.Errorf("hit from %s, want only the ready document %s", h.Chunk.DocumentID, kept)
+		}
 	}
 }

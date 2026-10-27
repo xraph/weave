@@ -228,8 +228,9 @@ func (e *Engine) RetrieveCompare(ctx context.Context, query string, p ComparePar
 // hit hydrateHit drops is removed.
 func (e *Engine) hydrateCompare(ctx context.Context, tenant string, hits []CompareHit) ([]CompareHit, error) {
 	kept := hits[:0]
+	shown := shownDocuments{}
 	for _, h := range hits {
-		keep, err := e.hydrateHit(ctx, tenant, &h.ScoredChunk)
+		keep, err := e.hydrateHit(ctx, tenant, &h.ScoredChunk, shown)
 		if err != nil {
 			return nil, err
 		}

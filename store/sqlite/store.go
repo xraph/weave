@@ -385,6 +385,9 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 		if filter.SourceKey != "" {
 			q = q.Where("source_key = ?", filter.SourceKey)
 		}
+		if filter.ContentHash != "" {
+			q = q.Where("content_hash = ?", filter.ContentHash)
+		}
 		if filter.Search != "" {
 			q = q.Where("title LIKE '%' || ? || '%' ESCAPE '\\'", sqllike.Escape(filter.Search))
 		}

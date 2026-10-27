@@ -351,6 +351,9 @@ func (s *Store) ListDocuments(ctx context.Context, filter *document.ListFilter) 
 		if filter.SourceKey != "" {
 			q = q.Filter(bson.M{"source_key": filter.SourceKey})
 		}
+		if filter.ContentHash != "" {
+			q = q.Filter(bson.M{"content_hash": filter.ContentHash})
+		}
 		if filter.Search != "" {
 			q = q.Filter(bson.M{"title": containsCI(filter.Search)})
 		}

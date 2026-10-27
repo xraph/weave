@@ -404,3 +404,34 @@ func testSourceKeyFilter(t *testing.T, s store.Store) {
 		t.Errorf("document with no key reads back with source key %q", got.SourceKey)
 	}
 }
+
+// testContentHashFilter pins ListFilter.ContentHash, which an unkeyed ingest
+// uses to find the document its content collided with: an exact match
+// within the collection and the context tenant, any state, and "" for any
+// hash.
+func testContentHashFilter(t *testing.T, s store.Store) {
+	ctx := as("t1")
+	col := mustCollection(t, s, "hashes", "t1")
+	ready := mustDocument(t, s, col, "ready", document.StateReady)
+	failed := mustDocument(t, s, col, "failed", document.StateFailed)
+	other := mustCollection(t, s, "hashes-t2", "t2")
+	theirs := mustDocument(t, s, other, "theirs", document.StateFailed)
+
+	for _, tc := range []struct {
+		name string
+		hash string
+		want []*document.Document
+	}{
+		{"the ready document's hash", ready.ContentHash, []*document.Document{ready}},
+		{"the failed document's hash", failed.ContentHash, []*document.Document{failed}},
+		{"a prefix of a hash", ready.ContentHash[:len(ready.ContentHash)-2], nil},
+		{"another tenant's hash", theirs.ContentHash, nil},
+		{"no hash", "", []*document.Document{ready, failed}},
+	} {
+		docs, err := s.ListDocuments(ctx, &document.ListFilter{CollectionID: col.ID, ContentHash: tc.hash})
+		if err != nil {
+			t.Fatalf("list documents by %s: %v", tc.name, err)
+		}
+		sameSet(t, "documents by "+tc.name, documentIDs(docs), documentIDs(tc.want))
+	}
+}
