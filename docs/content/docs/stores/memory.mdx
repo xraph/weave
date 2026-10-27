@@ -79,4 +79,4 @@ eng, err = engine.New(
 )
 ```
 
-Remember the extra steps on the production side: call `Migrate` on the Postgres store and create the pgvector table yourself, see [PostgreSQL store](/docs/stores/postgres#pgvector).
+Remember the extra steps on the production side: call `Migrate` on the Postgres store and `pgvector.Migrate` for the vector table, see [pgvector](/docs/stores/pgvector).

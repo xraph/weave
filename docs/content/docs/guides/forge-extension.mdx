@@ -55,7 +55,7 @@ With the default base path, the routes are at `/weave/v1/...`. The [HTTP API ref
 | Phase | Behaviour |
 |-------|-----------|
 | `Register` | Loads config, resolves a store from Grove when there is one, builds the engine, mounts the routes (unless `disable_routes`) and provides `*engine.Engine` to the container. Fails when `default_chunk_overlap` isn't smaller than `default_chunk_size`. |
-| `Start` | Runs the metadata store's `Migrate` (unless `disable_migrate`). Nothing migrates the pgvector table. |
+| `Start` | Runs the metadata store's `Migrate` (unless `disable_migrate`). It doesn't migrate the pgvector table: call `pgvector.Migrate` yourself, see [pgvector](/docs/stores/pgvector). |
 | `Health` | Pings the metadata store. Fails when there's no store. |
 | `Stop` | Calls `engine.Stop`, which fires `OnShutdown` and closes the metadata store. |
 

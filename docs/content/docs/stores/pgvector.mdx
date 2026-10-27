@@ -1,0 +1,131 @@
+---
+title: pgvector Vector Store
+description: Keep chunk embeddings in PostgreSQL with pgvector, in a table Weave migrates and checks for you.
+---
+
+The `vectorstore/pgvector` package keeps one row per chunk in PostgreSQL and searches it with pgvector's cosine distance operator (`<=>`). The score you get back is `1 - distance`. It takes the same `*grove.DB` as the [PostgreSQL store](/docs/stores/postgres), so one connection serves both.
+
+## Setup
+
+```go
+import "github.com/xraph/weave/vectorstore/pgvector"
+
+const dims = 1536 // your embedder's Dimensions()
+
+ok, reason, err := pgvector.Available(ctx, db)
+if err != nil {
+    log.Fatal(err) // couldn't ask the database
+}
+if !ok {
+    log.Fatalf("pgvector is off: %s", reason)
+}
+if err := pgvector.Migrate(ctx, db, dims); err != nil {
+    log.Fatal(err)
+}
+
+eng, err := engine.New(
+    engine.WithStore(st),
+    engine.WithVectorStore(pgvector.New(db, pgvector.WithDimensions(dims))),
+    engine.WithEmbedder(emb),
+    engine.WithChunker(chunker.NewRecursiveChunker()),
+)
+```
+
+You'll need pgvector 0.5.0 or later on the server, and 0.8.0 or later if small tenants share a large table (see [Search](#search)). The `pgvector/pgvector:pg17` image ships a recent one.
+
+## Checking for pgvector first
+
+`Available(ctx, db)` tells you whether Weave can use pgvector on this database, without changing anything. It answers `true` when the `vector` extension is installed, or when it isn't yet but this role may create it. To find that out it runs `CREATE EXTENSION vector` in a transaction and always rolls it back.
+
+When the answer is `false`, `reason` is one sentence you can show an operator:
+
+| Situation | `reason` |
+|-----------|----------|
+| The server has no pgvector package | the vector extension is not installed on this PostgreSQL server |
+| The role may not create extensions | this database role is not allowed to create the vector extension; ask a database owner to run CREATE EXTENSION vector |
+| The installed or packaged version is older than 0.5.0 | the vector extension is version 0.4.4; weave needs 0.5.0 or later for HNSW indexes |
+| Anything else the server refuses | CREATE EXTENSION vector failed with SQLSTATE `<code>` |
+
+`err` is only for failing to ask, a dropped connection for example. A plain no always comes back with a nil `err`, so a host that treats knowledge as optional can call it at boot, keep the feature off with `reason` on screen, and still start.
+
+## Migrations
+
+`Migrate(ctx, db, dims)` runs one Grove migration group, `weave_pgvector`, through Grove's orchestrator and records it in `grove_migrations`. The group holds a single migration, `20261024000300` `create_weave_vectors`, which creates:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE IF NOT EXISTS weave_vectors (
+    id        TEXT PRIMARY KEY,
+    embedding vector(1536) NOT NULL,
+    content   TEXT NOT NULL DEFAULT '',
+    metadata  JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_weave_vectors_embedding ON weave_vectors USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_weave_vectors_tenant_collection ON weave_vectors ((metadata->>'tenant_id'), (metadata->>'collection_id'));
+CREATE INDEX IF NOT EXISTS idx_weave_vectors_document ON weave_vectors ((metadata->>'document_id'));
+```
+
+The `1536` is whatever you pass. It has to be between 1 and 2000 (`pgvector.MaxIndexedDimensions`), because an HNSW index refuses longer vectors; anything else is `weave.ErrInvalidArgument`.
+
+The group is separate from the metadata store's `weave` group and depends on no other group. The metadata migrations never create an extension, so an app that doesn't use pgvector never needs it installed.
+
+If your app runs its own Grove orchestrator, build the group with `pgvector.Migrations(dims)` and add it to your run:
+
+```go
+vectors, err := pgvector.Migrations(dims)
+if err != nil {
+    log.Fatal(err)
+}
+_, err = migrate.NewOrchestrator(pgmigrate.New(pgdriver.Unwrap(db)),
+    postgres.Migrations, vectors, /* your own groups */).Migrate(ctx)
+```
+
+Then call `pgvector.New(db, pgvector.WithDimensions(dims)).CheckDimensions(ctx)` yourself, for the reason in the next section.
+
+Replicas booting together on a fresh database race on Grove's own tracking tables, which Grove creates before it takes its lock. `Migrate` retries that race the same way the [PostgreSQL store](/docs/stores/postgres#migrations) does, up to five attempts with a short random pause.
+
+### When the dimensions change
+
+A tracked migration runs once. If you change your embedding size after the table exists, the migration won't run again, and every insert would fail one by one. Weave refuses up front instead:
+
+- `Migrate` checks the live table after the run. A table made with another size is `weave.ErrDimensionMismatch`, and the message names both numbers (`weave_vectors.embedding has 1536 dimensions, want 3072`).
+- If `weave_vectors` was already there before the first run (you made it by hand from an older version of these docs, say), the migration reads its size right after the `CREATE TABLE IF NOT EXISTS`. A different size fails the migration and nothing is recorded, so it runs again once you've fixed the table.
+- `CheckDimensions(ctx)` does the same comparison on demand. It returns `weave.ErrDimensionMismatch`, or an error wrapping `weave.ErrNoVectorStore` when the table doesn't exist yet.
+
+To move to a new size you re-embed everything. Drop the table (or create a new one under another name with `WithTableName`), migrate with the new size and re-ingest.
+
+## Search
+
+Every search names a tenant. A `Search` with an empty `TenantKey` is `weave.ErrTenantRequired`, an `Upsert` of an entry without `metadata["tenant_id"]` is `weave.ErrTenantRequired` with nothing written, and `DeleteByMetadata` with an empty filter is `weave.ErrInvalidArgument`.
+
+HNSW applies the tenant and metadata filters after it walks the graph, and by default it only collects 40 candidates (`hnsw.ef_search`). When a small workspace shares a table with a much bigger one whose vectors sit closer to the query, those 40 can all belong to the big one, and the small workspace gets fewer hits than it asked for, or none.
+
+On pgvector 0.8.0 and later, `Search` runs in a transaction that starts with `SET LOCAL hnsw.iterative_scan = strict_order`. The index keeps scanning until it has `TopK` matching rows, in exact distance order, up to `hnsw.max_scan_tuples` (20,000 by default). Raise that setting on your role or database if a tenant can be a tiny share of a very large table. The store reads the extension version on its first search and remembers it.
+
+On 0.5.x to 0.7.x the search runs without it, and a small tenant in a large table may get short results. Upgrade the extension (`ALTER EXTENSION vector UPDATE`) if that's you.
+
+Postgres doesn't always use the HNSW index. For a tenant with only a handful of rows it often reads them through the `tenant_id` index and sorts, which is exact anyway.
+
+## Options
+
+```go
+pgvector.New(db,
+    pgvector.WithDimensions(1536),       // what CheckDimensions compares against
+    pgvector.WithTableName("kb_vectors"), // default weave_vectors
+)
+```
+
+Every statement uses the table `WithTableName` names, quoted as one identifier. The migration only ever creates `weave_vectors`, so a custom table is yours to create, with the same columns and indexes.
+
+`eng.Components()` reports the store as kind `pgvector`, with `table` and `dimensions` in its params.
+
+## Behaviour
+
+| `VectorStore` call | What runs |
+|--------------------|-----------|
+| `Upsert(entries)` | `INSERT ... ON CONFLICT (id) DO UPDATE`, up to 1,000 rows per statement. A larger batch is written in one transaction. |
+| `Search(vec, opts)` | `WHERE metadata->>'tenant_id' = TenantKey` plus one `metadata->>key = value` per `Filter` entry, `ORDER BY embedding <=> vec, id LIMIT TopK`. `MinScore` filters afterwards. Results carry the stored vector. |
+| `Delete(ids)` | `DELETE ... WHERE id = ANY(ids)` |
+| `DeleteByMetadata(filter)` | `DELETE` where every key/value pair matches |
+
+The metadata column holds what the engine writes: `collection_id`, `document_id`, `tenant_id`, `chunk_index`, `source_key` for keyed documents, and the chunk's own metadata.

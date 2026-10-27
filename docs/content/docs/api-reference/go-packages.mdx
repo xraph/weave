@@ -169,7 +169,7 @@ func DefaultTemplate() *Template
 | `store/sqlite.New(db *grove.DB)` | `store.Store` | SQLite on Grove |
 | `store/mongo.New(db *grove.DB)` | `store.Store` | MongoDB on Grove |
 | `vectorstore/memory.New()` | `vectorstore.VectorStore` | Brute-force cosine similarity |
-| `vectorstore/pgvector.New(db, opts...)` | `vectorstore.VectorStore` | PostgreSQL with pgvector; you create the table |
+| `vectorstore/pgvector.New(db, opts...)` | `vectorstore.VectorStore` | PostgreSQL with pgvector; `pgvector.Migrate` creates the table, `pgvector.Available` checks first |
 | `vectorstore/fabriq.New(vq, opts...)` | `vectorstore.VectorStore` | Fabriq vector plane (package `fabriqvec`) |
 | `chunker.NewRecursiveChunker()` | `chunker.Chunker` | Separator-based |
 | `chunker.NewFixedChunker()` | `chunker.Chunker` | Fixed character windows |

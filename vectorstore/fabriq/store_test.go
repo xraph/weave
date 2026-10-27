@@ -255,3 +255,43 @@ func TestTenantGuards(t *testing.T) {
 		t.Errorf("delete with no filter: got %v, want ErrInvalidArgument", err)
 	}
 }
+
+// TestUpsertSetsFabriqTenantFromEntries upserts on a context with no Fabriq
+// tenant, the way the engine calls it, and expects each entry written under
+// the Fabriq tenant its tenant_id names.
+func TestUpsertSetsFabriqTenantFromEntries(t *testing.T) {
+	s := fabriqvec.New(fabriqtest.NewWorld(registry.New()).Vector)
+
+	if err := s.Upsert(context.Background(), []vectorstore.Entry{
+		{ID: "a1", Vector: []float32{1, 0, 0}, Content: "acme doc", Metadata: map[string]string{"tenant_id": "acme"}},
+		{ID: "g1", Vector: []float32{1, 0, 0}, Content: "globex doc", Metadata: map[string]string{"tenant_id": "globex"}},
+	}); err != nil {
+		t.Fatalf("Upsert without a Fabriq tenant on ctx: %v", err)
+	}
+
+	for tenantID, want := range map[string]string{"acme": "a1", "globex": "g1"} {
+		results, err := s.Search(context.Background(), []float32{1, 0, 0}, &vectorstore.SearchOptions{TopK: 5, TenantKey: tenantID})
+		if err != nil {
+			t.Fatalf("Search %s: %v", tenantID, err)
+		}
+		if len(results) != 1 || results[0].ID != want {
+			t.Errorf("Search %s: %+v, want only %s", tenantID, results, want)
+		}
+	}
+
+	// A tenant_id Fabriq cannot stamp refuses the batch before anything is written.
+	err := s.Upsert(context.Background(), []vectorstore.Entry{
+		{ID: "a2", Vector: []float32{0, 1, 0}, Metadata: map[string]string{"tenant_id": "acme"}},
+		{ID: "bad", Vector: []float32{0, 1, 0}, Metadata: map[string]string{"tenant_id": "not a tenant"}},
+	})
+	if err == nil {
+		t.Fatal("Upsert with an invalid Fabriq tenant: nil, want an error")
+	}
+	results, err := s.Search(context.Background(), []float32{0, 1, 0}, &vectorstore.SearchOptions{TopK: 5, TenantKey: "acme"})
+	if err != nil {
+		t.Fatalf("Search acme: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("acme holds %d vectors after the refused batch, want 1", len(results))
+	}
+}

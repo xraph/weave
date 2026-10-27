@@ -4,22 +4,20 @@ package postgres
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
-	"math/big"
 	"time"
 
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/drivers/pgdriver"
 	"github.com/xraph/grove/drivers/pgdriver/pgmigrate"
-	"github.com/xraph/grove/migrate"
 
 	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
 	"github.com/xraph/weave/collection"
 	"github.com/xraph/weave/document"
 	"github.com/xraph/weave/id"
+	"github.com/xraph/weave/internal/migrateretry"
 	"github.com/xraph/weave/internal/sqllike"
 	"github.com/xraph/weave/internal/tenancy"
 	"github.com/xraph/weave/store"
@@ -53,57 +51,10 @@ func New(db *grove.DB) *Store {
 // times with a short jittered pause. By the next attempt the tables exist and
 // grove's lock serialises the replicas.
 func (s *Store) Migrate(ctx context.Context) error {
-	var err error
-	for attempt := 1; ; attempt++ {
-		_, err = migrate.NewOrchestrator(pgmigrate.New(s.pg), Migrations).Migrate(ctx)
-		if err == nil {
-			return nil
-		}
-		if attempt == migrateAttempts || !isConcurrentCreate(err) {
-			break
-		}
-		if waitErr := pause(ctx, migrateBackoff(attempt)); waitErr != nil {
-			err = errors.Join(err, waitErr)
-			break
-		}
+	if err := migrateretry.Run(ctx, pgmigrate.New(s.pg), Migrations); err != nil {
+		return fmt.Errorf("%w: %w", weave.ErrMigrationFailed, err)
 	}
-	return fmt.Errorf("%w: %w", weave.ErrMigrationFailed, err)
-}
-
-// migrateAttempts bounds how many times Migrate runs the orchestrator when
-// replicas race on grove's tracking tables.
-const migrateAttempts = 5
-
-// migrateBackoff returns the pause before the next attempt: a base that grows
-// with each attempt plus up to as much again of jitter, so racing replicas
-// spread out. Attempt 1 waits 50 to 100ms, attempt 4 at most 400ms.
-func migrateBackoff(attempt int) time.Duration {
-	base := time.Duration(attempt) * 50 * time.Millisecond
-	return base + jitter(base)
-}
-
-// jitter returns a random duration in [0, limit).
-func jitter(limit time.Duration) time.Duration {
-	if limit <= 0 {
-		return 0
-	}
-	n, err := rand.Int(rand.Reader, big.NewInt(int64(limit)))
-	if err != nil {
-		return limit / 2
-	}
-	return time.Duration(n.Int64())
-}
-
-// pause waits for d or until ctx is done, whichever comes first.
-func pause(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
+	return nil
 }
 
 // Ping verifies the database connection.

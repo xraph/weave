@@ -49,6 +49,7 @@ The memory and SQLite backends always run (SQLite opens a file under `t.TempDir(
 |---|---|
 | `WEAVE_TEST_POSTGRES_DSN` | `store/postgres/conformance_test.go` |
 | `WEAVE_TEST_MONGO_DSN` | `store/mongo/conformance_test.go` |
+| `WEAVE_TEST_PGVECTOR_DSN` | `vectorstore/pgvector` tests, on a server with the pgvector extension (`pgvector/pgvector:pg17`) |
 
 Without them those tests call `t.Skip` and the package still reports `ok`, so unless you run with `-v` a skipped backend looks exactly like a passing one. CI sets neither variable. The Postgres and Mongo stores get no coverage there, so if you touch either one you have to run it yourself.
 
@@ -56,17 +57,21 @@ There are no testcontainers here. You start throwaway containers on a non-defaul
 
 ```bash
 docker run -d --rm --name weave-pg -p 55432:5432 -e POSTGRES_PASSWORD=weave postgres
+docker run -d --rm --name weave-pgvector -p 55433:5432 -e POSTGRES_PASSWORD=weave pgvector/pgvector:pg17
 docker run -d --rm --name weave-mongo -p 57017:27017 mongo --replSet rs0
 docker exec weave-mongo mongosh --quiet --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]})'
 
 WEAVE_TEST_POSTGRES_DSN='postgres://postgres:weave@localhost:55432/postgres?sslmode=disable' \
 WEAVE_TEST_MONGO_DSN='mongodb://localhost:57017/?directConnection=true' \
-GOWORK=off go test -v -count=1 ./store/...
+WEAVE_TEST_PGVECTOR_DSN='postgres://postgres:weave@localhost:55433/postgres?sslmode=disable' \
+GOWORK=off go test -v -count=1 ./store/... ./vectorstore/...
 ```
 
 Run Mongo as a replica set. A single node is enough. `ReplaceSourceDocument` needs a transaction, so on a standalone server the source cases in the conformance suite fail. Give `rs.initiate` a second or two after the container starts, and keep `directConnection=true` in the DSN: the member is named `localhost:27017` inside the container, which your machine can't reach on that port.
 
 Each Postgres test gets a random `weave_test_*` schema with `search_path` pinned to it, and each Mongo test gets a random database. Both are dropped on cleanup, so parallel packages don't collide.
+
+The pgvector tests use `pgtest.SchemaWithVector`, which creates the `vector` extension once in `public` and pins `search_path` to the test schema, then `public`. The extension stays behind on purpose: dropping a schema that held it would drop it for every other test on that server. `TestAvailableOnPlainPostgres` runs on `WEAVE_TEST_POSTGRES_DSN` and needs that server to have no pgvector package, which the plain `postgres` image doesn't. `TestSearchFindsSmallTenantInLargeTable` fails on pgvector older than 0.8.0.
 
 ## Layout
 
@@ -86,7 +91,7 @@ Each Postgres test gets a random `weave_test_*` schema with `search_path` pinned
 | `api/` | Forge HTTP handlers |
 | `extension/` | the Forge extension |
 | `extension/contract/` | the Forge dashboard contract for the `weave` contributor, with `manifest.yaml` embedded |
-| `internal/` | `pgtest`, `mongotest`, `sqllike` (LIKE escaping) and `telemetry` (the tracer, span attribute keys, error naming, component kinds, metric families and the hook error throttle that the engine, the embedders and both hook registries share) |
+| `internal/` | `pgtest`, `mongotest`, `migrateretry` (the grove run on Postgres that retries replicas racing on grove's tracking tables, shared by `store/postgres` and `vectorstore/pgvector`), `sqllike` (LIKE escaping) and `telemetry` (the tracer, span attribute keys, error naming, component kinds, metric families and the hook error throttle that the engine, the embedders and both hook registries share) |
 | `docs/` | the documentation site |
 | `MIGRATION.md` | what the old templ dashboard did and where each piece went |
 

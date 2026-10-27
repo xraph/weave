@@ -56,17 +56,31 @@ func New(vq query.VectorQuerier, opts ...Option) *Store {
 // under the "content" meta key; remaining Metadata keys are stored alongside.
 // An entry without metadata["tenant_id"] is ErrTenantRequired, and nothing
 // in the batch is written.
+//
+// Each entry is written under the Fabriq tenant its tenant_id names, which
+// replaces any Fabriq tenant already on ctx: the engine labels every entry
+// with the weave tenant and sets no Fabriq tenant of its own. A tenant_id
+// Fabriq cannot accept as a tenant ID refuses the batch before anything is
+// written.
 func (s *Store) Upsert(ctx context.Context, entries []vectorstore.Entry) error {
 	if err := tenancy.VectorEntries(entries); err != nil {
 		return err
 	}
-	for _, e := range entries {
+	scoped := make([]context.Context, len(entries))
+	for i, e := range entries {
+		tctx, err := tenant.WithTenant(ctx, e.Metadata["tenant_id"])
+		if err != nil {
+			return fmt.Errorf("fabriqvec: upsert %q: set tenant: %w", e.ID, err)
+		}
+		scoped[i] = tctx
+	}
+	for i, e := range entries {
 		meta := make(map[string]any, len(e.Metadata)+1)
 		for k, v := range e.Metadata {
 			meta[k] = v
 		}
 		meta[contentKey] = e.Content
-		if err := s.vq.Upsert(ctx, s.entity, e.ID, e.Vector, meta); err != nil {
+		if err := s.vq.Upsert(scoped[i], s.entity, e.ID, e.Vector, meta); err != nil {
 			return fmt.Errorf("fabriqvec: upsert %q: %w", e.ID, err)
 		}
 	}

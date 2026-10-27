@@ -31,10 +31,13 @@ st := postgres.New(db)
 if err := st.Migrate(ctx); err != nil {
     log.Fatal(err)
 }
+if err := pgvector.Migrate(ctx, db, emb.Dimensions()); err != nil {
+    log.Fatal(err)
+}
 
 eng, err := engine.New(
     engine.WithStore(st),
-    engine.WithVectorStore(pgvector.New(db)),
+    engine.WithVectorStore(pgvector.New(db, pgvector.WithDimensions(emb.Dimensions()))),
     engine.WithEmbedder(emb),
     engine.WithChunker(chunker.NewRecursiveChunker()),
 )
@@ -85,30 +88,7 @@ The unique constraints are where `weave.ErrCollectionAlreadyExists` and `weave.E
 
 ## pgvector
 
-`vectorstore/pgvector` stores one row per chunk and searches with pgvector's cosine distance operator (`<=>`), returning `1 - distance` as the score.
-
-Nothing in Weave creates its table or the extension. Create them yourself, in your own migrations, before the first ingest:
-
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-
-CREATE TABLE IF NOT EXISTS weave_vectors (
-    id        TEXT PRIMARY KEY,
-    embedding vector(1536),
-    content   TEXT,
-    metadata  JSONB
-);
-```
-
-The column names and types come from the store's queries: `id` is the chunk ID and the upsert conflict target, `embedding` is the vector, `content` is the chunk text and `metadata` holds `collection_id`, `document_id`, `tenant_id`, `chunk_index` and the chunk's own metadata, filtered with `metadata->>'key'`. The `1536` is the output size of `text-embedding-3-small`; use your embedder's `Dimensions()`.
-
-Weave doesn't create a vector index either. For a large table, add one for cosine distance, for example `CREATE INDEX ON weave_vectors USING hnsw (embedding vector_cosine_ops);`.
-
-```go
-vs := pgvector.New(db)
-```
-
-`pgvector.WithTableName(name)` exists, but only `Search` reads the custom name. `Upsert`, `Delete` and `DeleteByMetadata` always write `weave_vectors`, so leave the table name at its default for now.
+The vector side has a page of its own: [pgvector](/docs/stores/pgvector). Weave migrates its table and indexes in a separate Grove group, `weave_pgvector`, through `pgvector.Migrate(ctx, db, dims)`, and `pgvector.Available` tells you beforehand whether the database can run it. The `weave` group on this page never creates an extension, so you can run it on a Postgres without pgvector.
 
 ## Forge extension
 
