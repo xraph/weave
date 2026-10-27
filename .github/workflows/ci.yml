@@ -110,6 +110,40 @@ jobs:
             exit 1
           fi
 
+  # ─── Sub-module security ────────────────────────────────────────────
+  # The shared workflow's Security job runs gosec and govulncheck from the
+  # root only, which skips embedder/nexus. Same tools and excludes here, on
+  # the latest 1.26 patch so stdlib fixes count.
+  submodules-security:
+    name: Sub-module security
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: embedder/nexus
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          check-latest: true
+          cache: true
+          cache-dependency-path: embedder/nexus/go.sum
+
+      - name: gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -exclude=G115 ./...
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
   # ─── Docs ───────────────────────────────────────────────────────────
   docs:
     name: Docs

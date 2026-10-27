@@ -104,10 +104,33 @@ jobs:
             PINNED=true
           fi
 
+          # Build each pinned sub-module the way a consumer gets it, before
+          # its tag is public: in a copy outside the repo, with the in-repo
+          # replace dropped, so the require has to resolve the root tag
+          # pushed above. GOPRIVATE sends that one module straight to GitHub
+          # (the proxy may not serve a minute-old tag yet) and skips the
+          # checksum database for it; everything else comes from the proxy.
+          for mod in embedder/nexus; do
+            echo "::group::Build $mod against github.com/xraph/weave@$TAG"
+            CHECK=$(mktemp -d)
+            cp -R "$mod/." "$CHECK"
+            (cd "$CHECK" && go mod edit -dropreplace=github.com/xraph/weave && \
+              GOPRIVATE=github.com/xraph/weave GOFLAGS=-mod=mod go build ./...)
+            echo "::endgroup::"
+          done
+
           for mod in embedder/nexus; do
             MOD_TAG="$mod/$TAG"
             if git rev-parse -q --verify "refs/tags/$MOD_TAG" > /dev/null; then
-              echo "$MOD_TAG already exists, skipping"
+              # A re-run finds the tag it pushed the first time, on an
+              # earlier pin commit with the same content. A tag whose
+              # sub-module differs from what we would tag now is never
+              # moved: fail and fix forward with the next patch.
+              if ! git diff --quiet "refs/tags/$MOD_TAG" HEAD -- "$mod"; then
+                echo "::error::$MOD_TAG already exists with a different $mod"
+                exit 1
+              fi
+              echo "$MOD_TAG already exists with this content, skipping"
               continue
             fi
             echo "Tagging $MOD_TAG"
