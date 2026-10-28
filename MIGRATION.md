@@ -314,7 +314,7 @@ Put the tenant on the context and drop them when you next touch that code.
   (delete by `document_id`, then upsert). It used to delete the whole
   collection's vectors first. Vectors of documents that aren't `ready`,
   including a keyed version that hasn't swapped in yet, are left alone.
-- Weave needs forge v1.13.1, grove v1.10.0 (with its three drivers) and, for
+- Weave needs forge v1.13.2, grove v1.10.0 (with its three drivers) and, for
   the Fabriq vector store, fabriq/core v1.10.0.
 - The nexus embedder is its own module,
   `github.com/xraph/weave/embedder/nexus`, tagged with the same version as
