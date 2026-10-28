@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/xraph/nexus v1.9.0
-	github.com/xraph/weave v1.8.1
+	github.com/xraph/weave v1.9.1
 	go.opentelemetry.io/otel v1.45.0
 )
 
