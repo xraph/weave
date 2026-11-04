@@ -20,6 +20,7 @@ import (
 	"github.com/xraph/vessel"
 
 	"github.com/xraph/weave/api"
+	"github.com/xraph/weave/chunker"
 	"github.com/xraph/weave/engine"
 	"github.com/xraph/weave/store"
 	mongostore "github.com/xraph/weave/store/mongo"
@@ -111,8 +112,11 @@ func (e *Extension) Register(fapp forge.App) error {
 	if err := checkStalledAfter(e.config); err != nil {
 		return err
 	}
-	opts := make([]engine.Option, 0, 4+len(e.engineOpts))
-	opts = append(opts, engine.WithConfig(e.config.engineConfig()), engine.WithRecovery(e.config.recoveryConfig()))
+	opts := make([]engine.Option, 0, 5+len(e.engineOpts))
+	// The recursive chunker, at the collection's own size and overlap
+	// (weave's defaults are 512 and 50), unless the host sets a chunker.
+	opts = append(opts, engine.WithConfig(e.config.engineConfig()), engine.WithRecovery(e.config.recoveryConfig()),
+		engine.WithChunker(chunker.NewRecursiveChunker()))
 	if l := e.Logger(); l != nil {
 		opts = append(opts, engine.WithLogger(l))
 	}

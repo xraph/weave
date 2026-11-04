@@ -27,7 +27,7 @@ eng, err := engine.New(
 | `WithStore(s)` | `store.Store` | none | Every collection and document call returns `weave.ErrNoStore` |
 | `WithVectorStore(v)` | `vectorstore.VectorStore` | none | `Ingest` and `ReindexCollection` return `ErrNoVectorStore`; `Retrieve` fails unless you set a retriever |
 | `WithEmbedder(e)` | `embedder.Embedder` | none | `Ingest` and `ReindexCollection` return `ErrNoEmbedder`; `Retrieve` fails unless you set a retriever |
-| `WithChunker(c)` | `chunker.Chunker` | none | `Ingest` returns `ErrNoChunker` |
+| `WithChunker(c)` | `chunker.Chunker` | none on the engine; the extension sets the recursive chunker | `Ingest` returns `ErrNoChunker` |
 | `WithLoader(l)` | `loader.Loader` | none | Content is chunked as it is |
 | `WithRetriever(r)` | `retriever.Retriever` | none | `Retrieve` embeds the query and searches the vector store directly |
 | `WithExtension(x)` | `ext.Extension` | none | Repeatable; adds a lifecycle hook |

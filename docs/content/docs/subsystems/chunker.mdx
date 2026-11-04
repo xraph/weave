@@ -20,7 +20,7 @@ type Options struct {
 }
 ```
 
-Set the chunker with `engine.WithChunker(c)`. There's no default: without one, `Ingest` returns `weave.ErrNoChunker`.
+Set the chunker with `engine.WithChunker(c)`. The engine has no default: without one, `Ingest` returns `weave.ErrNoChunker`. The Forge extension does set one, `chunker.NewRecursiveChunker()`, and any `WithEngineOption(engine.WithChunker(c))` you pass replaces it.
 
 On every ingest the engine passes the collection's `ChunkSize`, `ChunkOverlap` and `ChunkStrategy`. None of the built-in chunkers read `Strategy`, so the chunker you configured is the one that runs, whatever the collection's `ChunkStrategy` says.
 

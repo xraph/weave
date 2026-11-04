@@ -103,7 +103,7 @@ type Chunk struct {
     StartOffset  int               // byte offset in the loaded text
     EndOffset    int
     TokenCount   int               // estimate
-    Metadata     map[string]string // from the chunker
+    Metadata     map[string]string // the document's metadata, then the chunker's (the chunker wins a clash)
     ParentID     string            // not set by the built-in chunkers
     CreatedAt    time.Time
 }
