@@ -3,7 +3,7 @@ module github.com/xraph/weave/embedder/nexus
 go 1.26.0
 
 require (
-	github.com/xraph/nexus v1.9.0
+	github.com/xraph/nexus v1.9.2
 	github.com/xraph/weave v1.8.1
 	go.opentelemetry.io/otel v1.45.0
 )

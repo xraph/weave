@@ -57,8 +57,8 @@ github.com/xraph/grove/drivers/pgdriver v1.10.2 h1:LMMqPMPtj1OgA1npfqOWsknMQZbJ7
 github.com/xraph/grove/drivers/pgdriver v1.10.2/go.mod h1:aV31nDRM4Igx4vqwjM9u8v0A1URL8YyDyXCuABLOuPA=
 github.com/xraph/grove/drivers/sqlitedriver v1.10.2 h1:YLB9bGSxJnIquPN31etQGtrCWQfuuqfbcjk4eCkPT9Y=
 github.com/xraph/grove/drivers/sqlitedriver v1.10.2/go.mod h1:UlTGQQRp7VD4Rjj8HN6XjW1TMZl0iSNI4LApoQnChYQ=
-github.com/xraph/nexus v1.9.0 h1:2tG5sr2NTzeatuiwJPSE11uqBLdmkMBLQwsFDd+xzhs=
-github.com/xraph/nexus v1.9.0/go.mod h1:YR5t5EyNLQKECUcU9RumyvmxL9x97yNz2WS4AaPtciQ=
+github.com/xraph/nexus v1.9.2 h1:qx04ncAGQgzR2OFDuqpIt2cpYlLtaklFUCbZ/17LDW0=
+github.com/xraph/nexus v1.9.2/go.mod h1:eUzOSFmccFoKYtmiX/uR0rIBKjHNPrE94NYfXLWYhjg=
 github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 h1:ilQV1hzziu+LLM3zUTJ0trRztfwgjqKnBWNtSRkbmwM=
 github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78/go.mod h1:aL8wCCfTfSfmXjznFBSZNN13rSJjlIOI1fUNAtF7rmI=
 go.jetify.com/typeid/v2 v2.0.0-alpha.3 h1:T6RPx6bNl10lp0JN2Xz/XcgLZWSlVmL58Xqy9cgTCcc=
