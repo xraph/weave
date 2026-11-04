@@ -17,7 +17,7 @@ go get github.com/xraph/weave@latest
 
 ## Step 1: Create the engine
 
-The engine needs four things before it can ingest: a metadata store, a vector store, an embedder and a chunker. Nothing is filled in for you. If one is missing, `Ingest` returns `weave.ErrNoStore`, `ErrNoVectorStore`, `ErrNoEmbedder` or `ErrNoChunker`.
+The engine needs four things before it can ingest: a metadata store, a vector store, an embedder and a chunker. Nothing is filled in for you on the engine (the Forge extension does set a recursive chunker). If one is missing, `Ingest` returns `weave.ErrNoStore`, `ErrNoVectorStore`, `ErrNoEmbedder` or `ErrNoChunker`.
 
 For development, use the in-memory stores:
 

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	"github.com/xraph/weave"
 	"github.com/xraph/weave/chunk"
@@ -133,4 +134,18 @@ func vectorMetadata(ch *chunk.Chunk, sourceKey string) map[string]string {
 		delete(meta, "source_key")
 	}
 	return meta
+}
+
+// chunkMetadata is the metadata a chunk is stored with: the document's
+// metadata, so a search hit carries it, with the chunker's own keys winning a
+// clash. It returns a new map and edits neither input. vectorMetadata still
+// puts weave's own keys over the result.
+func chunkMetadata(doc, own map[string]string) map[string]string {
+	if len(doc) == 0 && len(own) == 0 {
+		return own
+	}
+	out := make(map[string]string, len(doc)+len(own))
+	maps.Copy(out, doc)
+	maps.Copy(out, own)
+	return out
 }

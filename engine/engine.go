@@ -640,7 +640,7 @@ func (e *Engine) embedChunks(ctx context.Context, span trace.Span, col *collecti
 			StartOffset:  cr.StartOffset,
 			EndOffset:    cr.EndOffset,
 			TokenCount:   cr.TokenCount,
-			Metadata:     cr.Metadata,
+			Metadata:     chunkMetadata(doc.Metadata, cr.Metadata),
 			CreatedAt:    time.Now().UTC(),
 		}
 	}
