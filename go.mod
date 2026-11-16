@@ -3,9 +3,9 @@ module github.com/xraph/weave
 go 1.26.0
 
 require (
-	github.com/jackc/pgx/v5 v5.12.0
-	github.com/xraph/fabriq/core v1.10.2
-	github.com/xraph/forge v1.13.6
+	github.com/jackc/pgx/v5 v5.13.0
+	github.com/xraph/fabriq/core v1.10.3
+	github.com/xraph/forge v1.13.7
 	github.com/xraph/go-utils v1.5.0
 	github.com/xraph/grove v1.10.2
 	github.com/xraph/grove/drivers/mongodriver v1.10.2
