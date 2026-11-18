@@ -34,6 +34,8 @@ func postRaw(h http.Handler, kind, intent, key, payload string) *httptest.Respon
 	body := `{"envelope":"v1","kind":"` + kind + `","contributor":"weave","intent":"` + intent + `",` +
 		`"csrf":"test","idempotencyKey":"` + key + `","payload":` + payload + `}`
 	req := httptest.NewRequestWithContext(weave.WithTenant(context.Background(), "t1"), http.MethodPost, "/api/dashboard/v1", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
